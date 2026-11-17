@@ -1,0 +1,3424 @@
+import { createFileRoute, Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { useState, useRef, useEffect, useCallback } from "react";
+import {
+  DollarSign,
+  Zap,
+  Video,
+  Megaphone,
+  ArrowLeft,
+  Upload,
+  CheckCircle2,
+  FileVideo,
+  Sparkles,
+  Play,
+  Layers,
+  Check,
+  ChevronRight,
+  Info,
+  Clock,
+  ShieldCheck,
+  CreditCard,
+  AlertCircle,
+  Image as ImageIcon,
+  FileImage,
+  RefreshCw,
+  X,
+  Trash2,
+  Plus,
+  RotateCcw,
+  SlidersHorizontal,
+} from "lucide-react";
+import { toast } from "sonner";
+import { Logo } from "@/components/videohub/Logo";
+import { ThemeToggle } from "@/components/videohub/ThemeToggle";
+import { BottomNav } from "@/components/videohub/BottomNav";
+import { Footer } from "@/components/videohub/Footer";
+import { useAuth } from "@/lib/auth-context";
+import { api } from "@/lib/api";
+import {
+  recordNewVideoUpload,
+  fetchUploadedVideos,
+  validateVideoFileForUpload,
+  uploadSingleBulkVideoItem,
+  getAvailableCategories,
+  type VideoType,
+  type ContentType,
+  type UploadedVideo,
+  VIDEO_CATEGORIES,
+} from "@/lib/video-service";
+import {
+  captureVideoThumbnail,
+  captureAndUploadThumbnail,
+  getCategoryFallbackThumbnail,
+  resolveVideoThumbnail,
+} from "@/lib/thumbnail-service";
+import { recordNewImageUpload, type UploadedImage } from "@/lib/image-service";
+import {
+  IMAGE_FILTERS,
+  getImageFilterCss,
+  renderFilteredImageToFile,
+  cropAndResizeTo9to16,
+  type ImageFilterId,
+} from "@/lib/image-effects";
+import {
+  IMAGE_MUSIC_LIBRARY,
+  playMusicPreview,
+  stopMusicPreview,
+  setMusicPreviewVolume,
+  type SelectedImageMusic,
+} from "@/lib/image-music-library";
+import { initiatePremiumVideoPayment, initiateAdsPromotionPayment } from "@/lib/razorpay-service";
+import { getUserWallet, type UserWallet } from "@/lib/ledger-service";
+
+export type MainUploadMode = "free" | "premium" | "ad_promotion" | "image" | "bulk" | null;
+export type VideoFormatChoice = "short" | "long";
+
+interface UploadSearch {
+  mode?: MainUploadMode;
+  format?: VideoFormatChoice;
+}
+
+export const Route = createFileRoute("/upload")({
+  validateSearch: (search: Record<string, unknown>): UploadSearch => {
+    const rawMode = search["mode"];
+    const rawFormat = search["format"];
+    const validModes: MainUploadMode[] = ["free", "premium", "ad_promotion", "image", "bulk"];
+    const validFormats: VideoFormatChoice[] = ["short", "long"];
+
+    const isModeValid =
+      typeof rawMode === "string" && validModes.includes(rawMode as MainUploadMode);
+    const isFormatValid =
+      typeof rawFormat === "string" && validFormats.includes(rawFormat as VideoFormatChoice);
+
+    const result: UploadSearch = {
+      mode: isModeValid ? (rawMode as MainUploadMode) : null,
+    };
+    if (isFormatValid) {
+      result.format = rawFormat as VideoFormatChoice;
+    }
+    return result;
+  },
+  head: () => ({
+    meta: [
+      { title: "Upload Studio — FaceTube" },
+      {
+        name: "description",
+        content:
+          "Upload Free Videos, Sponsor Videos, Ad campaigns, and high-resolution Images on FaceTube.",
+      },
+      { property: "og:title", content: "Upload Studio — FaceTube" },
+    ],
+  }),
+  component: UploadStudioPage,
+});
+
+function UploadStudioPage() {
+  const search = useSearch({ from: "/upload" });
+  const navigate = useNavigate();
+  const { user, profile, dbUser } = useAuth();
+
+  const activeMode = search.mode || null;
+  const initialFormat = search.format || "short";
+
+  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const [wallet, setWallet] = useState<UserWallet | null>(null);
+
+  const refreshWallet = useCallback(() => {
+    getUserWallet(userId).then(setWallet).catch(console.error);
+  }, [userId]);
+
+  useEffect(() => {
+    refreshWallet();
+  }, [refreshWallet]);
+
+  const setMode = (mode: MainUploadMode, format?: VideoFormatChoice) => {
+    navigate({
+      to: "/upload",
+      search: mode ? { mode, ...(format ? { format } : {}) } : {},
+    });
+  };
+
+  return (
+    <div className="min-h-screen bg-background text-foreground antialiased selection:bg-brand selection:text-white">
+      {/* Studio Top Navigation Bar */}
+      <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur-md">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
+          <div className="flex items-center gap-3">
+            <Link
+              to="/"
+              className="grid h-9 w-9 place-items-center rounded-full text-muted-foreground transition hover:bg-secondary hover:text-foreground active:scale-95"
+              title="Return to Feed"
+              aria-label="Back to home"
+            >
+              <ArrowLeft className="h-5 w-5" />
+            </Link>
+
+            <div className="flex items-center gap-2">
+              <Logo size={32} />
+              <span className="hidden rounded-full border border-brand/30 bg-brand/10 px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wider text-brand sm:inline-flex">
+                Creator Studio
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 sm:gap-3">
+            {activeMode && (
+              <button
+                type="button"
+                onClick={() => setMode(null)}
+                className="hidden items-center gap-1.5 rounded-full border border-border bg-secondary/60 px-3 py-1.5 text-xs font-semibold text-foreground transition hover:bg-secondary sm:inline-flex"
+              >
+                <Layers className="h-3.5 w-3.5" />
+                All 4 Upload Options
+              </button>
+            )}
+
+            <Link
+              to="/wallet-balance"
+              className="hidden items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-bold text-emerald-400 sm:inline-flex"
+            >
+              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+              Wallet: ₹{wallet ? wallet.balance.toFixed(2) : "4,280.50"}
+            </Link>
+
+            <ThemeToggle showLabelsOnWide={false} />
+
+            <Link
+              to="/dashboard"
+              className="rounded-full border border-border bg-secondary/40 px-3.5 py-1.5 text-xs font-semibold text-foreground transition hover:bg-secondary"
+            >
+              Dashboard
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Studio Viewport */}
+      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-10 pb-28 lg:pb-16">
+        {!activeMode ? (
+          <FourOptionsSelectionView onSelect={setMode} wallet={wallet} />
+        ) : activeMode === "bulk" ? (
+          <BulkVideoUploadView onBack={() => setMode(null)} onUploaded={refreshWallet} />
+        ) : activeMode === "free" ? (
+          <FreeVideoUploadView
+            initialFormat={initialFormat}
+            onBack={() => setMode(null)}
+            onUploaded={refreshWallet}
+          />
+        ) : activeMode === "premium" ? (
+          <PremiumVideoUploadView
+            initialFormat={initialFormat}
+            onBack={() => setMode(null)}
+            onUploaded={refreshWallet}
+          />
+        ) : activeMode === "ad_promotion" ? (
+          <AdPromotionUploadView onBack={() => setMode(null)} onUploaded={refreshWallet} />
+        ) : (
+          <ImageUploadView onBack={() => setMode(null)} />
+        )}
+
+        {/* Preserved FaceTube Footer */}
+        <Footer />
+      </main>
+
+      {/* Mobile Bottom Navigation */}
+      <BottomNav />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* REQUIREMENT 1: FOUR MAIN OPTIONS VIEW & TOTAL ADS EARNING                  */
+/* Exact Labels: "Free", "Premium", "Ad Promotion", "Image Upload"            */
+/* -------------------------------------------------------------------------- */
+function FourOptionsSelectionView({
+  onSelect,
+  wallet,
+}: {
+  onSelect: (mode: NonNullable<MainUploadMode>, format?: VideoFormatChoice) => void;
+  wallet?: UserWallet | null;
+}) {
+  return (
+    <div className="space-y-8">
+      {/* Studio Header Banner with Req 1: Total Ads Earning */}
+      <div className="relative overflow-hidden rounded-3xl border border-border bg-gradient-to-br from-secondary/80 via-card to-background p-6 sm:p-10 shadow-card">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -right-20 -top-20 h-64 w-64 rounded-full bg-brand/10 blur-3xl"
+        />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute -bottom-20 -left-20 h-64 w-64 rounded-full bg-emerald-500/10 blur-3xl"
+        />
+
+        <div className="relative flex flex-col md:flex-row md:items-center justify-between gap-6">
+          <div className="max-w-2xl">
+            <div className="inline-flex items-center gap-2 rounded-full border border-brand/30 bg-brand/10 px-3 py-1 text-xs font-bold text-brand">
+              <Sparkles className="h-3.5 w-3.5" />
+              FaceTube Publishing Studio
+            </div>
+            <h1 className="mt-3 text-2xl font-black tracking-tight sm:text-4xl text-foreground">
+              Select Upload Option
+            </h1>
+            <p className="mt-2 text-sm leading-relaxed text-muted-foreground sm:text-base">
+              Choose from the four dedicated publishing pathways below. Publish free videos with ₹0
+              fee, monetized sponsor content with ₹6 verified share, launch targeted Ad campaigns,
+              or upload 9:16 vertical image assets.
+            </p>
+          </div>
+
+          {/* Requirement 1: Total Ads Earning Metric Card */}
+          <div className="shrink-0 rounded-2xl border border-emerald-500/30 bg-gradient-to-b from-emerald-500/15 via-card to-card p-5 shadow-sm text-left md:text-right min-w-[210px]">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center md:justify-end gap-1.5">
+              <DollarSign className="h-3.5 w-3.5" />
+              Total Ads Earning
+            </span>
+            <div className="text-2xl sm:text-3xl font-black text-emerald-400 mt-1">
+              ₹{(wallet?.adsenseIncome ?? 0).toFixed(2)}
+            </div>
+            <p className="text-[10px] text-muted-foreground mt-0.5">
+              Cumulative AdSense & promotion income
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Four Main Options Grid */}
+      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-4">
+        {/* OPTION 1: Free */}
+        <div className="group relative flex flex-col justify-between overflow-hidden rounded-3xl border border-sky-500/30 bg-gradient-to-b from-sky-500/10 via-card to-card p-6 shadow-card hover:border-sky-500/60 hover:shadow-lg transition-all">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-sky-500/20 text-sky-400 border border-sky-500/30 shadow-inner">
+                <Video className="h-6 w-6" />
+              </div>
+              {/* Clear Free Badge */}
+              <span className="rounded-full border border-sky-500/40 bg-sky-500/15 px-3 py-1 text-xs font-black uppercase text-sky-400">
+                Free · ₹0
+              </span>
+            </div>
+
+            <div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-sky-400">
+                Option 1
+              </div>
+              <h2 className="mt-1 text-xl font-black text-foreground group-hover:text-sky-400 transition-colors">
+                Free
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                Standard public video uploads. Zero upload fee (₹0) and no payment required.
+              </p>
+            </div>
+
+            {/* Sub-options pills */}
+            <div className="rounded-2xl border border-border/80 bg-background/60 p-3 space-y-2">
+              <div className="text-[11px] font-bold text-foreground flex items-center gap-1.5">
+                <CheckCircle2 className="h-3.5 w-3.5 text-sky-400" />
+                Supported Formats:
+              </div>
+              <div className="grid grid-cols-1 gap-1.5 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => onSelect("free", "short")}
+                  className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-2.5 py-1.5 text-left text-sky-300 hover:bg-sky-500/20 transition flex items-center justify-between"
+                >
+                  <span>Free Short Video</span>
+                  <ChevronRight className="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSelect("free", "long")}
+                  className="rounded-xl border border-sky-500/30 bg-sky-500/10 px-2.5 py-1.5 text-left text-sky-300 hover:bg-sky-500/20 transition flex items-center justify-between"
+                >
+                  <span>Free Long Video</span>
+                  <ChevronRight className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-6">
+            <button
+              type="button"
+              onClick={() => onSelect("free", "short")}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-sky-600 px-4 py-3 text-xs font-bold text-white shadow-sm hover:bg-sky-500 transition active:scale-95"
+            >
+              <span>Upload Free (₹0)</span>
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* OPTION 2: Sponsor */}
+        <div className="group relative flex flex-col justify-between overflow-hidden rounded-3xl border border-amber-500/40 bg-gradient-to-b from-amber-500/10 via-card to-card p-6 shadow-card hover:border-amber-500/70 hover:shadow-lg transition-all">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/30 shadow-inner">
+                <Sparkles className="h-6 w-6" />
+              </div>
+              {/* Clear Sponsor Badge */}
+              <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-black uppercase text-amber-400">
+                Sponsor · ₹6
+              </span>
+            </div>
+
+            <div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+                Option 2
+              </div>
+              <h2 className="mt-1 text-xl font-black text-foreground group-hover:text-amber-400 transition-colors">
+                Sponsor
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                ₹6 verified payment for sponsor monetized content with audit verification.
+              </p>
+            </div>
+
+            {/* Sub-options pills */}
+            <div className="rounded-2xl border border-border/80 bg-background/60 p-3 space-y-2">
+              <div className="text-[11px] font-bold text-foreground flex items-center gap-1.5">
+                <CheckCircle2 className="h-3.5 w-3.5 text-amber-400" />
+                Supported Formats:
+              </div>
+              <div className="grid grid-cols-1 gap-1.5 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => onSelect("premium", "short")}
+                  className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-left text-amber-300 hover:bg-amber-500/20 transition flex items-center justify-between"
+                >
+                  <span>Sponsor Short Video</span>
+                  <ChevronRight className="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSelect("premium", "long")}
+                  className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-left text-amber-300 hover:bg-amber-500/20 transition flex items-center justify-between"
+                >
+                  <span>Sponsor Long Video</span>
+                  <ChevronRight className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-6">
+            <button
+              type="button"
+              onClick={() => onSelect("premium", "short")}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-amber-600 px-4 py-3 text-xs font-bold text-white shadow-sm hover:bg-amber-500 transition active:scale-95"
+            >
+              <span>Upload Sponsor (₹6)</span>
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* OPTION 3: Ad */}
+        <div className="group relative flex flex-col justify-between overflow-hidden rounded-3xl border border-emerald-500/30 bg-gradient-to-b from-emerald-500/10 via-card to-card p-6 shadow-card hover:border-emerald-500/60 hover:shadow-lg transition-all">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shadow-inner">
+                <Megaphone className="h-6 w-6" />
+              </div>
+              <span className="rounded-full border border-emerald-500/40 bg-emerald-500/15 px-3 py-1 text-xs font-black uppercase text-emerald-400">
+                Ad
+              </span>
+            </div>
+
+            <div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
+                Option 3
+              </div>
+              <h2 className="mt-1 text-xl font-black text-foreground group-hover:text-emerald-400 transition-colors">
+                Ad
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                Targeted algorithmic boost for Short or Long videos. Verified payment campaign.
+              </p>
+            </div>
+
+            {/* Configured Pricing Pills */}
+            <div className="rounded-2xl border border-border/80 bg-background/60 p-3 space-y-2">
+              <div className="text-[11px] font-bold text-foreground flex items-center justify-between">
+                <span>Configured Plans:</span>
+                <span className="text-[10px] text-emerald-400 font-mono">10% Sponsor</span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5 text-[11px] font-semibold">
+                <div className="rounded-lg bg-emerald-500/10 px-2 py-1 text-emerald-300">
+                  7 Days = ₹100
+                </div>
+                <div className="rounded-lg bg-emerald-500/10 px-2 py-1 text-emerald-300">
+                  15 Days = ₹200
+                </div>
+                <div className="rounded-lg bg-emerald-500/10 px-2 py-1 text-emerald-300">
+                  1 Month = ₹300
+                </div>
+                <div className="rounded-lg bg-emerald-500/10 px-2 py-1 text-emerald-300">
+                  1 Year = ₹3,000
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="pt-6">
+            <button
+              type="button"
+              onClick={() => onSelect("ad_promotion")}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-600 px-4 py-3 text-xs font-bold text-white shadow-sm hover:bg-emerald-500 transition active:scale-95"
+            >
+              <span>Upload Ad</span>
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* OPTION 4: Image Upload */}
+        <div className="group relative flex flex-col justify-between overflow-hidden rounded-3xl border border-teal-500/30 bg-gradient-to-b from-teal-500/10 via-card to-card p-6 shadow-card hover:border-teal-500/60 hover:shadow-lg transition-all">
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-teal-500/20 text-teal-400 border border-teal-500/30 shadow-inner">
+                <ImageIcon className="h-6 w-6" />
+              </div>
+              {/* Clear Image Upload Badge */}
+              <span className="rounded-full border border-teal-500/40 bg-teal-500/15 px-3 py-1 text-xs font-black uppercase text-teal-400">
+                Image Upload
+              </span>
+            </div>
+
+            <div>
+              <div className="text-[11px] font-bold uppercase tracking-wider text-teal-400">
+                Option 4
+              </div>
+              <h2 className="mt-1 text-xl font-black text-foreground group-hover:text-teal-400 transition-colors">
+                Image Upload
+              </h2>
+              <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                Upload image assets independently: thumbnails, channel graphics, and photo posts.
+              </p>
+            </div>
+
+            {/* Supported formats */}
+            <div className="rounded-2xl border border-border/80 bg-background/60 p-3 space-y-2">
+              <div className="text-[11px] font-bold text-foreground flex items-center gap-1.5">
+                <CheckCircle2 className="h-3.5 w-3.5 text-teal-400" />
+                Supported Formats:
+              </div>
+              <div className="flex flex-wrap gap-1.5 text-xs font-mono font-semibold">
+                <span className="rounded-lg bg-teal-500/10 px-2 py-0.5 text-teal-300">
+                  JPG / JPEG
+                </span>
+                <span className="rounded-lg bg-teal-500/10 px-2 py-0.5 text-teal-300">PNG</span>
+                <span className="rounded-lg bg-teal-500/10 px-2 py-0.5 text-teal-300">WEBP</span>
+              </div>
+              <p className="text-[10px] text-muted-foreground">
+                Appears in community stream after every 5 videos.
+              </p>
+            </div>
+          </div>
+
+          <div className="pt-6">
+            <button
+              type="button"
+              onClick={() => onSelect("image")}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-teal-600 px-4 py-3 text-xs font-bold text-white shadow-sm hover:bg-teal-500 transition active:scale-95"
+            >
+              <span>Upload Image</span>
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* REQUIREMENT 10: BULK VIDEO UPLOAD (Shorts & Long Videos) */}
+      <div className="relative overflow-hidden rounded-3xl border border-sky-500/30 bg-gradient-to-r from-sky-500/15 via-card to-card p-6 sm:p-8 shadow-card hover:border-sky-500/50 transition">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-5">
+          <div className="flex items-start gap-4">
+            <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-sky-500/20 text-sky-400 border border-sky-500/30 shadow-inner">
+              <Layers className="h-6 w-6" />
+            </div>
+            <div>
+              <div className="inline-flex items-center gap-1.5 rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-sky-400">
+                Bulk Video Upload · Shorts & Long Videos
+              </div>
+              <h3 className="text-base sm:text-xl font-black text-foreground mt-1">
+                Upload Multiple Videos in One Operation
+              </h3>
+              <p className="text-xs text-muted-foreground mt-1 max-w-2xl leading-relaxed">
+                Batch select multiple files, customize each video&apos;s title, format (Shorts 9:16
+                or Long 16:9), category, visibility, and thumbnail, with real-time progress
+                indicators and individual retry for failed uploads.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => onSelect("bulk")}
+            className="shrink-0 inline-flex items-center justify-center gap-2 rounded-2xl bg-sky-600 px-5 py-3 text-xs font-bold text-white shadow-sm hover:bg-sky-500 transition active:scale-95"
+          >
+            <span>Launch Bulk Studio (₹0)</span>
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* REQUIREMENT 10: BULK VIDEO UPLOAD VIEW (Shorts & Long Videos · Fee: ₹0)    */
+/* -------------------------------------------------------------------------- */
+export interface BulkVideoItem {
+  id: string;
+  file: File;
+  title: string;
+  description: string;
+  category: string;
+  contentType: ContentType; // "short" | "long"
+  visibility: "public" | "unlisted" | "private";
+  videoType: VideoType; // "free" | "premium"
+  previewUrl: string;
+  detectedDuration: string;
+  capturedThumbnail: string;
+  customThumbnailFile?: File | null | undefined;
+  customThumbnailPreview?: string | undefined;
+  status: "queued" | "uploading" | "success" | "error";
+  progress: number;
+  errorMessage?: string | undefined;
+  publishedVideo?: UploadedVideo | undefined;
+}
+
+export function BulkVideoUploadView({
+  onBack,
+  onUploaded,
+  initialFiles,
+}: {
+  onBack: () => void;
+  onUploaded?: (() => void) | undefined;
+  initialFiles?: File[] | undefined;
+}) {
+  const { user, profile, dbUser } = useAuth();
+  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const creatorName =
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Alex Rivera";
+
+  const [queue, setQueue] = useState<BulkVideoItem[]>([]);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [categories, setCategories] = useState<string[]>([...VIDEO_CATEGORIES]);
+  const [batchCategory, setBatchCategory] = useState<string>("Entertainment");
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isProcessingRef = useRef(false);
+  const notifiedItemIdsRef = useRef<Set<string>>(new Set());
+
+  // Load available categories asynchronously
+  useEffect(() => {
+    getAvailableCategories()
+      .then((cats) => {
+        if (cats && cats.length > 0) {
+          setCategories(cats);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const addFilesToQueue = useCallback((fileList: FileList | File[]) => {
+    const files = Array.from(fileList);
+    const newItems: BulkVideoItem[] = [];
+
+    for (const file of files) {
+      const val = validateVideoFileForUpload(file);
+      if (!val.valid) {
+        toast.error(val.error || `"${file.name}" skipped.`);
+        continue;
+      }
+
+      const itemId = `bulk-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      const cleanTitle = file.name.replace(/\.[^/.]+$/, "");
+      const isShortHint =
+        cleanTitle.toLowerCase().includes("short") || cleanTitle.toLowerCase().includes("reel");
+
+      const previewUrl = URL.createObjectURL(file);
+      const item: BulkVideoItem = {
+        id: itemId,
+        file,
+        title: cleanTitle,
+        description: "",
+        category: "Entertainment",
+        contentType: isShortHint ? "short" : "long",
+        visibility: "public",
+        videoType: "free",
+        previewUrl,
+        detectedDuration: isShortHint ? "0:45" : "12:30",
+        capturedThumbnail: "",
+        status: "queued",
+        progress: 0,
+      };
+
+      // Asynchronously extract snapshot thumbnail frame from video
+      captureVideoThumbnail(file)
+        .then((thumb) => {
+          if (thumb) {
+            setQueue((prev) =>
+              prev.map((it) => (it.id === itemId ? { ...it, capturedThumbnail: thumb } : it)),
+            );
+          }
+        })
+        .catch(() => {});
+
+      // Asynchronously detect duration and adjust content type
+      const tempVideo = document.createElement("video");
+      tempVideo.preload = "metadata";
+      tempVideo.src = previewUrl;
+      tempVideo.onloadedmetadata = () => {
+        const sec = Math.round(tempVideo.duration);
+        if (!isNaN(sec) && sec > 0) {
+          const m = Math.floor(sec / 60);
+          const s = sec % 60;
+          const durStr = `${m}:${s.toString().padStart(2, "0")}`;
+          const detectedType: ContentType = sec <= 60 ? "short" : "long";
+          setQueue((prev) =>
+            prev.map((it) =>
+              it.id === itemId
+                ? { ...it, detectedDuration: durStr, contentType: detectedType }
+                : it,
+            ),
+          );
+        }
+      };
+
+      newItems.push(item);
+    }
+
+    if (newItems.length > 0) {
+      setQueue((prev) => [...prev, ...newItems]);
+      toast.success(
+        `Added ${newItems.length} video${newItems.length > 1 ? "s" : ""} to upload queue.`,
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    if (initialFiles && initialFiles.length > 0) {
+      addFilesToQueue(initialFiles);
+    }
+  }, [initialFiles, addFilesToQueue]);
+
+  const handleFilePickerChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      addFilesToQueue(e.target.files);
+      e.target.value = "";
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      addFilesToQueue(e.dataTransfer.files);
+    }
+  };
+
+  // Upload an individual video item from queue
+  const uploadVideoItem = async (itemId: string): Promise<boolean> => {
+    let targetItem: BulkVideoItem | undefined;
+    setQueue((prev) => {
+      targetItem = prev.find((it) => it.id === itemId);
+      return prev.map((it) =>
+        it.id === itemId
+          ? { ...it, status: "uploading", progress: 15, errorMessage: undefined }
+          : it,
+      );
+    });
+
+    if (!targetItem) return false;
+    const item = targetItem as BulkVideoItem;
+    // Prevent duplicate upload if already successful
+    if (item.status === "success") return true;
+
+    try {
+      // 1. Upload video file to server storage via existing production API
+      setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 35 } : it)));
+      const uploadRes = await api.uploads.uploadVideo(item.file);
+      if (!uploadRes || !uploadRes.url) {
+        const serverError =
+          (uploadRes as any)?.error ||
+          (uploadRes as any)?.message ||
+          (uploadRes as any)?.msg ||
+          "Server storage upload failed without a valid video URL.";
+        throw new Error(serverError);
+      }
+
+      setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 65 } : it)));
+
+      // 2. Persist custom thumbnail or video snapshot frame or category fallback
+      let posterUrl = "";
+      if (item.customThumbnailFile) {
+        try {
+          const imgRes = await api.uploads.uploadImage(item.customThumbnailFile);
+          if (imgRes && imgRes.url) {
+            posterUrl = imgRes.url;
+          }
+        } catch (_imgErr) {
+          // fallback to snapshot
+        }
+      }
+      if (!posterUrl) {
+        try {
+          posterUrl = await captureAndUploadThumbnail(item.file, item.category);
+        } catch (_e) {
+          posterUrl = item.capturedThumbnail || getCategoryFallbackThumbnail(item.category);
+        }
+      }
+
+      setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 80 } : it)));
+
+      let published: UploadedVideo;
+
+      // 3. If video is marked as premium (Sponsor), initiate verified payment
+      if (item.videoType === "premium") {
+        setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 85 } : it)));
+        let paymentId: string | undefined;
+        await new Promise<void>((resolve, reject) => {
+          initiatePremiumVideoPayment({
+            userId,
+            userName: creatorName,
+            videoTitle: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
+            description: item.description.trim(),
+            videoUrl: uploadRes.url,
+            thumbnailUrl: posterUrl,
+            contentType: item.contentType,
+            category: item.category,
+            duration: item.detectedDuration || (item.contentType === "short" ? "0:45" : "12:30"),
+            directReferrerId: profile?.referral_code || dbUser?.referral_code || null,
+            onSuccess: (res: unknown) => {
+              if (typeof res === "string") {
+                paymentId = res;
+              }
+              resolve();
+            },
+            onFailure: (errMsg: string) => reject(new Error(errMsg || "Payment failed")),
+            onCancel: () => reject(new Error("Payment was cancelled by user")),
+          });
+        });
+
+        published = {
+          id: `vid-${Date.now()}`,
+          userId,
+          creatorName,
+          title: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
+          description: item.description.trim(),
+          videoUrl: uploadRes.url,
+          thumbnailUrl: posterUrl,
+          videoType: "premium",
+          contentType: item.contentType,
+          category: item.category,
+          duration: item.detectedDuration || (item.contentType === "short" ? "0:45" : "12:30"),
+          views: 0,
+          likes: 0,
+          paymentStatus: "paid",
+          ...(paymentId !== undefined ? { paymentId } : {}),
+          paymentAmount: 6,
+          isPromoted: false,
+          visibility: item.visibility,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+      } else {
+        // Free video: persist video record to database
+        published = await recordNewVideoUpload({
+          userId,
+          creatorName,
+          title: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
+          description: item.description.trim(),
+          videoUrl: uploadRes.url,
+          thumbnailUrl: posterUrl,
+          videoType: "free",
+          contentType: item.contentType,
+          category: item.category,
+          duration: item.detectedDuration || (item.contentType === "short" ? "0:45" : "12:30"),
+          paymentStatus: "not_required",
+          paymentAmount: 0,
+          visibility: item.visibility,
+        });
+      }
+
+      setQueue((prev) =>
+        prev.map((it) =>
+          it.id === itemId
+            ? { ...it, status: "success", progress: 100, publishedVideo: published }
+            : it,
+        ),
+      );
+      if (!notifiedItemIdsRef.current.has(itemId)) {
+        notifiedItemIdsRef.current.add(itemId);
+        if (item.videoType === "premium") {
+          toast.success("🎉 Your Video Promotion Was Successful!", {
+            id: `promo-success-${itemId}`,
+            description:
+              "Your video has been uploaded successfully and your promotion is now active. Thank you for promoting on FaceTube! ❤️",
+            duration: 8000,
+          });
+        } else {
+          toast.success(
+            `Published: "${item.title}" (${item.contentType === "short" ? "Short" : "Long"})`,
+            { id: `upload-success-${itemId}` },
+          );
+        }
+      }
+      onUploaded?.();
+      return true;
+    } catch (err: any) {
+      console.error("Bulk upload item error:", err);
+      const msg = err?.message || "Failed to upload video.";
+      setQueue((prev) =>
+        prev.map((it) =>
+          it.id === itemId ? { ...it, status: "error", progress: 0, errorMessage: msg } : it,
+        ),
+      );
+      return false;
+    }
+  };
+
+  // Process all queued items sequentially (skips already successful items to prevent duplicates)
+  const handleProcessQueue = async () => {
+    if (isProcessingRef.current) return;
+    const queuedItems = queue.filter((it) => it.status === "queued");
+    if (queuedItems.length === 0) {
+      toast.info("No pending videos in queue to upload.");
+      return;
+    }
+
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+
+    try {
+      for (const item of queuedItems) {
+        await uploadVideoItem(item.id);
+      }
+    } finally {
+      isProcessingRef.current = false;
+      setIsProcessing(false);
+    }
+  };
+
+  // Retry an individual failed item without touching completed items
+  const handleRetryItem = async (itemId: string) => {
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+
+    try {
+      await uploadVideoItem(itemId);
+    } finally {
+      isProcessingRef.current = false;
+      setIsProcessing(false);
+    }
+  };
+
+  // Retry all failed items
+  const handleRetryAllFailed = async () => {
+    if (isProcessingRef.current) return;
+    const failedItems = queue.filter((it) => it.status === "error");
+    if (failedItems.length === 0) return;
+
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+
+    try {
+      for (const item of failedItems) {
+        await uploadVideoItem(item.id);
+      }
+    } finally {
+      isProcessingRef.current = false;
+      setIsProcessing(false);
+    }
+  };
+
+  const updateItem = (id: string, updates: Partial<BulkVideoItem>) => {
+    setQueue((prev) => prev.map((it) => (it.id === id ? { ...it, ...updates } : it)));
+  };
+
+  const removeItem = (id: string) => {
+    setQueue((prev) => prev.filter((it) => it.id !== id));
+  };
+
+  const clearCompleted = () => {
+    setQueue((prev) => prev.filter((it) => it.status !== "success"));
+  };
+
+  const clearAll = () => {
+    if (queue.some((it) => it.status === "uploading")) {
+      toast.error("Cannot clear queue while uploads are in progress.");
+      return;
+    }
+    setQueue([]);
+  };
+
+  const setAllContentType = (ct: ContentType) => {
+    setQueue((prev) =>
+      prev.map((it) => (it.status === "queued" ? { ...it, contentType: ct } : it)),
+    );
+    toast.info(
+      `Updated all pending items to ${ct === "short" ? "Shorts (9:16)" : "Long Videos (16:9)"}.`,
+    );
+  };
+
+  const setAllCategoryToAll = (cat: string) => {
+    setBatchCategory(cat);
+    setQueue((prev) => prev.map((it) => (it.status === "queued" ? { ...it, category: cat } : it)));
+    toast.info(`Set category to "${cat}" for all pending videos.`);
+  };
+
+  const queuedCount = queue.filter((it) => it.status === "queued").length;
+  const uploadingCount = queue.filter((it) => it.status === "uploading").length;
+  const completedCount = queue.filter((it) => it.status === "success").length;
+  const errorCount = queue.filter((it) => it.status === "error").length;
+  const totalCount = queue.length;
+
+  return (
+    <div className="space-y-6">
+      {/* Header Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="grid h-9 w-9 place-items-center rounded-full border border-border bg-secondary/60 text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-sky-400">
+              Creator Studio · Batch Mode
+            </div>
+            <h1 className="text-xl sm:text-2xl font-black text-foreground">Bulk Video Upload</h1>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-bold text-sky-400">
+            Fee: ₹0 · Free Publishing
+          </span>
+          <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-xs font-bold text-purple-400">
+            Shorts & Long Videos
+          </span>
+        </div>
+      </div>
+
+      {/* Multiple Files Picker Dropzone */}
+      <div
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={handleDrop}
+        onClick={() => fileInputRef.current?.click()}
+        className="group relative cursor-pointer rounded-3xl border-2 border-dashed border-border bg-card p-8 text-center transition hover:border-sky-500/60 hover:bg-sky-500/5 shadow-card"
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="video/mp4,video/webm,video/ogg,video/quicktime,.mp4,.webm,.ogg,.mov,.m4v"
+          onChange={handleFilePickerChange}
+          className="hidden"
+        />
+
+        <div className="space-y-3">
+          <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-sky-500/10 text-sky-400 border border-sky-500/20 group-hover:scale-105 transition-transform">
+            <Layers className="h-7 w-7" />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-foreground">
+              Click to select multiple video files or drag and drop here
+            </h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Select multiple Shorts and Long videos (MP4, WebM, OGG, MOV up to 150 MB each)
+            </p>
+          </div>
+          <div className="pt-1">
+            <span className="inline-flex items-center gap-1.5 rounded-xl border border-sky-500/30 bg-sky-500/10 px-3.5 py-1.5 text-xs font-bold text-sky-400 shadow-sm">
+              <Plus className="h-3.5 w-3.5" />
+              Add Video Files
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Queue Toolbar & Status Summary */}
+      {totalCount > 0 && (
+        <div className="rounded-2xl border border-border bg-card p-4 sm:p-5 space-y-4 shadow-card">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2 text-xs font-bold">
+              <span className="rounded-lg bg-secondary px-2.5 py-1 text-foreground">
+                Total: {totalCount}
+              </span>
+              {queuedCount > 0 && (
+                <span className="rounded-lg bg-sky-500/15 text-sky-400 px-2.5 py-1">
+                  Ready: {queuedCount}
+                </span>
+              )}
+              {uploadingCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-lg bg-amber-500/15 text-amber-400 px-2.5 py-1">
+                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  Uploading: {uploadingCount}
+                </span>
+              )}
+              {completedCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/15 text-emerald-400 px-2.5 py-1">
+                  <CheckCircle2 className="h-3 w-3" />
+                  Completed: {completedCount}
+                </span>
+              )}
+              {errorCount > 0 && (
+                <span className="inline-flex items-center gap-1 rounded-lg bg-rose-500/15 text-rose-400 px-2.5 py-1">
+                  <AlertCircle className="h-3 w-3" />
+                  Failed: {errorCount}
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {completedCount > 0 && (
+                <button
+                  type="button"
+                  onClick={clearCompleted}
+                  className="rounded-xl border border-border bg-secondary/40 px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:bg-secondary hover:text-foreground"
+                >
+                  Clear Completed
+                </button>
+              )}
+              {errorCount > 0 && (
+                <button
+                  type="button"
+                  onClick={handleRetryAllFailed}
+                  disabled={isProcessing}
+                  className="inline-flex items-center gap-1 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-bold text-rose-400 hover:bg-rose-500/20 disabled:opacity-50"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  Retry Failed ({errorCount})
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={clearAll}
+                disabled={isProcessing}
+                className="rounded-xl border border-border bg-secondary/40 px-3 py-1.5 text-xs font-semibold text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-50"
+              >
+                Clear All
+              </button>
+            </div>
+          </div>
+
+          {/* Overall Batch Progress Indicator */}
+          {totalCount > 0 && (
+            <div className="space-y-1.5 pt-1">
+              <div className="flex justify-between text-xs font-mono text-muted-foreground">
+                <span>
+                  Batch Progress: {completedCount} / {totalCount} Completed
+                  {errorCount > 0 ? ` (${errorCount} Failed)` : ""}
+                </span>
+                <span className="font-bold text-foreground">
+                  {totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0}%
+                </span>
+              </div>
+              <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
+                <div
+                  className="h-full bg-gradient-to-r from-sky-500 via-indigo-500 to-emerald-400 transition-all duration-300"
+                  style={{
+                    width: `${totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Batch Configuration Strip */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-border/60">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold text-muted-foreground">Quick Batch:</span>
+              <button
+                type="button"
+                onClick={() => setAllContentType("short")}
+                className="rounded-lg border border-border bg-secondary/40 px-2.5 py-1 text-xs font-semibold text-foreground hover:bg-secondary"
+              >
+                All Shorts (9:16)
+              </button>
+              <button
+                type="button"
+                onClick={() => setAllContentType("long")}
+                className="rounded-lg border border-border bg-secondary/40 px-2.5 py-1 text-xs font-semibold text-foreground hover:bg-secondary"
+              >
+                All Long Videos (16:9)
+              </button>
+
+              <div className="flex items-center gap-1.5 pl-1">
+                <span className="text-xs text-muted-foreground">Category:</span>
+                <select
+                  value={batchCategory}
+                  onChange={(e) => setAllCategoryToAll(e.target.value)}
+                  className="rounded-lg border border-border bg-secondary/60 px-2 py-1 text-xs text-foreground focus:outline-none"
+                >
+                  {categories.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleProcessQueue}
+              disabled={isProcessing || queuedCount === 0}
+              className="inline-flex items-center gap-2 rounded-xl bg-sky-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-sky-500 transition shadow-sm disabled:opacity-50"
+            >
+              {isProcessing ? (
+                <>
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  Uploading Queue...
+                </>
+              ) : (
+                <>
+                  <Upload className="h-3.5 w-3.5" />
+                  Upload Queue ({queuedCount} Pending)
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Queue Items List */}
+      <div className="space-y-4">
+        {queue.map((item, idx) => (
+          <div
+            key={item.id}
+            className={`rounded-2xl border p-4 sm:p-5 transition shadow-sm bg-card ${
+              item.status === "uploading"
+                ? "border-amber-500/60 ring-1 ring-amber-500/30"
+                : item.status === "success"
+                  ? "border-emerald-500/40 bg-emerald-500/5"
+                  : item.status === "error"
+                    ? "border-rose-500/50 bg-rose-500/5"
+                    : "border-border hover:border-border/80"
+            }`}
+          >
+            <div className="flex flex-col lg:flex-row gap-4">
+              {/* Left Column: Video Preview / Frame + Custom Thumbnail Picker */}
+              <div className="shrink-0 w-full sm:w-48 space-y-2">
+                <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-black/60 border border-border">
+                  {item.customThumbnailPreview || item.capturedThumbnail ? (
+                    <img
+                      src={item.customThumbnailPreview || item.capturedThumbnail}
+                      alt={item.title}
+                      className="h-full w-full object-cover"
+                    />
+                  ) : (
+                    <video
+                      src={item.previewUrl}
+                      className="h-full w-full object-contain"
+                      preload="metadata"
+                    />
+                  )}
+                  <span className="absolute bottom-1.5 right-1.5 rounded-md bg-black/80 px-1.5 py-0.5 text-[10px] font-mono font-bold text-white">
+                    {item.detectedDuration}
+                  </span>
+                  <span
+                    className={`absolute top-1.5 left-1.5 rounded-md px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${
+                      item.contentType === "short"
+                        ? "bg-purple-600 text-white"
+                        : "bg-sky-600 text-white"
+                    }`}
+                  >
+                    {item.contentType === "short" ? "Short (9:16)" : "Long (16:9)"}
+                  </span>
+                  {item.customThumbnailPreview && (
+                    <span className="absolute top-1.5 right-1.5 rounded-md bg-teal-600 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                      Custom Cover
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between gap-1">
+                  <label
+                    className={`cursor-pointer inline-flex items-center gap-1 rounded-lg border border-border bg-secondary/50 px-2 py-1 text-[11px] font-semibold text-muted-foreground hover:bg-secondary hover:text-foreground transition ${
+                      item.status === "uploading" || item.status === "success"
+                        ? "pointer-events-none opacity-50"
+                        : ""
+                    }`}
+                  >
+                    <ImageIcon className="h-3 w-3 text-teal-400" />
+                    <span>{item.customThumbnailFile ? "Change Cover" : "Custom Thumbnail"}</span>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      disabled={item.status === "uploading" || item.status === "success"}
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) {
+                          updateItem(item.id, {
+                            customThumbnailFile: f,
+                            customThumbnailPreview: URL.createObjectURL(f),
+                          });
+                        }
+                      }}
+                      className="hidden"
+                    />
+                  </label>
+                  {item.customThumbnailFile && (
+                    <button
+                      type="button"
+                      disabled={item.status === "uploading" || item.status === "success"}
+                      onClick={() =>
+                        updateItem(item.id, {
+                          customThumbnailFile: null,
+                          customThumbnailPreview: undefined,
+                        })
+                      }
+                      className="text-[10px] text-muted-foreground hover:text-rose-400 disabled:opacity-50"
+                    >
+                      Reset
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Middle Column: Metadata Controls */}
+              <div className="flex-1 space-y-3 min-w-0">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-xs font-bold text-muted-foreground">#{idx + 1}</span>
+                    <span className="text-xs text-muted-foreground truncate font-mono">
+                      {item.file.name} ({(item.file.size / (1024 * 1024)).toFixed(2)} MB)
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {/* Status Badge */}
+                    {item.status === "queued" && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-secondary px-2 py-0.5 text-[11px] font-bold text-muted-foreground">
+                        <Clock className="h-3 w-3" />
+                        Queued
+                      </span>
+                    )}
+                    {item.status === "uploading" && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/20 text-amber-400 px-2 py-0.5 text-[11px] font-bold">
+                        <RefreshCw className="h-3 w-3 animate-spin" />
+                        Uploading {item.progress}%
+                      </span>
+                    )}
+                    {item.status === "success" && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-emerald-500/20 text-emerald-400 px-2 py-0.5 text-[11px] font-bold">
+                        <CheckCircle2 className="h-3 w-3" />
+                        Published
+                      </span>
+                    )}
+                    {item.status === "error" && (
+                      <span className="inline-flex items-center gap-1 rounded-md bg-rose-500/20 text-rose-400 px-2 py-0.5 text-[11px] font-bold">
+                        <AlertCircle className="h-3 w-3" />
+                        Failed
+                      </span>
+                    )}
+
+                    {item.status !== "uploading" && (
+                      <button
+                        type="button"
+                        onClick={() => removeItem(item.id)}
+                        className="grid h-7 w-7 place-items-center rounded-lg text-muted-foreground hover:bg-secondary hover:text-foreground"
+                        title="Remove from queue"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Title Input */}
+                <div>
+                  <input
+                    type="text"
+                    value={item.title}
+                    disabled={item.status === "uploading" || item.status === "success"}
+                    onChange={(e) => updateItem(item.id, { title: e.target.value })}
+                    placeholder="Video title"
+                    className="w-full rounded-xl border border-border bg-secondary/30 px-3.5 py-2 text-sm font-semibold text-foreground focus:border-sky-500 focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+
+                {/* Format, Monetization, Category, Visibility row */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs">
+                  {/* Format Selector */}
+                  <div className="flex items-center rounded-xl border border-border bg-secondary/30 p-1">
+                    <button
+                      type="button"
+                      disabled={item.status === "uploading" || item.status === "success"}
+                      onClick={() => updateItem(item.id, { contentType: "short" })}
+                      className={`flex-1 rounded-lg py-1.5 font-bold transition ${
+                        item.contentType === "short"
+                          ? "bg-purple-600 text-white shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      Short (9:16)
+                    </button>
+                    <button
+                      type="button"
+                      disabled={item.status === "uploading" || item.status === "success"}
+                      onClick={() => updateItem(item.id, { contentType: "long" })}
+                      className={`flex-1 rounded-lg py-1.5 font-bold transition ${
+                        item.contentType === "long"
+                          ? "bg-sky-600 text-white shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      Long (16:9)
+                    </button>
+                  </div>
+
+                  {/* Monetization Option: Free vs Sponsor */}
+                  <div className="flex items-center rounded-xl border border-border bg-secondary/30 p-1">
+                    <button
+                      type="button"
+                      disabled={item.status === "uploading" || item.status === "success"}
+                      onClick={() => updateItem(item.id, { videoType: "free" })}
+                      className={`flex-1 rounded-lg py-1.5 font-bold transition text-xs ${
+                        item.videoType === "free" || !item.videoType
+                          ? "bg-sky-500/20 text-sky-400 border border-sky-500/30 shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      Free (₹0)
+                    </button>
+                    <button
+                      type="button"
+                      disabled={item.status === "uploading" || item.status === "success"}
+                      onClick={() => updateItem(item.id, { videoType: "premium" })}
+                      className={`flex-1 rounded-lg py-1.5 font-bold transition text-xs flex items-center justify-center gap-1 ${
+                        item.videoType === "premium"
+                          ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Zap className="h-3 w-3 fill-amber-400 text-amber-400" />
+                      Sponsor (₹6)
+                    </button>
+                  </div>
+
+                  {/* Category Selector */}
+                  <div>
+                    <select
+                      value={item.category}
+                      disabled={item.status === "uploading" || item.status === "success"}
+                      onChange={(e) => updateItem(item.id, { category: e.target.value })}
+                      className="w-full rounded-xl border border-border bg-secondary/30 px-3 py-2 text-xs text-foreground focus:border-sky-500 focus:outline-none disabled:opacity-60"
+                    >
+                      {categories.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Visibility Selector */}
+                  <div>
+                    <select
+                      value={item.visibility}
+                      disabled={item.status === "uploading" || item.status === "success"}
+                      onChange={(e) =>
+                        updateItem(item.id, {
+                          visibility: e.target.value as "public" | "unlisted" | "private",
+                        })
+                      }
+                      className="w-full rounded-xl border border-border bg-secondary/30 px-3 py-2 text-xs text-foreground focus:border-sky-500 focus:outline-none disabled:opacity-60"
+                    >
+                      <option value="public">Public</option>
+                      <option value="unlisted">Unlisted</option>
+                      <option value="private">Private</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Description Input */}
+                <div>
+                  <textarea
+                    rows={2}
+                    value={item.description}
+                    disabled={item.status === "uploading" || item.status === "success"}
+                    onChange={(e) => updateItem(item.id, { description: e.target.value })}
+                    placeholder="Description (optional)..."
+                    className="w-full rounded-xl border border-border bg-secondary/30 px-3.5 py-1.5 text-xs text-foreground focus:border-sky-500 focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+
+                {/* Progress Bar (if Uploading) */}
+                {item.status === "uploading" && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-[11px] font-mono text-muted-foreground">
+                      <span>Uploading & Processing to Production Storage...</span>
+                      <span>{item.progress}%</span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+                      <div
+                        className="h-full bg-gradient-to-r from-sky-500 to-emerald-400 transition-all duration-300"
+                        style={{ width: `${item.progress}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Error Banner with Individual Retry Button */}
+                {item.status === "error" && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+                      <span className="truncate">{item.errorMessage || "Upload failed."}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleRetryItem(item.id)}
+                      disabled={isProcessing}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1 text-xs font-bold text-white hover:bg-rose-500 transition shadow-sm disabled:opacity-50"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      Retry Video
+                    </button>
+                  </div>
+                )}
+
+                {/* Success Banner with Watch Video Link */}
+                {item.status === "success" && item.publishedVideo && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-300">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                      <span>
+                        Successfully published! Video ID:{" "}
+                        <strong className="font-mono text-foreground">
+                          {item.publishedVideo.id}
+                        </strong>
+                      </span>
+                    </div>
+                    <Link
+                      to="/watch/$videoId"
+                      params={{ videoId: item.publishedVideo.id }}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1 text-xs font-bold text-white hover:bg-emerald-500 transition shadow-sm"
+                    >
+                      <Play className="h-3 w-3 fill-current" />
+                      Watch Video
+                    </Link>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Empty State */}
+      {totalCount === 0 && (
+        <div className="rounded-2xl border border-dashed border-border p-10 text-center space-y-2">
+          <FileVideo className="h-10 w-10 mx-auto text-muted-foreground/60" />
+          <h4 className="text-sm font-bold text-foreground">No videos in queue</h4>
+          <p className="text-xs text-muted-foreground">
+            Drop or select multiple video files to start building your bulk upload batch.
+          </p>
+        </div>
+      )}
+
+      {/* Action Footer */}
+      <div className="flex items-center justify-between pt-4 border-t border-border">
+        <button
+          type="button"
+          onClick={onBack}
+          className="rounded-xl border border-border bg-secondary/40 px-6 py-2.5 text-xs font-semibold text-muted-foreground hover:bg-secondary hover:text-foreground"
+        >
+          Back
+        </button>
+        {totalCount > 0 && (
+          <button
+            type="button"
+            onClick={handleProcessQueue}
+            disabled={isProcessing || queuedCount === 0}
+            className="rounded-xl bg-sky-600 px-8 py-3 text-xs font-bold text-white hover:bg-sky-500 transition shadow-sm disabled:opacity-50"
+          >
+            {isProcessing ? "Uploading Queue..." : `Publish ${queuedCount} Pending Video(s)`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* FREE VIDEO UPLOAD VIEW (Fee: ₹0)                                           */
+/* -------------------------------------------------------------------------- */
+function FreeVideoUploadView({
+  initialFormat,
+  onBack,
+  onUploaded,
+}: {
+  initialFormat: VideoFormatChoice;
+  onBack: () => void;
+  onUploaded?: () => void;
+}) {
+  const { user, profile, dbUser } = useAuth();
+  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const creatorName =
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Alex Rivera";
+
+  const [uploadTab, setUploadTab] = useState<"single" | "bulk">("single");
+  const [queuedFilesForBulk, setQueuedFilesForBulk] = useState<File[]>([]);
+
+  const [format, setFormat] = useState<VideoFormatChoice>(initialFormat);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState<string>("Coding");
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string>("");
+  const [capturedThumbnail, setCapturedThumbnail] = useState<string>("");
+  const [detectedDuration, setDetectedDuration] = useState<string>("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [publishedVideo, setPublishedVideo] = useState<UploadedVideo | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    if (files.length > 1) {
+      setQueuedFilesForBulk(Array.from(files));
+      setUploadTab("bulk");
+      return;
+    }
+
+    const file = files[0];
+    if (!file) return;
+
+    const validExts = [".mp4", ".webm", ".ogg", ".mov", ".m4v", ".mkv"];
+    const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
+    if (!file.type.startsWith("video/") && !validExts.includes(ext)) {
+      toast.error("Unsupported video format. Please select an MP4, WebM, OGG, or MOV file.");
+      return;
+    }
+
+    if (file.size > 150 * 1024 * 1024) {
+      toast.error("Video file size cannot exceed 150MB.");
+      return;
+    }
+
+    setVideoFile(file);
+    const objectUrl = URL.createObjectURL(file);
+    setPreviewUrl(objectUrl);
+    if (!title.trim()) {
+      setTitle(file.name.replace(/\.[^/.]+$/, ""));
+    }
+
+    // Capture real snapshot thumbnail frame from video
+    captureVideoThumbnail(file).then((thumb) => {
+      if (thumb) setCapturedThumbnail(thumb);
+    });
+
+    // Attempt duration detection via temporary video element
+    const tempVideo = document.createElement("video");
+    tempVideo.preload = "metadata";
+    tempVideo.src = objectUrl;
+    tempVideo.onloadedmetadata = () => {
+      const sec = Math.round(tempVideo.duration);
+      if (!isNaN(sec) && sec > 0) {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        setDetectedDuration(`${m}:${s.toString().padStart(2, "0")}`);
+      }
+    };
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+
+    if (files.length > 1) {
+      setQueuedFilesForBulk(Array.from(files));
+      setUploadTab("bulk");
+      return;
+    }
+
+    const file = files[0];
+    if (!file) return;
+
+    const validExts = [".mp4", ".webm", ".ogg", ".mov", ".m4v", ".mkv"];
+    const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
+    if (!file.type.startsWith("video/") && !validExts.includes(ext)) {
+      toast.error("Unsupported video format. Please drop an MP4, WebM, OGG, or MOV file.");
+      return;
+    }
+
+    if (file.size > 150 * 1024 * 1024) {
+      toast.error("Video file size cannot exceed 150MB.");
+      return;
+    }
+
+    setVideoFile(file);
+    const objectUrl = URL.createObjectURL(file);
+    setPreviewUrl(objectUrl);
+    if (!title.trim()) {
+      setTitle(file.name.replace(/\.[^/.]+$/, ""));
+    }
+
+    captureVideoThumbnail(file).then((thumb) => {
+      if (thumb) setCapturedThumbnail(thumb);
+    });
+  };
+
+  if (uploadTab === "bulk") {
+    return (
+      <BulkVideoUploadView
+        onBack={() => setUploadTab("single")}
+        {...(onUploaded ? { onUploaded } : {})}
+        initialFiles={queuedFilesForBulk}
+      />
+    );
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!videoFile) {
+      toast.error("Please select a video file to upload.");
+      return;
+    }
+    if (!title.trim()) {
+      toast.error("Please enter a video title.");
+      return;
+    }
+
+    setUploading(true);
+    try {
+      // 1. Upload the actual video file to production storage
+      const uploadRes = await api.uploads.uploadVideo(videoFile);
+      if (!uploadRes || !uploadRes.url) {
+        const serverError =
+          (uploadRes as any)?.error ||
+          (uploadRes as any)?.message ||
+          (uploadRes as any)?.msg ||
+          (!uploadRes
+            ? "Server returned an empty upload response."
+            : typeof uploadRes === "string"
+              ? uploadRes
+              : (uploadRes as any)?.success === false
+                ? "Server rejected video upload without providing an error message."
+                : "Server storage upload succeeded with HTTP 200 but did not return a valid video URL.");
+        throw new Error(serverError);
+      }
+
+      // 2. Persist video thumbnail to server storage or graceful category fallback
+      let posterUrl = "";
+      try {
+        posterUrl = await captureAndUploadThumbnail(videoFile, category);
+      } catch (_e) {
+        posterUrl = capturedThumbnail || getCategoryFallbackThumbnail(category);
+      }
+
+      // 3. Persist video metadata to database through server API
+      const newVideo = await recordNewVideoUpload({
+        userId,
+        creatorName,
+        title: title.trim(),
+        description: description.trim(),
+        videoUrl: uploadRes.url,
+        thumbnailUrl: posterUrl,
+        videoType: "free",
+        contentType: format,
+        category,
+        duration: detectedDuration || (format === "short" ? "0:45" : "14:20"),
+        paymentStatus: "not_required",
+        paymentAmount: 0,
+      });
+
+      setPublishedVideo(newVideo);
+      setUploadSuccess(true);
+      toast.success(
+        `🎉 Free ${format === "short" ? "Short" : "Long"} Video uploaded and published successfully! Zero fee (₹0).`,
+      );
+      onUploaded?.();
+    } catch (err: any) {
+      console.error("Free video upload failed:", err);
+      toast.error(err?.message || "Failed to upload and publish video.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  if (uploadSuccess) {
+    return (
+      <div className="mx-auto max-w-xl text-center py-12 space-y-6">
+        <div className="grid h-16 w-16 mx-auto place-items-center rounded-full bg-sky-500/20 text-sky-400">
+          <CheckCircle2 className="h-10 w-10" />
+        </div>
+        <div>
+          <h2 className="text-2xl font-black text-foreground">Free Video Published!</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            Your {format === "short" ? "Short" : "Long"} Video &quot;{title}&quot; is live for ₹0
+            with no payment.
+          </p>
+        </div>
+
+        {publishedVideo?.videoUrl && (
+          <div className="mx-auto max-w-md overflow-hidden rounded-2xl border border-border shadow-card bg-secondary/30 p-2">
+            <video
+              controls
+              playsInline
+              preload="metadata"
+              className="aspect-video w-full rounded-xl bg-black object-contain"
+              src={publishedVideo.videoUrl}
+            />
+            <div className="p-3 text-left">
+              <div className="text-xs font-bold text-foreground truncate">
+                {publishedVideo.title}
+              </div>
+              <div className="text-[10px] text-muted-foreground mt-0.5 font-mono uppercase">
+                {publishedVideo.contentType} video · {publishedVideo.category} · Duration:{" "}
+                {publishedVideo.duration}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
+          {publishedVideo && (
+            <Link
+              to="/watch/$videoId"
+              params={{ videoId: publishedVideo.id }}
+              className="rounded-xl bg-brand px-6 py-2.5 text-xs font-bold text-white hover:bg-brand-dark transition shadow-lift inline-flex items-center gap-1.5"
+            >
+              <Play className="h-3.5 w-3.5 fill-current" />
+              Watch Video Now
+            </Link>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setTitle("");
+              setDescription("");
+              setVideoFile(null);
+              setPreviewUrl("");
+              setPublishedVideo(null);
+              setUploadSuccess(false);
+            }}
+            className="rounded-xl bg-secondary border border-border px-6 py-2.5 text-xs font-bold text-foreground hover:bg-secondary/80 transition"
+          >
+            Upload Another Free Video
+          </button>
+          <Link
+            to="/free-videos"
+            search={{ refresh: Date.now() }}
+            className="rounded-xl bg-secondary px-6 py-2.5 text-xs font-bold text-foreground hover:bg-secondary/80 transition"
+          >
+            View Free Videos
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header Bar */}
+      <div className="flex items-center justify-between border-b border-border pb-4">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="grid h-9 w-9 place-items-center rounded-full border border-border bg-secondary/60 text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-sky-400">
+              Option 1 · Zero Fee
+            </div>
+            <h1 className="text-xl sm:text-2xl font-black text-foreground">Free Video Upload</h1>
+          </div>
+        </div>
+
+        <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-3 py-1 text-xs font-bold text-sky-400">
+          Fee: ₹0 (No Payment Required)
+        </span>
+      </div>
+
+      {/* Mode Switcher: Single Video vs Bulk Upload */}
+      <div className="flex items-center gap-2 p-1 rounded-2xl bg-secondary/60 border border-border">
+        <button
+          type="button"
+          onClick={() => setUploadTab("single")}
+          className="flex-1 py-2 text-xs font-bold rounded-xl transition bg-card text-foreground shadow-sm border border-border"
+        >
+          Single Video Upload
+        </button>
+        <button
+          type="button"
+          onClick={() => setUploadTab("bulk")}
+          className="flex-1 py-2 text-xs font-bold rounded-xl transition flex items-center justify-center gap-1.5 text-muted-foreground hover:text-foreground"
+        >
+          <Layers className="h-3.5 w-3.5" />
+          Bulk Video Upload (Multiple Videos)
+        </button>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Format Selector: Short or Long */}
+        <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          <label className="block text-xs font-bold text-foreground uppercase tracking-wide">
+            Select Video Format <span className="text-brand">*</span>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setFormat("short")}
+              className={`rounded-xl border p-3 text-left transition ${
+                format === "short"
+                  ? "border-sky-500 bg-sky-500/10 ring-1 ring-sky-500/50"
+                  : "border-border bg-secondary/40 hover:bg-secondary/80"
+              }`}
+            >
+              <div className="text-sm font-bold text-foreground">Free Short Video</div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Vertical 9:16 format under 60 seconds
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormat("long")}
+              className={`rounded-xl border p-3 text-left transition ${
+                format === "long"
+                  ? "border-sky-500 bg-sky-500/10 ring-1 ring-sky-500/50"
+                  : "border-border bg-secondary/40 hover:bg-secondary/80"
+              }`}
+            >
+              <div className="text-sm font-bold text-foreground">Free Long Video</div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Horizontal 16:9 standard video
+              </p>
+            </button>
+          </div>
+        </div>
+
+        {/* Video File Picker Dropzone */}
+        <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className="group relative cursor-pointer rounded-3xl border-2 border-dashed border-border bg-card p-8 text-center transition hover:border-sky-500/60 hover:bg-sky-500/5 shadow-card"
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="video/mp4,video/webm,video/ogg,video/quicktime,.mp4,.webm,.ogg,.mov,.m4v"
+            onChange={handleFileChange}
+            className="hidden"
+          />
+
+          {previewUrl ? (
+            <div className="space-y-3">
+              <video
+                controls
+                playsInline
+                preload="metadata"
+                className="mx-auto max-h-56 rounded-2xl bg-black object-contain border border-border shadow-sm"
+                src={previewUrl}
+              />
+              <div className="flex items-center justify-center gap-2 text-xs font-bold text-sky-400">
+                <Check className="h-4 w-4 text-emerald-400" />
+                <span>{videoFile?.name}</span>
+                <span className="text-muted-foreground font-normal">
+                  ({((videoFile?.size || 0) / (1024 * 1024)).toFixed(2)} MB
+                  {detectedDuration ? ` · ${detectedDuration}` : ""})
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Click or drop another file to change video
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-sky-500/10 text-sky-400 border border-sky-500/20 group-hover:scale-105 transition-transform">
+                <FileVideo className="h-7 w-7" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-foreground">
+                  Click to select or drag and drop video file here
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Supports MP4, WebM, OGG, MOV (Up to 150 MB)
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Video Metadata Inputs */}
+        <div className="rounded-2xl border border-border bg-card p-6 space-y-4">
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Video Title <span className="text-brand">*</span>
+            </label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. 10 Coding Shortcuts Every React Dev Must Know"
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-sky-500 focus:outline-none"
+              required
+            />
+          </div>
+
+          {/* EXACT 11 CATEGORIES SELECTOR */}
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Video Category <span className="text-brand">*</span>
+            </label>
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-sky-500 focus:outline-none"
+            >
+              {VIDEO_CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Description
+            </label>
+            <textarea
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Provide a detailed description of your video content..."
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-sky-500 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex items-center justify-between pt-4 border-t border-border">
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-xl border border-border bg-secondary/40 px-6 py-2.5 text-xs font-semibold text-muted-foreground hover:bg-secondary hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={uploading}
+            className="rounded-xl bg-sky-600 px-8 py-3 text-xs font-bold text-white hover:bg-sky-500 transition shadow-sm disabled:opacity-50"
+          >
+            {uploading ? "Uploading & Publishing..." : `Publish Free Video (₹0)`}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* PREMIUM VIDEO UPLOAD VIEW (Fee: ₹6 verified Razorpay)                      */
+/* -------------------------------------------------------------------------- */
+function PremiumVideoUploadView({
+  initialFormat,
+  onBack,
+  onUploaded,
+}: {
+  initialFormat: VideoFormatChoice;
+  onBack: () => void;
+  onUploaded?: () => void;
+}) {
+  const { user, profile, dbUser } = useAuth();
+  const userId = profile?.user_id || dbUser?.user_id || "";
+  const creatorName = profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Creator";
+  const referrerId = profile?.referral_code || dbUser?.referral_code || undefined;
+
+  const [format, setFormat] = useState<VideoFormatChoice>(initialFormat);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState<string>("Coding");
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string>("");
+  const [capturedThumbnail, setCapturedThumbnail] = useState<string>("");
+  const [detectedDuration, setDetectedDuration] = useState<string>("");
+  const [uploading, setUploading] = useState(false);
+  const [uploadSuccess, setUploadSuccess] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [promotionConsent, setPromotionConsent] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const isSubmittingRef = useRef(false);
+  const notifiedSuccessIdsRef = useRef<Set<string>>(new Set());
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const validExts = [".mp4", ".webm", ".ogg", ".mov", ".m4v", ".mkv"];
+    const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
+    if (!file.type.startsWith("video/") && !validExts.includes(ext)) {
+      toast.error("Unsupported video format. Please select an MP4, WebM, OGG, or MOV file.");
+      return;
+    }
+
+    if (file.size > 150 * 1024 * 1024) {
+      toast.error("Video file size cannot exceed 150MB.");
+      return;
+    }
+
+    setUploadError(null);
+    setVideoFile(file);
+    const objectUrl = URL.createObjectURL(file);
+    setPreviewUrl(objectUrl);
+    if (!title.trim()) {
+      setTitle(file.name.replace(/\.[^/.]+$/, ""));
+    }
+
+    captureVideoThumbnail(file).then((thumb) => {
+      if (thumb) setCapturedThumbnail(thumb);
+    });
+
+    const tempVideo = document.createElement("video");
+    tempVideo.preload = "metadata";
+    tempVideo.src = objectUrl;
+    tempVideo.onloadedmetadata = () => {
+      const sec = Math.round(tempVideo.duration);
+      if (!isNaN(sec) && sec > 0) {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        setDetectedDuration(`${m}:${s.toString().padStart(2, "0")}`);
+      }
+    };
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+
+    const validExts = [".mp4", ".webm", ".ogg", ".mov", ".m4v", ".mkv"];
+    const ext = "." + (file.name.split(".").pop() || "").toLowerCase();
+    if (!file.type.startsWith("video/") && !validExts.includes(ext)) {
+      toast.error("Unsupported video format. Please drop an MP4, WebM, OGG, or MOV file.");
+      return;
+    }
+
+    if (file.size > 150 * 1024 * 1024) {
+      toast.error("Video file size cannot exceed 150MB.");
+      return;
+    }
+
+    setVideoFile(file);
+    const objectUrl = URL.createObjectURL(file);
+    setPreviewUrl(objectUrl);
+    if (!title.trim()) {
+      setTitle(file.name.replace(/\.[^/.]+$/, ""));
+    }
+
+    captureVideoThumbnail(file).then((thumb) => {
+      if (thumb) setCapturedThumbnail(thumb);
+    });
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!videoFile) {
+      toast.error("Please select a video file for premium upload.");
+      return;
+    }
+    if (!title.trim()) {
+      toast.error("Please enter a video title.");
+      return;
+    }
+    if (!userId) {
+      toast.error(
+        "Your FaceTube account session is still loading or not signed in. Please log in and try again.",
+      );
+      return;
+    }
+    if (!promotionConsent) {
+      toast.error(
+        "Please accept the voluntary video promotion consent before proceeding to payment.",
+      );
+      return;
+    }
+
+    if (isSubmittingRef.current || uploading) {
+      return;
+    }
+
+    isSubmittingRef.current = true;
+    setUploadError(null);
+    setUploading(true);
+    try {
+      // 1. Upload video file to server storage first
+      const uploadRes = await api.uploads.uploadVideo(videoFile);
+      if (!uploadRes || !uploadRes.url) {
+        const serverError =
+          (uploadRes as any)?.error ||
+          (uploadRes as any)?.message ||
+          (uploadRes as any)?.msg ||
+          (!uploadRes
+            ? "Server returned an empty upload response."
+            : typeof uploadRes === "string"
+              ? uploadRes
+              : (uploadRes as any)?.success === false
+                ? "Server rejected video upload without providing an error message."
+                : "Server storage upload succeeded with HTTP 200 but did not return a valid video URL.");
+        throw new Error(serverError);
+      }
+
+      const vidId = `vid-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      let posterUrl = "";
+      try {
+        posterUrl = await captureAndUploadThumbnail(videoFile, category);
+      } catch (_e) {
+        posterUrl = capturedThumbnail || getCategoryFallbackThumbnail(category);
+      }
+
+      // 2. Initiate Razorpay ₹6 payment flow with server verification
+      await initiatePremiumVideoPayment({
+        uploaderUserId: userId,
+        uploaderName: creatorName,
+        userEmail: user?.email || "creator@facetube.app",
+        videoId: vidId,
+        videoTitle: title.trim(),
+        description: description.trim(),
+        videoUrl: uploadRes.url,
+        thumbnailUrl: posterUrl,
+        category,
+        contentType: format,
+        duration: detectedDuration || (format === "short" ? "0:45" : "14:20"),
+        ...(referrerId ? { directReferrerId: referrerId } : {}),
+        onSuccess: async () => {
+          isSubmittingRef.current = false;
+          setUploading(false);
+          setUploadError(null);
+          setUploadSuccess(true);
+          if (!notifiedSuccessIdsRef.current.has(vidId)) {
+            notifiedSuccessIdsRef.current.add(vidId);
+            toast.success("🎉 Your Video Promotion Was Successful!", {
+              id: `promo-success-${vidId}`,
+              description:
+                "Your video has been uploaded successfully and your promotion is now active. Thank you for promoting on FaceTube! ❤️",
+              duration: 8000,
+            });
+          }
+          onUploaded?.();
+        },
+        onFailure: (err) => {
+          isSubmittingRef.current = false;
+          setUploading(false);
+          setUploadSuccess(false);
+          const msg = err || "Payment failed. Video was not published.";
+          setUploadError(msg);
+          toast.error(msg);
+        },
+        onCancel: () => {
+          isSubmittingRef.current = false;
+          setUploading(false);
+          setUploadSuccess(false);
+          setUploadError("Payment was cancelled. Your video promotion was not activated.");
+          toast.info("Payment cancelled.");
+        },
+      });
+    } catch (err: any) {
+      isSubmittingRef.current = false;
+      setUploading(false);
+      setUploadSuccess(false);
+      const msg = err?.message || "Failed to initiate sponsor upload.";
+      setUploadError(msg);
+      toast.error(msg);
+    }
+  };
+
+  if (uploadSuccess) {
+    return (
+      <div className="mx-auto max-w-xl text-center py-12 space-y-6">
+        <div className="grid h-16 w-16 mx-auto place-items-center rounded-full bg-amber-500/20 text-amber-400">
+          <CheckCircle2 className="h-10 w-10" />
+        </div>
+        <div>
+          <h2 className="text-2xl font-black text-foreground">
+            🎉 Your Video Promotion Was Successful!
+          </h2>
+          <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+            Your video has been uploaded successfully and your promotion is now active. Thank you
+            for promoting on FaceTube! ❤️
+          </p>
+        </div>
+        <div className="flex items-center justify-center gap-3 pt-4">
+          <button
+            type="button"
+            onClick={() => {
+              setTitle("");
+              setDescription("");
+              setVideoFile(null);
+              setPreviewUrl("");
+              setUploadError(null);
+              setUploadSuccess(false);
+            }}
+            className="rounded-xl bg-amber-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-amber-500 transition"
+          >
+            Upload Another Sponsor Video
+          </button>
+          <Link
+            to="/premium-videos"
+            search={{ refresh: Date.now() }}
+            className="rounded-xl bg-secondary px-6 py-2.5 text-xs font-bold text-foreground hover:bg-secondary/80 transition"
+          >
+            View Sponsor Videos
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header Bar */}
+      <div className="flex items-center justify-between border-b border-border pb-4">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="grid h-9 w-9 place-items-center rounded-full border border-border bg-secondary/60 text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+              Option 2 · Monetized Video
+            </div>
+            <h1 className="text-xl sm:text-2xl font-black text-foreground">Sponsor Video Upload</h1>
+          </div>
+        </div>
+
+        <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-bold text-amber-400">
+          Fee: ₹6 (Razorpay Verified)
+        </span>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Format Selector: Short or Long */}
+        <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          <label className="block text-xs font-bold text-foreground uppercase tracking-wide">
+            Select Video Format <span className="text-brand">*</span>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setFormat("short")}
+              className={`rounded-xl border p-3 text-left transition ${
+                format === "short"
+                  ? "border-amber-500 bg-amber-500/10 ring-1 ring-amber-500/50"
+                  : "border-border bg-secondary/40 hover:bg-secondary/80"
+              }`}
+            >
+              <div className="text-sm font-bold text-foreground">Sponsor Short Video</div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Monetized short-form under 60 seconds
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormat("long")}
+              className={`rounded-xl border p-3 text-left transition ${
+                format === "long"
+                  ? "border-amber-500 bg-amber-500/10 ring-1 ring-amber-500/50"
+                  : "border-border bg-secondary/40 hover:bg-secondary/80"
+              }`}
+            >
+              <div className="text-sm font-bold text-foreground">Sponsor Long Video</div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Monetized long-form standard video
+              </p>
+            </button>
+          </div>
+        </div>
+
+        {/* Video File Picker Dropzone */}
+        <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className="group relative cursor-pointer rounded-3xl border-2 border-dashed border-border bg-card p-8 text-center transition hover:border-amber-500/60 hover:bg-amber-500/5 shadow-card"
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="video/mp4,video/webm,video/ogg,video/quicktime,.mp4,.webm,.ogg,.mov,.m4v"
+            onChange={handleFileChange}
+            className="hidden"
+          />
+
+          {previewUrl ? (
+            <div className="space-y-3">
+              <video
+                controls
+                playsInline
+                preload="metadata"
+                className="mx-auto max-h-56 rounded-2xl bg-black object-contain border border-border shadow-sm"
+                src={previewUrl}
+              />
+              <div className="flex items-center justify-center gap-2 text-xs font-bold text-amber-400">
+                <Check className="h-4 w-4 text-emerald-400" />
+                <span>{videoFile?.name}</span>
+                <span className="text-muted-foreground font-normal">
+                  ({((videoFile?.size || 0) / (1024 * 1024)).toFixed(2)} MB
+                  {detectedDuration ? ` · ${detectedDuration}` : ""})
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Click or drop another file to change video
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20 group-hover:scale-105 transition-transform">
+                <FileVideo className="h-7 w-7" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-foreground">
+                  Click to select or drag and drop video file here
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Supports MP4, WebM, OGG, MOV (Up to 150 MB)
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Video Metadata Inputs */}
+        <div className="rounded-2xl border border-border bg-card p-6 space-y-4">
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Video Title <span className="text-brand">*</span>
+            </label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Pro Monetization Secrets: High-CPM Niches Explained"
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-amber-500 focus:outline-none"
+              required
+            />
+          </div>
+
+          {/* EXACT 11 CATEGORIES SELECTOR */}
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Video Category <span className="text-brand">*</span>
+            </label>
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-amber-500 focus:outline-none"
+            >
+              {VIDEO_CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Description
+            </label>
+            <textarea
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Provide a detailed description of your monetized content..."
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-amber-500 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        {/* Monetization Verification Notice */}
+        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs space-y-2">
+          <div className="font-bold text-amber-400 flex items-center gap-1.5">
+            <Sparkles className="h-4 w-4" /> ₹6 Sponsor Upload Verification:
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-muted-foreground">
+            <div>
+              • Monetized Status: <strong className="text-foreground">Active</strong>
+            </div>
+            <div>
+              • Video Type: <strong className="text-foreground">Sponsor</strong>
+            </div>
+            <div>
+              • Audit Security: <strong className="text-foreground">Ledger Protected</strong>
+            </div>
+            <div>
+              • Processing: <strong className="text-foreground">Instant</strong>
+            </div>
+          </div>
+        </div>
+
+        {/* Voluntary Video Promotion Consent */}
+        <label className="flex items-start gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={promotionConsent}
+            onChange={(e) => setPromotionConsent(e.target.checked)}
+            className="mt-1 h-4 w-4 shrink-0 rounded border-border accent-amber-600 cursor-pointer"
+          />
+          <div className="space-y-1.5 text-xs leading-relaxed">
+            <p className="font-semibold text-foreground">
+              मैं स्वयं इच्छा पूर्वक वीडियो प्रमोशन कर रहा/रही हूँ, मैं अपने वीडियो पर चलने वाले विज्ञापनों के जरिए
+              कमाई करना चाहता/चाहती हूँ।
+            </p>
+            <p className="text-muted-foreground">
+              I am voluntarily doing video promotion of my own free will, and I want to earn revenue
+              through the ads running on my video.
+            </p>
+          </div>
+        </label>
+
+        {uploadError && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-xs text-red-200"
+          >
+            <AlertCircle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
+            <span>{uploadError}</span>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex items-center justify-between pt-4 border-t border-border">
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-xl border border-border bg-secondary/40 px-6 py-2.5 text-xs font-semibold text-muted-foreground hover:bg-secondary hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={uploading || !promotionConsent}
+            className="rounded-xl bg-amber-600 px-8 py-3 text-xs font-bold text-white hover:bg-amber-500 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {uploading ? "Uploading & Connecting Gateway..." : "Proceed to Pay ₹6.00"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* AD PROMOTION VIEW (Exact Pricing: 7d=100, 15d=200, 1mo=300, 1yr=3,000)    */
+/* -------------------------------------------------------------------------- */
+function AdPromotionUploadView({
+  onBack,
+  onUploaded,
+}: {
+  onBack: () => void;
+  onUploaded?: () => void;
+}) {
+  const { user, profile, dbUser } = useAuth();
+  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const creatorName =
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Alex Rivera";
+  const referrerId = profile?.referral_code || dbUser?.referral_code || undefined;
+
+  type AdsPlanKey = "plan-7-days" | "plan-15-days" | "plan-monthly" | "plan-yearly";
+
+  interface DurationPlan {
+    id: AdsPlanKey;
+    name: string;
+    label: string;
+    days: number;
+    price: number;
+    rateText: string;
+  }
+
+  const DEFAULT_DURATION_PLAN: DurationPlan = {
+    id: "plan-7-days",
+    name: "7_days",
+    label: "7 Days",
+    days: 7,
+    price: 100,
+    rateText: "₹14.28/day",
+  };
+
+  const DURATION_PLANS: DurationPlan[] = [
+    {
+      id: "plan-7-days",
+      name: "7_days",
+      label: "7 Days",
+      days: 7,
+      price: 100,
+      rateText: "₹14.28/day",
+    },
+    {
+      id: "plan-15-days",
+      name: "15_days",
+      label: "15 Days",
+      days: 15,
+      price: 200,
+      rateText: "₹13.33/day",
+    },
+    {
+      id: "plan-monthly",
+      name: "1_month",
+      label: "1 Month",
+      days: 30,
+      price: 300,
+      rateText: "₹10.00/day",
+    },
+    {
+      id: "plan-yearly",
+      name: "1_year",
+      label: "1 Year",
+      days: 365,
+      price: 3000,
+      rateText: "₹8.22/day",
+    },
+  ];
+
+  const [format, setFormat] = useState<VideoFormatChoice>("short");
+  const [selectedPlanId, setSelectedPlanId] = useState<string>("plan-7-days");
+  const [availableVideos, setAvailableVideos] = useState<UploadedVideo[]>([]);
+  const [selectedVideoId, setSelectedVideoId] = useState<string>("");
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [activated, setActivated] = useState(false);
+  const [promoError, setPromoError] = useState<string | null>(null);
+  const isSubmittingRef = useRef(false);
+  const notifiedPromoKeysRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    fetchUploadedVideos(userId).then((vids) => {
+      setAvailableVideos(vids);
+      const firstVid = vids[0];
+      if (firstVid) setSelectedVideoId(firstVid.id);
+    });
+  }, [userId]);
+
+  const currentPlan: DurationPlan =
+    DURATION_PLANS.find((p) => p.id === selectedPlanId) ??
+    DURATION_PLANS[0] ??
+    DEFAULT_DURATION_PLAN;
+
+  const handleLaunch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedVideoId && availableVideos.length === 0) {
+      toast.error("Please upload a video first before promoting.");
+      return;
+    }
+    if (isSubmittingRef.current || isProcessing) {
+      return;
+    }
+
+    const attemptKey = `${selectedVideoId || "vid-custom"}:${currentPlan.id}:${Date.now()}`;
+    isSubmittingRef.current = true;
+    setPromoError(null);
+    setIsProcessing(true);
+
+    try {
+      await initiateAdsPromotionPayment({
+        userId,
+        userName: creatorName,
+        userEmail: user?.email || "creator@facetube.app",
+        videoId: selectedVideoId || "vid-custom",
+        planId: currentPlan.id,
+        planName: currentPlan.label,
+        durationDays: currentPlan.days,
+        price: currentPlan.price,
+        ...(referrerId ? { directReferrerId: referrerId } : {}),
+        onSuccess: (result) => {
+          isSubmittingRef.current = false;
+          setIsProcessing(false);
+          setPromoError(null);
+          setActivated(true);
+          const paymentId = (result as { paymentId?: string } | null)?.paymentId;
+          const dedupKey = paymentId || attemptKey;
+          if (!notifiedPromoKeysRef.current.has(dedupKey)) {
+            notifiedPromoKeysRef.current.add(dedupKey);
+            toast.success("🎉 Your Video Promotion Was Successful!", {
+              id: `promo-success-${dedupKey}`,
+              description:
+                "Your video has been uploaded successfully and your promotion is now active. Thank you for promoting on FaceTube! ❤️",
+              duration: 8000,
+            });
+          }
+          onUploaded?.();
+        },
+        onFailure: (err) => {
+          isSubmittingRef.current = false;
+          setIsProcessing(false);
+          setActivated(false);
+          const msg = err || "Ad Promotion payment failed.";
+          setPromoError(msg);
+          toast.error(msg);
+        },
+        onCancel: () => {
+          isSubmittingRef.current = false;
+          setIsProcessing(false);
+          setActivated(false);
+          setPromoError("Payment was cancelled. Promotion was not activated.");
+          toast.info("Payment cancelled.");
+        },
+      });
+    } catch (err: any) {
+      isSubmittingRef.current = false;
+      setIsProcessing(false);
+      setActivated(false);
+      const msg = err?.message || "Failed to initiate ad promotion payment.";
+      setPromoError(msg);
+      toast.error(msg);
+    }
+  };
+
+  if (activated) {
+    return (
+      <div className="mx-auto max-w-xl text-center py-12 space-y-6">
+        <div className="grid h-16 w-16 mx-auto place-items-center rounded-full bg-emerald-500/20 text-emerald-400">
+          <CheckCircle2 className="h-10 w-10" />
+        </div>
+        <div>
+          <h2 className="text-2xl font-black text-foreground">
+            🎉 Your Video Promotion Was Successful!
+          </h2>
+          <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+            Your video has been uploaded successfully and your promotion is now active. Thank you
+            for promoting on FaceTube! ❤️
+          </p>
+        </div>
+        <div className="flex items-center justify-center gap-3 pt-4">
+          <Link
+            to="/ads-promotions"
+            className="rounded-xl bg-emerald-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-emerald-500 transition"
+          >
+            View Active Promotions
+          </Link>
+          <Link
+            to="/dashboard"
+            className="rounded-xl bg-secondary px-6 py-2.5 text-xs font-bold text-foreground hover:bg-secondary/80 transition"
+          >
+            Go to Dashboard
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header Bar */}
+      <div className="flex items-center justify-between border-b border-border pb-4">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="grid h-9 w-9 place-items-center rounded-full border border-border bg-secondary/60 text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-400">
+              Option 3 · Audience Growth
+            </div>
+            <h1 className="text-xl sm:text-2xl font-black text-foreground">Ad Video Campaign</h1>
+          </div>
+        </div>
+
+        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-bold text-emerald-400">
+          Verified Payment Required
+        </span>
+      </div>
+
+      <form onSubmit={handleLaunch} className="space-y-6">
+        {/* Promotion Type: Short or Long */}
+        <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          <label className="block text-xs font-bold text-foreground uppercase tracking-wide">
+            Select Video Format to Promote <span className="text-brand">*</span>
+          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setFormat("short")}
+              className={`rounded-xl border p-3 text-left transition ${
+                format === "short"
+                  ? "border-emerald-500 bg-emerald-500/10 ring-1 ring-emerald-500/50"
+                  : "border-border bg-secondary/40 hover:bg-secondary/80"
+              }`}
+            >
+              <div className="text-sm font-bold text-foreground flex items-center gap-1.5">
+                <span>Short Video</span>
+                <span className="rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                  Ads
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Boost viral short-form video in feed
+              </p>
+            </button>
+            <button
+              type="button"
+              onClick={() => setFormat("long")}
+              className={`rounded-xl border p-3 text-left transition ${
+                format === "long"
+                  ? "border-emerald-500 bg-emerald-500/10 ring-1 ring-emerald-500/50"
+                  : "border-border bg-secondary/40 hover:bg-secondary/80"
+              }`}
+            >
+              <div className="text-sm font-bold text-foreground flex items-center gap-1.5">
+                <span>Long Video</span>
+                <span className="rounded px-1.5 py-0.5 text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
+                  Ads
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Featured placement for standard long videos
+              </p>
+            </button>
+          </div>
+        </div>
+
+        {/* Existing Video Selection */}
+        <div className="rounded-2xl border border-border bg-card p-6 space-y-4">
+          <label className="block text-xs font-bold text-foreground uppercase tracking-wide">
+            Select Video From Your Channel <span className="text-brand">*</span>
+          </label>
+          {availableVideos.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {availableVideos.map((vid) => (
+                <button
+                  key={vid.id}
+                  type="button"
+                  onClick={() => setSelectedVideoId(vid.id)}
+                  className={`flex items-center gap-3 rounded-xl border p-3 text-left transition ${
+                    selectedVideoId === vid.id
+                      ? "border-emerald-500 bg-emerald-500/10 ring-1 ring-emerald-500/40"
+                      : "border-border bg-secondary/30 hover:bg-secondary/60"
+                  }`}
+                >
+                  <img
+                    src={vid.thumbnailUrl}
+                    alt={vid.title}
+                    className="h-12 w-20 rounded-lg object-cover shrink-0"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-bold text-foreground truncate">{vid.title}</div>
+                    <div className="text-[10px] text-muted-foreground mt-1 capitalize font-mono">
+                      {vid.videoType} · {vid.contentType}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              No videos uploaded yet. A promotional placeholder campaign will be configured.
+            </p>
+          )}
+        </div>
+
+        {/* EXACT CONFIGURED PRICING PLANS */}
+        <div className="rounded-2xl border border-border bg-card p-6 space-y-4">
+          <label className="block text-xs font-bold text-foreground uppercase tracking-wide">
+            Select Ad Promotion Duration &amp; Pricing <span className="text-brand">*</span>
+          </label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {DURATION_PLANS.map((plan) => (
+              <button
+                key={plan.id}
+                type="button"
+                onClick={() => setSelectedPlanId(plan.id)}
+                className={`rounded-2xl border p-4 text-left transition ${
+                  selectedPlanId === plan.id
+                    ? "border-emerald-500 bg-emerald-500/10 ring-1 ring-emerald-500/50 shadow-sm"
+                    : "border-border bg-secondary/30 hover:bg-secondary/60"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-muted-foreground">{plan.label}</span>
+                  <Clock className="h-3.5 w-3.5 text-emerald-400" />
+                </div>
+                <div className="mt-2 text-xl font-black text-foreground">
+                  ₹{plan.price.toLocaleString("en-IN")}
+                </div>
+                <div className="mt-0.5 text-[11px] text-muted-foreground font-mono">
+                  {plan.rateText}
+                </div>
+                <div className="mt-3 text-[10px] font-semibold text-emerald-400">
+                  Direct Referrer earns 10%
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {promoError && (
+          <div
+            role="alert"
+            className="flex items-start gap-2.5 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-xs text-red-200"
+          >
+            <AlertCircle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
+            <span>{promoError}</span>
+          </div>
+        )}
+
+        {/* Action Buttons */}
+        <div className="flex items-center justify-between pt-4 border-t border-border">
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-xl border border-border bg-secondary/40 px-6 py-2.5 text-xs font-semibold text-muted-foreground hover:bg-secondary hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={isProcessing}
+            className="rounded-xl bg-emerald-600 px-8 py-3 text-xs font-bold text-white hover:bg-emerald-500 transition shadow-sm disabled:opacity-50"
+          >
+            {isProcessing
+              ? "Connecting Gateway..."
+              : `Launch Ad Campaign (₹${currentPlan.price.toLocaleString("en-IN")})`}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* IMAGE UPLOAD VIEW (JPG/JPEG, PNG, WEBP)                                    */
+/* -------------------------------------------------------------------------- */
+function ImageUploadView({ onBack }: { onBack: () => void }) {
+  const { user, profile, dbUser } = useAuth();
+  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const creatorName =
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Alex Rivera";
+
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [category, setCategory] = useState<string>("Coding");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string>("");
+  const [selectedFilter, setSelectedFilter] = useState<ImageFilterId>("original");
+  const [selectedMusic, setSelectedMusic] = useState<SelectedImageMusic | null>(null);
+  const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadedImage, setUploadedImage] = useState<UploadedImage | null>(null);
+
+  useEffect(() => {
+    return () => {
+      stopMusicPreview();
+    };
+  }, []);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate format: JPG/JPEG, PNG, WEBP
+    const validTypes = ["image/jpeg", "image/png", "image/webp"];
+    if (!validTypes.includes(file.type)) {
+      toast.error("Unsupported image format. Please select a JPG, JPEG, PNG, or WEBP image.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    try {
+      // Proportional center-crop and resize to strict 9:16 (1080x1920)
+      const processed = await cropAndResizeTo9to16(file);
+      setImageFile(processed);
+      const objectUrl = URL.createObjectURL(processed);
+      setPreviewUrl(objectUrl);
+      if (!title) {
+        setTitle(file.name.replace(/\.[^/.]+$/, ""));
+      }
+      if (processed !== file) {
+        toast.info("Image automatically cropped and formatted to 9:16 vertical ratio (1080×1920).");
+      }
+    } catch (_err) {
+      toast.error("Could not process image dimensions. Please try another image.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files?.[0];
+    if (!file) return;
+
+    const validTypes = ["image/jpeg", "image/png", "image/webp"];
+    if (!validTypes.includes(file.type)) {
+      toast.error("Unsupported image format. Please drop a JPG, JPEG, PNG, or WEBP image.");
+      return;
+    }
+
+    try {
+      // Proportional center-crop and resize to strict 9:16 (1080x1920)
+      const processed = await cropAndResizeTo9to16(file);
+      setImageFile(processed);
+      const objectUrl = URL.createObjectURL(processed);
+      setPreviewUrl(objectUrl);
+      if (!title) {
+        setTitle(file.name.replace(/\.[^/.]+$/, ""));
+      }
+      if (processed !== file) {
+        toast.info("Image automatically cropped and formatted to 9:16 vertical ratio (1080×1920).");
+      }
+    } catch (_err) {
+      toast.error("Could not process image dimensions. Please try another image.");
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!imageFile) {
+      toast.error("Please select an image file to upload.");
+      return;
+    }
+    if (!title.trim()) {
+      toast.error("Please enter an image title.");
+      return;
+    }
+
+    setUploading(true);
+    stopMusicPreview();
+    setPlayingTrackId(null);
+    try {
+      // 1. Export non-destructive filtered image at full resolution if a filter is active
+      const fileToUpload = await renderFilteredImageToFile(imageFile, selectedFilter);
+      // Guarantee strict 9:16 output before dispatching to API
+      const finalUploadFile = await cropAndResizeTo9to16(fileToUpload);
+      const uploadRes = await api.uploads.uploadImage(finalUploadFile);
+      if (!uploadRes || !uploadRes.success || !uploadRes.url) {
+        const serverError =
+          (uploadRes as any)?.error ||
+          (uploadRes as any)?.message ||
+          (uploadRes as any)?.msg ||
+          (!uploadRes
+            ? "Server returned an empty upload response."
+            : typeof uploadRes === "string"
+              ? uploadRes
+              : (uploadRes as any)?.success === false
+                ? "Server rejected image upload without providing an error message."
+                : "Server storage upload succeeded with HTTP 200 but did not return a valid image URL.");
+        throw new Error(serverError);
+      }
+
+      // 2. Format and file size from server response or validated file
+      let format: "jpg" | "jpeg" | "png" | "webp" = "jpg";
+      if (uploadRes.format === "png" || imageFile.type === "image/png") format = "png";
+      else if (uploadRes.format === "webp" || imageFile.type === "image/webp") format = "webp";
+      else if (uploadRes.format === "jpeg" || imageFile.name.toLowerCase().endsWith(".jpeg"))
+        format = "jpeg";
+
+      const fileSize = uploadRes.fileSize || `${(imageFile.size / (1024 * 1024)).toFixed(2)} MB`;
+
+      // 3. Persist image metadata with persistent URL to database
+      const created = await recordNewImageUpload({
+        userId,
+        creatorName,
+        title: title.trim(),
+        description: description.trim(),
+        imageUrl: uploadRes.url,
+        format,
+        fileSize,
+        category,
+        effect: selectedFilter,
+        music: selectedMusic || undefined,
+      });
+
+      setUploadedImage(created);
+      toast.success("🎉 Image uploaded successfully! Saved to your media library.");
+    } catch (err: any) {
+      console.error("Image upload failed:", err);
+      toast.error(err?.message || "Failed to upload image.");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  if (uploadedImage) {
+    return (
+      <div className="mx-auto max-w-xl text-center py-12 space-y-6">
+        <div className="grid h-16 w-16 mx-auto place-items-center rounded-full bg-teal-500/20 text-teal-400">
+          <CheckCircle2 className="h-10 w-10" />
+        </div>
+        <div>
+          <h2 className="text-2xl font-black text-foreground">Image Uploaded Successfully!</h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            &quot;{uploadedImage.title}&quot; has been recorded in your FaceTube asset gallery. It
+            will appear in the stream feed after every 5 videos.
+          </p>
+        </div>
+
+        {uploadedImage.imageUrl && (
+          <div className="mx-auto max-w-sm overflow-hidden rounded-2xl border border-border shadow-card bg-secondary/30">
+            <img
+              src={uploadedImage.imageUrl}
+              alt={uploadedImage.title}
+              className="h-48 w-full object-cover"
+            />
+            <div className="p-3 text-left">
+              <div className="text-xs font-bold text-foreground truncate">
+                {uploadedImage.title}
+              </div>
+              <div className="text-[10px] text-muted-foreground mt-0.5 font-mono uppercase">
+                {uploadedImage.format} · {uploadedImage.fileSize} · {uploadedImage.category}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-center gap-3 pt-4">
+          <button
+            type="button"
+            onClick={() => {
+              setTitle("");
+              setDescription("");
+              setImageFile(null);
+              setPreviewUrl("");
+              setUploadedImage(null);
+            }}
+            className="rounded-xl bg-teal-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-teal-500 transition"
+          >
+            Upload Another Image
+          </button>
+          <Link
+            to="/images-uploaded"
+            className="rounded-xl bg-secondary px-6 py-2.5 text-xs font-bold text-foreground hover:bg-secondary/80 transition"
+          >
+            View Image Library
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header Bar */}
+      <div className="flex items-center justify-between border-b border-border pb-4">
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onBack}
+            className="grid h-9 w-9 place-items-center rounded-full border border-border bg-secondary/60 text-muted-foreground hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+          <div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-teal-400">
+              Option 4 · Asset Studio
+            </div>
+            <h1 className="text-xl sm:text-2xl font-black text-foreground">Image Upload</h1>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-full border border-teal-500/30 bg-teal-500/10 px-3 py-1 text-xs font-bold text-teal-400">
+            Formats: JPG, PNG, WEBP
+          </span>
+          <span className="rounded-full border border-purple-500/30 bg-purple-500/10 px-3 py-1 text-xs font-bold text-purple-400">
+            Aspect Ratio: 9:16 Vertical
+          </span>
+        </div>
+      </div>
+
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* Drop Zone */}
+        <div
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={handleDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className="group relative cursor-pointer rounded-3xl border-2 border-dashed border-border bg-card p-8 text-center transition hover:border-teal-500/60 hover:bg-teal-500/5 shadow-card"
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+            onChange={handleFileChange}
+            className="hidden"
+          />
+
+          {previewUrl ? (
+            <div className="space-y-3">
+              <img
+                src={previewUrl}
+                alt="Selected Image Preview"
+                style={{ filter: getImageFilterCss(selectedFilter) }}
+                className="mx-auto max-h-72 rounded-2xl object-contain border border-border shadow-sm aspect-[9/16] transition-all duration-200"
+              />
+              <p className="text-xs font-bold text-teal-400">
+                Click or drop another file to change image (9:16 auto-formatted)
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-teal-500/10 text-teal-400 border border-teal-500/20 group-hover:scale-105 transition-transform">
+                <FileImage className="h-7 w-7" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-foreground">
+                  Click to select or drag and drop any image here
+                </h3>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Images are automatically cropped and formatted to 9:16 vertical ratio (1080×1920)
+                  · JPG, PNG, WEBP up to 25 MB
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Effects & Filters Section */}
+        <div className="rounded-2xl border border-border bg-card p-4 sm:p-5 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-foreground">Effects &amp; Filters</h3>
+              <p className="text-xs text-muted-foreground">
+                Live non-destructive preview. Original image is preserved until you publish.
+              </p>
+            </div>
+            {selectedFilter !== "original" && (
+              <button
+                type="button"
+                onClick={() => setSelectedFilter("original")}
+                className="rounded-lg border border-border bg-secondary px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary/80 transition"
+              >
+                Reset to Original
+              </button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {IMAGE_FILTERS.map((filter) => {
+              const active = selectedFilter === filter.id;
+              return (
+                <button
+                  key={filter.id}
+                  type="button"
+                  onClick={() => setSelectedFilter(filter.id)}
+                  className={`rounded-xl px-3 py-1.5 text-xs font-semibold transition border ${
+                    active
+                      ? "border-teal-500 bg-teal-500/15 text-teal-400"
+                      : "border-border bg-secondary/50 text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {filter.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Optional Music Section */}
+        <div className="rounded-2xl border border-border bg-card p-4 sm:p-5 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-sm font-bold text-foreground">Background Music (Optional)</h3>
+              <p className="text-xs text-muted-foreground">
+                Royalty-free CC0 FaceTube Studio tracks. Image remains an image post.
+              </p>
+            </div>
+            {selectedMusic && (
+              <button
+                type="button"
+                onClick={() => {
+                  stopMusicPreview();
+                  setPlayingTrackId(null);
+                  setSelectedMusic(null);
+                }}
+                className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs font-semibold text-destructive hover:bg-destructive/20 transition"
+              >
+                Remove Music
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {IMAGE_MUSIC_LIBRARY.map((track) => {
+              const isSelected = selectedMusic?.trackId === track.id;
+              const isPlaying = playingTrackId === track.id;
+              return (
+                <div
+                  key={track.id}
+                  className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 transition ${
+                    isSelected ? "border-teal-500 bg-teal-500/10" : "border-border bg-secondary/40"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelectedMusic({
+                        trackId: track.id,
+                        title: track.title,
+                        artist: track.artist,
+                        startTime:
+                          selectedMusic?.trackId === track.id ? selectedMusic.startTime : 0,
+                        volume: selectedMusic?.trackId === track.id ? selectedMusic.volume : 0.7,
+                      })
+                    }
+                    className="flex-1 text-left min-w-0"
+                  >
+                    <div className="text-xs font-bold text-foreground truncate">{track.title}</div>
+                    <div className="text-[11px] text-muted-foreground truncate">
+                      {track.genre} · {track.license}
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (isPlaying) {
+                        stopMusicPreview();
+                        setPlayingTrackId(null);
+                      } else {
+                        const ok = playMusicPreview(track.id, {
+                          startTime: isSelected ? selectedMusic.startTime : 0,
+                          volume: isSelected ? selectedMusic.volume : 0.7,
+                        });
+                        if (ok) setPlayingTrackId(track.id);
+                      }
+                    }}
+                    className="shrink-0 rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] font-semibold text-foreground hover:bg-secondary transition"
+                  >
+                    {isPlaying ? "Stop" : "Preview"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          {selectedMusic && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-border">
+              <label className="space-y-1">
+                <div className="flex justify-between text-xs font-semibold text-foreground">
+                  <span>Start Position</span>
+                  <span className="text-muted-foreground">{selectedMusic.startTime}s</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={25}
+                  step={1}
+                  value={selectedMusic.startTime}
+                  onChange={(e) =>
+                    setSelectedMusic({ ...selectedMusic, startTime: Number(e.target.value) })
+                  }
+                  className="w-full accent-teal-500"
+                />
+              </label>
+              <label className="space-y-1">
+                <div className="flex justify-between text-xs font-semibold text-foreground">
+                  <span>Volume</span>
+                  <span className="text-muted-foreground">
+                    {Math.round(selectedMusic.volume * 100)}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={selectedMusic.volume}
+                  onChange={(e) => {
+                    const vol = Number(e.target.value);
+                    setSelectedMusic({ ...selectedMusic, volume: vol });
+                    setMusicPreviewVolume(vol);
+                  }}
+                  className="w-full accent-teal-500"
+                />
+              </label>
+            </div>
+          )}
+        </div>
+
+        {/* Image Metadata Inputs */}
+        <div className="rounded-2xl border border-border bg-card p-6 space-y-4">
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Image Title <span className="text-brand">*</span>
+            </label>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="e.g. Masterclass 4K Artwork / Community Photo"
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-teal-500 focus:outline-none"
+              required
+            />
+          </div>
+
+          {/* EXACT 11 CATEGORIES SELECTOR */}
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Category <span className="text-brand">*</span>
+            </label>
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-teal-500 focus:outline-none"
+            >
+              {VIDEO_CATEGORIES.map((cat) => (
+                <option key={cat} value={cat}>
+                  {cat}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Description / Caption
+            </label>
+            <textarea
+              rows={3}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Share thoughts, credits, or context for this image..."
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-teal-500 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex items-center justify-between pt-4 border-t border-border">
+          <button
+            type="button"
+            onClick={onBack}
+            className="rounded-xl border border-border bg-secondary/40 px-6 py-2.5 text-xs font-semibold text-muted-foreground hover:bg-secondary hover:text-foreground"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={uploading}
+            className="inline-flex items-center gap-2 rounded-xl bg-teal-600 px-8 py-3 text-xs font-bold text-white hover:bg-teal-500 transition shadow-sm disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
+          >
+            {uploading ? (
+              <>
+                <RefreshCw className="h-4 w-4 animate-spin" />
+                Uploading Image to Server...
+              </>
+            ) : (
+              "Upload Image"
+            )}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}

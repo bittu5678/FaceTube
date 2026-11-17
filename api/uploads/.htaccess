@@ -1,0 +1,64 @@
+# ==============================================================================
+# FaceTube - Uploads & Media Storage Apache Configuration
+# Configures CORS, HTTP Range streaming, media MIME types, and uploads security
+# ==============================================================================
+
+# 1. Support proper media MIME types and streaming
+<IfModule mod_mime.c>
+    AddType video/mp4 .mp4 .m4v
+    AddType video/webm .webm
+    AddType video/ogg .ogv .ogg
+    AddType video/quicktime .mov
+    AddType video/x-matroska .mkv
+    AddType image/jpeg .jpg .jpeg
+    AddType image/png .png
+    AddType image/webp .webp
+    AddType image/gif .gif
+</IfModule>
+
+# 2. Security hardening: Block PHP script execution by default for all script files
+# Uses negative lookahead so verified API controllers never match this deny rule,
+# eliminating Apache 2.4 authorization merging conflicts (e.g. AuthMerging And).
+<FilesMatch "(?i)^(?!(video|image|kyc)\.php$).*\.(php|phtml|php3|php4|php5|php7|phps)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# 3. Explicitly allow legitimate API upload controller endpoints
+<FilesMatch "^(video|image|kyc)\.php$">
+    <IfModule mod_authz_core.c>
+        Require all granted
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Allow from all
+    </IfModule>
+</FilesMatch>
+
+# 4. Allow static video and image files with media streaming CORS & caching
+# Scoped strictly to static assets so PHP controllers manage their own CORS & no-cache headers.
+<FilesMatch "\.(mp4|webm|ogg|mov|m4v|mkv|jpg|jpeg|png|webp|gif)$">
+    <IfModule mod_authz_core.c>
+        Require all granted
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Allow from all
+    </IfModule>
+
+    <IfModule mod_headers.c>
+        Header set Access-Control-Allow-Origin "*"
+        Header set Access-Control-Allow-Methods "GET, HEAD, OPTIONS"
+        Header set Access-Control-Allow-Headers "Range, Content-Type, Accept, Origin"
+        Header set Access-Control-Expose-Headers "Content-Range, Content-Length, Accept-Ranges"
+        Header set Cache-Control "public, max-age=86400"
+    </IfModule>
+</FilesMatch>
+
+# 5. Disable directory browsing for security
+Options -Indexes
