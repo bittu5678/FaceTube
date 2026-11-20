@@ -1073,3 +1073,125 @@ export function convertVideoToShortItem(v: Video | UploadedVideo): ShortItem {
     channelLogoUrl,
   };
 }
+
+export interface DerivedCreator {
+  key: string;
+  userId?: string | undefined;
+  name: string;
+  initials: string;
+  channelLogoUrl?: string | undefined;
+  category: string;
+  uploadCount: number;
+}
+
+function sanitizeCreatorText(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const lower = trimmed.toLowerCase();
+  if (lower === "null" || lower === "undefined" || lower === "nan") return "";
+  return trimmed;
+}
+
+function sanitizeCreatorLogoUrl(value: unknown): string | undefined {
+  const cleaned = sanitizeCreatorText(value);
+  if (!cleaned) return undefined;
+  const resolved = resolveMediaUrl(cleaned);
+  return resolved || undefined;
+}
+
+function computeCreatorInitials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    const first = parts[0]?.charAt(0) ?? "";
+    const second = parts[1]?.charAt(0) ?? "";
+    const combined = `${first}${second}`.toUpperCase();
+    if (combined) return combined;
+  }
+  return (name.trim().slice(0, 2) || "FT").toUpperCase();
+}
+
+/**
+ * Pure helper to derive unique live creator entries from uploaded videos.
+ * - Ignores stale seed/cache records (`isStale === true` or unconfirmed seed IDs)
+ * - Deduplicates case-insensitively by `userId`, falling back to normalized channel name
+ * - Prefers `channelName || creatorName`
+ * - Sanitizes null, empty, "null", and "undefined" logo URLs
+ * - Excludes all private user fields / PII
+ */
+export function deriveCreatorsFromVideos(
+  videos: readonly UploadedVideo[] | null | undefined,
+): DerivedCreator[] {
+  if (!Array.isArray(videos) || videos.length === 0) {
+    return [];
+  }
+
+  const creatorMap = new Map<string, DerivedCreator>();
+  const hasExplicitChannelName = new Set<string>();
+
+  for (const rawVideo of videos) {
+    if (!rawVideo || typeof rawVideo !== "object") continue;
+
+    // Never treat stale seed/cache data as confirmed live database creators
+    if (rawVideo.isStale === true) continue;
+    const rawId = typeof rawVideo.id === "string" ? rawVideo.id.trim() : "";
+    if (rawVideo.isStale !== false && rawId.startsWith("vid-seed-")) {
+      continue;
+    }
+
+    const rawRecord = rawVideo as unknown as Record<string, unknown>;
+    const userId = sanitizeCreatorText(rawVideo.userId ?? rawRecord["user_id"]);
+    const channelName = sanitizeCreatorText(rawVideo.channelName ?? rawRecord["channel_name"]);
+    const creatorName = sanitizeCreatorText(rawVideo.creatorName ?? rawRecord["creator_name"]);
+    const displayName = channelName || creatorName;
+
+    if (!userId && !displayName) {
+      continue;
+    }
+
+    const safeName = displayName || "FaceTube Creator";
+    const normalizedNameKey = safeName.toLowerCase().replace(/\s+/g, " ");
+    const dedupeKey = userId ? `uid:${userId.toUpperCase()}` : `name:${normalizedNameKey}`;
+
+    const logoUrl = sanitizeCreatorLogoUrl(
+      rawVideo.channelLogoUrl ?? rawRecord["channel_logo_url"],
+    );
+    const category = sanitizeCreatorText(rawVideo.category) || "General";
+
+    const existing = creatorMap.get(dedupeKey);
+    if (existing) {
+      existing.uploadCount += 1;
+      if (!existing.channelLogoUrl && logoUrl) {
+        existing.channelLogoUrl = logoUrl;
+      }
+      if (
+        channelName &&
+        (!hasExplicitChannelName.has(dedupeKey) || existing.name === "FaceTube Creator")
+      ) {
+        existing.name = channelName;
+        existing.initials = computeCreatorInitials(channelName);
+        hasExplicitChannelName.add(dedupeKey);
+      }
+      if ((!existing.category || existing.category === "General") && category !== "General") {
+        existing.category = category;
+      }
+      continue;
+    }
+
+    if (channelName) {
+      hasExplicitChannelName.add(dedupeKey);
+    }
+
+    creatorMap.set(dedupeKey, {
+      key: dedupeKey,
+      ...(userId ? { userId } : {}),
+      name: safeName,
+      initials: computeCreatorInitials(safeName),
+      ...(logoUrl ? { channelLogoUrl: logoUrl } : {}),
+      category,
+      uploadCount: 1,
+    });
+  }
+
+  return Array.from(creatorMap.values());
+}

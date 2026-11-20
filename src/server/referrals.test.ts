@@ -1,8 +1,9 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { handleApiRequest, calculateDownlineLevelsTs } from "./api-handler";
+import { handleApiRequest, calculateDownlineLevelsTs, resetInMemoryStore } from "./api-handler";
+import { setMysqlPoolForTesting } from "./mysql";
 
 describe("Priority 2: Multi-Level Referral Downline & Team Members Verification", () => {
   // Test Suite 1: Direct Referrals vs Total Team Count
@@ -604,6 +605,197 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
       for (const m of lvl1Data.members) {
         assert.equal(m.level, 1, "All members in filtered response must be Level 1");
       }
+    });
+  });
+
+  describe("9. Task 5J-K: Referrals Production Fail-Closed Guards", () => {
+    const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+    const envKeys = ["NODE_ENV", "APP_ENV", "DB_HOST", "DB_NAME", "DB_USER"] as const;
+    let envSnapshot: Record<string, string | undefined> = {};
+    let suiteStoreSnapshot: string | null = null;
+    let suiteStoreExisted = false;
+
+    function enableMockDbEnv(mockPool: any) {
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+      setMysqlPoolForTesting(mockPool);
+    }
+
+    beforeEach(() => {
+      envSnapshot = {};
+      for (const k of envKeys) {
+        envSnapshot[k] = process.env[k];
+      }
+      suiteStoreExisted = fs.existsSync(storePath);
+      suiteStoreSnapshot = suiteStoreExisted ? fs.readFileSync(storePath, "utf-8") : null;
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+    });
+
+    afterEach(() => {
+      setMysqlPoolForTesting(null);
+      for (const k of envKeys) {
+        if (envSnapshot[k] !== undefined) {
+          process.env[k] = envSnapshot[k];
+        } else {
+          delete process.env[k];
+        }
+      }
+      if (suiteStoreExisted && suiteStoreSnapshot !== null) {
+        fs.writeFileSync(storePath, suiteStoreSnapshot, "utf-8");
+      } else if (!suiteStoreExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+      resetInMemoryStore();
+    });
+
+    it("returns HTTP 503 for referrals/dashboard and referrals/team in production without MySQL pool while preserving auth and ownership checks", async () => {
+      process.env["NODE_ENV"] = "test";
+      delete process.env["APP_ENV"];
+      setMysqlPoolForTesting(null);
+
+      const loginRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "FT483921", password: "password" }),
+        }),
+      );
+      assert.ok(loginRes);
+      assert.equal(loginRes.status, 200);
+      const { token } = (await loginRes.json()) as any;
+      assert.ok(token);
+
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      delete process.env["DB_HOST"];
+      setMysqlPoolForTesting(null);
+
+      // Auth & cross-user ownership checks still enforce 401 / 403
+      const unauthDash = await handleApiRequest(
+        new Request("http://localhost:3000/api/referrals/dashboard", { method: "GET" }),
+      );
+      assert.equal(unauthDash?.status, 401);
+
+      const crossTeam = await handleApiRequest(
+        new Request("http://localhost:3000/api/referrals/team?userId=FT102857", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+      assert.equal(crossTeam?.status, 403);
+
+      // Authenticated production requests without pool fail closed with 503
+      const dashRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/referrals/dashboard", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+      assert.ok(dashRes);
+      assert.equal(dashRes.status, 503);
+
+      const teamRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/referrals/team", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+      assert.ok(teamRes);
+      assert.equal(teamRes.status, 503);
+    });
+
+    it("returns HTTP 500 in production on MySQL errors for referrals/dashboard and referrals/team without falling back to JSON store", async () => {
+      process.env["NODE_ENV"] = "test";
+      const loginRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "FT483921", password: "password" }),
+        }),
+      );
+      const { token } = (await loginRes!.json()) as any;
+
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+
+      enableMockDbEnv({
+        query: async (sql: string) => {
+          if (/FROM\s+sessions/i.test(sql)) return [[], []];
+          throw new Error("Simulated MySQL referral failure");
+        },
+      });
+
+      const dashRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/referrals/dashboard", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+      assert.ok(dashRes);
+      assert.equal(dashRes.status, 500);
+      const dashBody = (await dashRes.json()) as any;
+      assert.equal(dashBody.success, false);
+      assert.equal(dashBody.dashboard, undefined);
+
+      const teamRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/referrals/team", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+      assert.ok(teamRes);
+      assert.equal(teamRes.status, 500);
+      const teamBody = (await teamRes.json()) as any;
+      assert.equal(teamBody.success, false);
+      assert.equal(teamBody.members, undefined);
+    });
+
+    it("does not fall back to JSON store when MySQL returns empty user rows for referrals/dashboard and referrals/team", async () => {
+      process.env["NODE_ENV"] = "test";
+      const loginRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "FT102857", password: "password" }),
+        }),
+      );
+      const { token } = (await loginRes!.json()) as any;
+
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+
+      enableMockDbEnv({
+        query: async () => [[], []],
+      });
+
+      const dashRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/referrals/dashboard", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+      assert.ok(dashRes);
+      assert.equal(dashRes.status, 200);
+      const dashBody = (await dashRes.json()) as any;
+      assert.equal(dashBody.success, true);
+      assert.equal(dashBody.dashboard.directReferralsCount, 0);
+      assert.equal(dashBody.dashboard.teamMembersCount, 0);
+      assert.deepEqual(dashBody.dashboard.members, []);
+
+      const teamRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/referrals/team", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      );
+      assert.ok(teamRes);
+      assert.equal(teamRes.status, 200);
+      const teamBody = (await teamRes.json()) as any;
+      assert.equal(teamBody.success, true);
+      assert.equal(teamBody.totalTeamCount, 0);
+      assert.deepEqual(teamBody.members, []);
     });
   });
 });

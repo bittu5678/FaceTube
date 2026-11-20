@@ -16,7 +16,7 @@ function validateProfileMediaUrl($rawValue, $fieldName) {
     }
     $trimmed = trim($rawValue);
     if ($trimmed === '') {
-        return [true, '', null];
+        return [true, $fieldName === 'channel_logo_url' ? null : '', null];
     }
     if (strlen($trimmed) > 500) {
         return [false, null, "{$fieldName} must be 500 characters or fewer."];

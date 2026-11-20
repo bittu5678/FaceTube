@@ -80,24 +80,48 @@ export function LivePage() {
         .filter(
           (s: any) => s && s.id !== undefined && s.id !== null && !isMockStreamId(String(s.id)),
         )
-        .map((s: any) => ({
-          id: String(s.id),
-          userId: s.user_id,
-          title: s.title,
-          streamer: s.streamer_name || s.creator_name || s.streamer || "FaceTube Creator",
-          streamerHandle: `@${(s.streamer_name || s.creator_name || "creator").toLowerCase().replace(/\s+/g, "")}`,
-          initials: (s.streamer_name || s.creator_name || "FT").substring(0, 2).toUpperCase(),
-          viewers: `${s.viewers_count || 1} viewers`,
-          viewersCount: Number(s.viewers_count) || 1,
-          category: s.category || "Coding & Tech",
-          tags: ["live", "stream"],
-          thumb:
-            s.thumbnail_url || "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800",
-          isLive: s.status === "live",
-          startedTime: s.status === "live" ? "Live now" : "Upcoming",
-          channelLogoUrl: s.channel_logo_url || s.channelLogoUrl || s.avatar_url || undefined,
-          chatMessages: [],
-        }));
+        .map((s: any) => {
+          const pickName = (...values: unknown[]): string => {
+            for (const val of values) {
+              if (typeof val === "string") {
+                const trimmed = val.trim();
+                if (
+                  trimmed &&
+                  trimmed.toLowerCase() !== "null" &&
+                  trimmed.toLowerCase() !== "undefined"
+                ) {
+                  return trimmed;
+                }
+              }
+            }
+            return "";
+          };
+          const primaryCreatorName = pickName(
+            s.streamer_name,
+            s.creator_name,
+            s.channel_name,
+            s.channelName,
+          );
+          return {
+            id: String(s.id),
+            userId: s.user_id,
+            title: s.title,
+            streamer: primaryCreatorName || pickName(s.streamer) || "FaceTube Creator",
+            streamerHandle: `@${(primaryCreatorName || "creator").toLowerCase().replace(/\s+/g, "")}`,
+            initials: (primaryCreatorName || "FT").substring(0, 2).toUpperCase(),
+            viewers: `${s.viewers_count || 1} viewers`,
+            viewersCount: Number(s.viewers_count) || 1,
+            category: s.category || "Coding & Tech",
+            tags: ["live", "stream"],
+            thumb:
+              s.thumbnail_url ||
+              "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800",
+            isLive: s.status === "live",
+            startedTime: s.status === "live" ? "Live now" : "Upcoming",
+            channelLogoUrl: s.channel_logo_url || s.channelLogoUrl || s.avatar_url || undefined,
+            chatMessages: [],
+          };
+        });
 
       setStreams(mapped);
       setActiveStream((prev) => {

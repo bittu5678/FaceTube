@@ -2652,4 +2652,324 @@ describe("FaceTube Task 5B: Channel Logo End-to-End Tests", () => {
       assert.match(profilePhp, /sanitizePublicProfile[\s\S]*channel_description/);
     });
   });
+
+  describe("10. Task 5J-L: Empty channel_logo_url Normalization to NULL", () => {
+    it("1. Normalizes empty and whitespace-only channel_logo_url to null/SQL NULL while preserving omitted updates and channel_name behavior", async () => {
+      // Seed logo + channel_name in JSON store
+      const seedRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/users/profile", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${userToken}`,
+          },
+          body: JSON.stringify({
+            channel_logo_url: "/uploads/logos/profile_empty_clear.png",
+            channel_name: "Kept Channel Name",
+          }),
+        }),
+      );
+      assert.ok(seedRes);
+      assert.equal(seedRes.status, 200);
+      const seedData = (await seedRes.json()) as any;
+      assert.equal(seedData.profile.channel_logo_url, "/uploads/logos/profile_empty_clear.png");
+
+      // Omitting channel_logo_url while updating channel_name preserves existing logo
+      const omitRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/users/profile", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${userToken}`,
+          },
+          body: JSON.stringify({
+            channel_name: "Updated Kept Channel",
+          }),
+        }),
+      );
+      assert.ok(omitRes);
+      assert.equal(omitRes.status, 200);
+      const omitData = (await omitRes.json()) as any;
+      assert.equal(omitData.profile.channel_logo_url, "/uploads/logos/profile_empty_clear.png");
+      assert.equal(omitData.profile.channel_name, "Updated Kept Channel");
+
+      // Empty string clears channel_logo_url to null in JSON store
+      const emptyRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/users/profile", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${userToken}`,
+          },
+          body: JSON.stringify({
+            channel_logo_url: "",
+          }),
+        }),
+      );
+      assert.ok(emptyRes);
+      assert.equal(emptyRes.status, 200);
+      const emptyData = (await emptyRes.json()) as any;
+      assert.equal(emptyData.profile.channel_logo_url, null);
+      assert.equal(emptyData.profile.channel_name, "Updated Kept Channel");
+
+      const storeSnapshot = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      const alexStoreRow = (storeSnapshot.users || []).find((u: any) => u.user_id === userUserId);
+      assert.ok(alexStoreRow);
+      assert.equal(alexStoreRow.channel_logo_url, null);
+
+      // Re-seed and test whitespace-only channelLogoUrl in MySQL mode -> binds SQL NULL
+      let currentDbLogo: string | null = "/uploads/logos/mysql_before_empty.png";
+      let currentDbName: string | null = "MySQL Studio";
+      const capturedUpdates: Array<{ sql: string; params: any[] }> = [];
+
+      const mockPool = {
+        query: async (sql: string, params: any[] = []) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [[], []];
+          }
+          if (/UPDATE\s+users/i.test(sql)) {
+            capturedUpdates.push({ sql, params });
+            if (/channel_logo_url\s*=\s*\?/i.test(sql)) {
+              currentDbLogo = params[0] ?? null;
+            }
+            if (/channel_name\s*=\s*\?/i.test(sql)) {
+              const idx = /channel_logo_url\s*=\s*\?/i.test(sql) ? 1 : 0;
+              currentDbName = params[idx] ?? null;
+            }
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/FROM\s+users/i.test(sql)) {
+            return [
+              [
+                {
+                  id: "a0000000-0000-0000-0000-000000000002",
+                  user_id: userUserId,
+                  name: "Alex Rivera",
+                  mobile: "+1 555-014-8392",
+                  email: "alex@facetube.com",
+                  role: "user",
+                  referral_code: "CREATOR50",
+                  avatar_url: null,
+                  channel_logo_url: currentDbLogo,
+                  channel_name: currentDbName,
+                  channel_description: null,
+                  created_at: new Date().toISOString(),
+                },
+              ],
+              [],
+            ];
+          }
+          return [[], []];
+        },
+      } as any;
+
+      const prevDbHost = process.env["DB_HOST"];
+      const prevDbName = process.env["DB_NAME"];
+      const prevDbUser = process.env["DB_USER"];
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+      setMysqlPoolForTesting(mockPool);
+
+      try {
+        const wsRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/users/profile", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${userToken}`,
+            },
+            body: JSON.stringify({
+              channelLogoUrl: "   ",
+            }),
+          }),
+        );
+        assert.ok(wsRes);
+        assert.equal(wsRes.status, 200);
+        const wsData = (await wsRes.json()) as any;
+        assert.equal(wsData.profile.channel_logo_url, null);
+        assert.equal(wsData.profile.channel_name, "MySQL Studio");
+        assert.equal(capturedUpdates.length, 1);
+        const firstUpdate = capturedUpdates[0]!;
+        assert.match(firstUpdate.sql, /channel_logo_url\s*=\s*\?/i);
+        assert.equal(firstUpdate.params[0], null);
+
+        // Existing channel_name empty-string behavior remains unchanged
+        const emptyNameRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/users/profile", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${userToken}`,
+            },
+            body: JSON.stringify({
+              channel_name: "",
+            }),
+          }),
+        );
+        assert.ok(emptyNameRes);
+        assert.equal(emptyNameRes.status, 200);
+        const emptyNameData = (await emptyNameRes.json()) as any;
+        assert.equal(emptyNameData.profile.channel_name, "");
+      } finally {
+        setMysqlPoolForTesting(null);
+        if (prevDbHost !== undefined) process.env["DB_HOST"] = prevDbHost;
+        else delete process.env["DB_HOST"];
+        if (prevDbName !== undefined) process.env["DB_NAME"] = prevDbName;
+        else delete process.env["DB_NAME"];
+        if (prevDbUser !== undefined) process.env["DB_USER"] = prevDbUser;
+        else delete process.env["DB_USER"];
+      }
+
+      // PHP profile.php also normalizes empty/whitespace channel_logo_url to null
+      const profilePhp = fs.readFileSync(
+        path.resolve(process.cwd(), "api/users/profile.php"),
+        "utf-8",
+      );
+      assert.match(profilePhp, /\$fieldName\s*===\s*'channel_logo_url'\s*\?\s*null\s*:\s*''/);
+    });
+  });
+
+  describe("11. Task 5J-N: Public users/profile GET channel_logo_url Normalization", () => {
+    it("1. Normalizes relative /uploads/... logos in public MySQL and non-prod JSON profile GET while preserving absolute, null, and empty values without PII", async () => {
+      const envKeys = [
+        "NODE_ENV",
+        "APP_ENV",
+        "DB_HOST",
+        "DB_NAME",
+        "DB_USER",
+        "FACETUBE_API_BASE_URL",
+        "API_BASE_URL",
+        "VITE_MEDIA_BASE_URL",
+      ] as const;
+      const envSnapshot: Record<string, string | undefined> = {};
+      for (const k of envKeys) {
+        envSnapshot[k] = process.env[k];
+      }
+      const storeSnapshot = fs.existsSync(storePath) ? fs.readFileSync(storePath, "utf-8") : null;
+
+      try {
+        // A. Production MySQL mode: relative -> https://api.facetube.online/uploads/..., absolute/null/"" preserved, no PII
+        process.env["APP_ENV"] = "production";
+        delete process.env["NODE_ENV"];
+        delete process.env["FACETUBE_API_BASE_URL"];
+        delete process.env["API_BASE_URL"];
+        delete process.env["VITE_MEDIA_BASE_URL"];
+        process.env["DB_HOST"] = "127.0.0.1";
+        process.env["DB_NAME"] = "facetube_test";
+        process.env["DB_USER"] = "test_user";
+
+        const cases: Array<{ label: string; input: string | null; expected: string | null }> = [
+          {
+            label: "relative /uploads/ logo",
+            input: "/uploads/logos/public_rel.png",
+            expected: "https://api.facetube.online/uploads/logos/public_rel.png",
+          },
+          {
+            label: "already absolute https URL",
+            input: "https://cdn.example.com/logos/public_abs.png",
+            expected: "https://cdn.example.com/logos/public_abs.png",
+          },
+          {
+            label: "null logo",
+            input: null,
+            expected: null,
+          },
+          {
+            label: "empty string logo",
+            input: "",
+            expected: "",
+          },
+        ];
+
+        for (const tc of cases) {
+          setMysqlPoolForTesting({
+            query: async () => [
+              [
+                {
+                  id: "u-pub-test",
+                  user_id: "FT483921",
+                  name: "Alex Rivera",
+                  mobile: "+1 555-000-0001",
+                  email: "alex@facetube.com",
+                  role: "user",
+                  referral_code: "CREATOR50",
+                  avatar_url: null,
+                  channel_logo_url: tc.input,
+                  channel_name: "Alex Public Studio",
+                  channel_description: "Public bio",
+                  created_at: "2026-11-01T00:00:00.000Z",
+                },
+              ],
+              [],
+            ],
+          } as any);
+
+          const res = await handleApiRequest(
+            new Request("http://localhost:3000/api/users/profile?user_id=FT483921", {
+              method: "GET",
+            }),
+          );
+          assert.ok(res);
+          assert.equal(res.status, 200, tc.label);
+          const data = (await res.json()) as any;
+          assert.equal(data.profile.channel_logo_url, tc.expected, tc.label);
+          assert.equal(data.profile.email, undefined);
+          assert.equal(data.profile.mobile, undefined);
+          assert.equal(data.profile.referral_code, undefined);
+          assert.equal(data.profile.role, undefined);
+        }
+
+        // B. Non-production JSON store fallback on https://facetube.online host normalizes relative logo and preserves no PII
+        process.env["NODE_ENV"] = "test";
+        delete process.env["APP_ENV"];
+        delete process.env["DB_HOST"];
+        setMysqlPoolForTesting(null);
+        resetStoreForTests();
+
+        await handleApiRequest(
+          new Request("http://localhost:3000/api/users/profile", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${userToken}`,
+            },
+            body: JSON.stringify({
+              channel_logo_url: "/uploads/logos/json_public.png",
+            }),
+          }),
+        );
+
+        const jsonPubRes = await handleApiRequest(
+          new Request(
+            `https://facetube.online/api/users/profile?user_id=${encodeURIComponent(userUserId)}`,
+            { method: "GET" },
+          ),
+        );
+        assert.ok(jsonPubRes);
+        assert.equal(jsonPubRes.status, 200);
+        const jsonPubData = (await jsonPubRes.json()) as any;
+        assert.equal(
+          jsonPubData.profile.channel_logo_url,
+          "https://api.facetube.online/uploads/logos/json_public.png",
+        );
+        assert.equal(jsonPubData.profile.email, undefined);
+        assert.equal(jsonPubData.profile.mobile, undefined);
+        assert.equal(jsonPubData.profile.referral_code, undefined);
+      } finally {
+        setMysqlPoolForTesting(null);
+        for (const k of envKeys) {
+          if (envSnapshot[k] !== undefined) {
+            process.env[k] = envSnapshot[k];
+          } else {
+            delete process.env[k];
+          }
+        }
+        if (storeSnapshot !== null) {
+          fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+        }
+        resetInMemoryStore();
+      }
+    });
+  });
 });

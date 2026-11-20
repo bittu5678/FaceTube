@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Compass,
   Flame,
@@ -15,7 +15,12 @@ import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { VideoCard } from "@/components/videohub/VideoCard";
 import { AdMobBanner } from "@/components/admob/AdMobBanner";
-import { trending, recommended, creators, allVideos } from "@/data/videos";
+import { trending, creators, allVideos } from "@/data/videos";
+import {
+  fetchUploadedVideos,
+  deriveCreatorsFromVideos,
+  type UploadedVideo,
+} from "@/lib/video-service";
 
 export const Route = createFileRoute("/explore")({
   head: () => ({
@@ -63,6 +68,56 @@ const exploreCategories = [
 function ExplorePage() {
   const [selectedTag, setSelectedTag] = useState<string>("Trending");
   const [searchQuery, setSearchQuery] = useState("");
+  const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
+
+  useEffect(() => {
+    let isMounted = true;
+    fetchUploadedVideos()
+      .then((vids) => {
+        if (isMounted && vids && vids.length > 0) {
+          setUploadedVideos(vids);
+        }
+      })
+      .catch((err) => {
+        if (isMounted) {
+          console.error("Error loading explore creators:", err);
+        }
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const featuredCreators = useMemo(() => {
+    const liveCreators = deriveCreatorsFromVideos(uploadedVideos).slice(0, 6);
+    if (liveCreators.length > 0) {
+      return liveCreators.map((c) => ({
+        key: c.key,
+        name: c.name,
+        initials: c.initials,
+        channelLogoUrl: c.channelLogoUrl,
+        subtitle: `${c.uploadCount} ${c.uploadCount === 1 ? "video" : "videos"}`,
+        tag: c.category || "Creator",
+      }));
+    }
+
+    return creators.map((c) => {
+      const creatorMeta = c as typeof c & {
+        channelLogoUrl?: string | undefined;
+        channel_logo_url?: string | undefined;
+        channelName?: string | undefined;
+        channel_name?: string | undefined;
+      };
+      return {
+        key: c.name,
+        name: creatorMeta.channelName || creatorMeta.channel_name || c.name,
+        initials: c.initials,
+        channelLogoUrl: creatorMeta.channelLogoUrl || creatorMeta.channel_logo_url,
+        subtitle: c.subs,
+        tag: c.tag,
+      };
+    });
+  }, [uploadedVideos]);
 
   const filteredVideos = allVideos.filter((v) => {
     if (searchQuery.trim()) {
@@ -156,39 +211,30 @@ function ExplorePage() {
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            {creators.map((c) => {
-              const creatorMeta = c as typeof c & {
-                channelLogoUrl?: string | undefined;
-                channel_logo_url?: string | undefined;
-                channelName?: string | undefined;
-                channel_name?: string | undefined;
-              };
-              const creatorName = creatorMeta.channelName || creatorMeta.channel_name || c.name;
-              return (
-                <div
-                  key={c.name}
-                  className="flex flex-col items-center justify-center p-3 rounded-2xl border border-border bg-background text-center transition hover:border-brand/40"
-                >
-                  <div className="mb-2">
-                    <ChannelAvatar
-                      src={creatorMeta.channelLogoUrl || creatorMeta.channel_logo_url}
-                      name={creatorName}
-                      initials={c.initials}
-                      sizeClassName="h-12 w-12"
-                      imageRingClassName="ring-1 ring-border shadow-sm"
-                      fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-sm font-bold text-white shadow-sm"
-                    />
-                  </div>
-                  <p className="text-xs font-bold text-foreground truncate w-full">{creatorName}</p>
-                  <p className="text-[10px] text-muted-foreground mt-0.5 truncate w-full">
-                    {c.subs}
-                  </p>
-                  <span className="mt-2 rounded-full bg-secondary px-2 py-0.5 text-[9px] font-semibold text-muted-foreground">
-                    {c.tag}
-                  </span>
+            {featuredCreators.map((c) => (
+              <div
+                key={c.key}
+                className="flex flex-col items-center justify-center p-3 rounded-2xl border border-border bg-background text-center transition hover:border-brand/40"
+              >
+                <div className="mb-2">
+                  <ChannelAvatar
+                    src={c.channelLogoUrl}
+                    name={c.name}
+                    initials={c.initials}
+                    sizeClassName="h-12 w-12"
+                    imageRingClassName="ring-1 ring-border shadow-sm"
+                    fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-sm font-bold text-white shadow-sm"
+                  />
                 </div>
-              );
-            })}
+                <p className="text-xs font-bold text-foreground truncate w-full">{c.name}</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5 truncate w-full">
+                  {c.subtitle}
+                </p>
+                <span className="mt-2 rounded-full bg-secondary px-2 py-0.5 text-[9px] font-semibold text-muted-foreground">
+                  {c.tag}
+                </span>
+              </div>
+            ))}
           </div>
         </section>
 

@@ -14,7 +14,24 @@ $method = $_SERVER['REQUEST_METHOD'];
 if ($method === 'GET') {
     try {
         $stmt = $pdo->query('
-            SELECT s.*, COALESCE(NULLIF(u.channel_name, ""), u.name) AS streamer_name, COALESCE(NULLIF(u.channel_name, ""), u.name) AS channel_name, u.avatar_url, COALESCE(NULLIF(u.channel_logo_url, ""), u.avatar_url) AS channel_logo_url
+            SELECT
+                s.id,
+                s.user_id,
+                s.title,
+                s.description,
+                s.category,
+                s.playback_url,
+                s.thumbnail_url,
+                s.status,
+                s.viewers_count,
+                s.started_at,
+                s.ended_at,
+                s.created_at,
+                s.updated_at,
+                COALESCE(NULLIF(NULLIF(NULLIF(TRIM(u.channel_name), ""), "null"), "undefined"), u.name) AS streamer_name,
+                COALESCE(NULLIF(NULLIF(NULLIF(TRIM(u.channel_name), ""), "null"), "undefined"), u.name) AS channel_name,
+                u.avatar_url,
+                COALESCE(NULLIF(NULLIF(NULLIF(TRIM(u.channel_logo_url), ""), "null"), "undefined"), u.avatar_url) AS channel_logo_url
             FROM live_streams s
             LEFT JOIN users u ON UPPER(s.user_id) = UPPER(u.user_id)
             WHERE s.status IN ("live", "upcoming")
@@ -24,7 +41,10 @@ if ($method === 'GET') {
 
         foreach ($streams as &$s) {
             if (!empty($s['channel_logo_url'])) {
-                $s['channel_logo_url'] = toAbsoluteMediaUrl($s['channel_logo_url'], 'logos');
+                $normalizedLogo = toAbsoluteMediaUrl($s['channel_logo_url'], 'logos');
+                $s['channel_logo_url'] = $normalizedLogo !== '' ? $normalizedLogo : null;
+            } else {
+                $s['channel_logo_url'] = null;
             }
         }
         unset($s);

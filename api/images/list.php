@@ -76,5 +76,5 @@ try {
 
     jsonResponse(['success' => true, 'images' => $images, 'total' => count($images)]);
 } catch (PDOException $e) {
-    jsonResponse(['success' => true, 'images' => [], 'total' => 0]);
+    jsonResponse(['success' => false, 'error' => 'Database error while fetching images.'], 500);
 }

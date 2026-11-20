@@ -28,6 +28,7 @@ import {
   sendPasswordResetEmailServer,
   resolveSmtpConfig,
 } from "./email.ts";
+import { PRODUCTION_API_DOMAIN } from "../lib/media-url.ts";
 
 const DATA_DIR = path.resolve(process.cwd(), "data");
 const STORE_FILE = path.join(DATA_DIR, "facetube_store.json");
@@ -68,6 +69,90 @@ export function isFailClosedProductionEnv(appEnvRaw?: string, nodeEnvRaw?: strin
   const nonProdEnvs = new Set(["development", "dev", "local", "test"]);
   const presentEnvs = [appEnv, nodeEnv].filter((v) => v !== "");
   return presentEnvs.length === 0 || presentEnvs.some((v) => !nonProdEnvs.has(v));
+}
+
+export function normalizeServerMediaUrl(
+  rawUrl: unknown,
+  request?: Request,
+  options?: {
+    env?: Record<string, string | undefined> | undefined;
+    isProduction?: boolean | undefined;
+    defaultSubfolder?: "logos" | "images" | "videos" | undefined;
+    prefixBarePaths?: boolean | undefined;
+    preserveEmptyString?: boolean | undefined;
+  },
+): string | null {
+  if (rawUrl === null || rawUrl === undefined || typeof rawUrl !== "string") {
+    return null;
+  }
+
+  let cleaned = rawUrl.trim();
+  const lower = cleaned.toLowerCase();
+  if (!cleaned) {
+    return options?.preserveEmptyString && rawUrl === "" ? "" : null;
+  }
+  if (lower === "null" || lower === "undefined" || lower === "nan" || cleaned.includes("[object")) {
+    return null;
+  }
+
+  // Unnest accidental double domain prefix: https://api.facetube.onlinehttps://api.facetube.online/...
+  const nestedMatch = cleaned.match(/^(https?:\/\/[^/]+)(https?:\/\/.+)$/i);
+  if (nestedMatch && nestedMatch[2]) {
+    cleaned = nestedMatch[2].trim();
+    if (!cleaned) {
+      return options?.preserveEmptyString && rawUrl === "" ? "" : null;
+    }
+  }
+
+  if (/^(data:|blob:|https?:\/\/)/i.test(cleaned)) {
+    return cleaned;
+  }
+
+  const normalizedPath = cleaned.startsWith("/")
+    ? cleaned
+    : cleaned.startsWith("uploads/")
+      ? `/${cleaned}`
+      : options?.prefixBarePaths
+        ? `/uploads/${options.defaultSubfolder ?? "logos"}/${cleaned}`
+        : cleaned;
+
+  if (normalizedPath.startsWith("/uploads/")) {
+    const readEnvVal = (key: string) =>
+      String(options?.env?.[key] ?? process.env[key] ?? "").trim();
+    const envBase = (
+      readEnvVal("FACETUBE_API_BASE_URL") ||
+      readEnvVal("API_BASE_URL") ||
+      readEnvVal("VITE_MEDIA_BASE_URL")
+    ).replace(/\/+$/, "");
+    if (envBase) {
+      return `${envBase}${normalizedPath}`;
+    }
+
+    if (request) {
+      try {
+        const reqHost = new URL(request.url).hostname.toLowerCase();
+        if (
+          reqHost === "facetube.online" ||
+          reqHost === "www.facetube.online" ||
+          reqHost === "api.facetube.online"
+        ) {
+          return `${PRODUCTION_API_DOMAIN}${normalizedPath}`;
+        }
+      } catch {
+        // ignore URL parse error
+      }
+    }
+
+    const isProd =
+      options?.isProduction !== undefined
+        ? options.isProduction
+        : isFailClosedProductionEnv(readEnvVal("APP_ENV"), readEnvVal("NODE_ENV"));
+    if (isProd) {
+      return `${PRODUCTION_API_DOMAIN}${normalizedPath}`;
+    }
+  }
+
+  return normalizedPath;
 }
 
 export function isMysqlDuplicateKeyError(err: unknown): boolean {
@@ -1236,6 +1321,7 @@ export async function getAuthUserFromRequest(
   request: Request,
   store: ServerStore,
   pool?: Pool | null,
+  env?: Record<string, string | undefined> | undefined,
 ): Promise<AuthUser | null> {
   const authHeader = request.headers.get("Authorization") || request.headers.get("X-Authorization");
   if (!authHeader) return null;
@@ -1254,7 +1340,14 @@ export async function getAuthUserFromRequest(
         [token],
       );
       if (rows && rows.length > 0) {
-        return rows[0] as AuthUser;
+        const rowUser = rows[0] as AuthUser;
+        return {
+          ...rowUser,
+          channel_logo_url: normalizeServerMediaUrl(rowUser.channel_logo_url ?? null, request, {
+            env,
+            preserveEmptyString: true,
+          }),
+        };
       }
     } catch (_e) {
       // Fall through to store check
@@ -1276,7 +1369,10 @@ export async function getAuthUserFromRequest(
         role: user.role,
         referral_code: user.referral_code,
         avatar_url: user.avatar_url,
-        channel_logo_url: user.channel_logo_url ?? null,
+        channel_logo_url: normalizeServerMediaUrl(user.channel_logo_url ?? null, request, {
+          env,
+          preserveEmptyString: true,
+        }),
         channel_name: user.channel_name ?? null,
         channel_description: user.channel_description ?? null,
         created_at: user.created_at,
@@ -3450,6 +3546,8 @@ export async function handleApiRequest(
           );
         }
 
+        const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+        const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
         const pool = getMysqlPool();
 
         if (pool) {
@@ -3522,11 +3620,18 @@ export async function handleApiRequest(
           return jsonResponse({
             success: true,
             token,
-            user,
+            user: {
+              ...user,
+              channel_logo_url: normalizeServerMediaUrl(user.channel_logo_url ?? null, request, {
+                env,
+                isProduction,
+                preserveEmptyString: true,
+              }),
+            },
             message: "Login successful.",
           });
         } else {
-          if (process.env["NODE_ENV"] === "production") {
+          if (isProduction) {
             return jsonResponse(
               {
                 success: false,
@@ -3594,7 +3699,15 @@ export async function handleApiRequest(
             token,
             user: {
               ...safeUser,
-              channel_logo_url: safeUser.channel_logo_url ?? null,
+              channel_logo_url: normalizeServerMediaUrl(
+                safeUser.channel_logo_url ?? null,
+                request,
+                {
+                  env,
+                  isProduction,
+                  preserveEmptyString: true,
+                },
+              ),
               channel_name: safeUser.channel_name ?? null,
               channel_description: safeUser.channel_description ?? null,
             },
@@ -3632,7 +3745,7 @@ export async function handleApiRequest(
   if (route === "auth/me") {
     if (method === "GET") {
       const pool = getMysqlPool();
-      const authUser = await getAuthUserFromRequest(request, store, pool);
+      const authUser = await getAuthUserFromRequest(request, store, pool, env);
       if (authUser) {
         return jsonResponse({ authenticated: true, user: authUser });
       }
@@ -4142,7 +4255,7 @@ export async function handleApiRequest(
       }
       const trimmed = rawValue.trim();
       if (trimmed === "") {
-        return { valid: true, value: "" };
+        return { valid: true, value: fieldName === "channel_logo_url" ? null : "" };
       }
       if (trimmed.length > 500) {
         return {
@@ -4252,11 +4365,9 @@ export async function handleApiRequest(
 
     if (method === "GET") {
       const qUserId = url.searchParams.get("userId") || url.searchParams.get("user_id");
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
       const pool = getMysqlPool();
-      const isProduction = isFailClosedProductionEnv(
-        process.env["APP_ENV"],
-        process.env["NODE_ENV"],
-      );
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
       if (isProduction && !pool) {
         return jsonResponse(
           {
@@ -4267,6 +4378,30 @@ export async function handleApiRequest(
           503,
         );
       }
+
+      const normalizeProfileLogo = (rawLogo: unknown) =>
+        normalizeServerMediaUrl(rawLogo ?? null, request, {
+          env,
+          isProduction,
+          preserveEmptyString: true,
+        });
+
+      const sanitizePublicProfileWithNormalizedLogo = (row: {
+        id: string;
+        user_id: string;
+        name: string;
+        avatar_url?: string | null | undefined;
+        channel_logo_url?: string | null | undefined;
+        channel_name?: string | null | undefined;
+        channel_description?: string | null | undefined;
+        created_at: string;
+      }) => {
+        const sanitized = sanitizePublicProfile(row);
+        return {
+          ...sanitized,
+          channel_logo_url: normalizeProfileLogo(sanitized.channel_logo_url),
+        };
+      };
 
       const authUser = await getAuthUserFromRequest(request, store, pool);
       if (!qUserId) {
@@ -4296,7 +4431,12 @@ export async function handleApiRequest(
                 authUser!.id.toUpperCase() === String(profileRow.id || "").toUpperCase());
             return jsonResponse({
               success: true,
-              profile: isSelfOrAdmin ? profileRow : sanitizePublicProfile(profileRow),
+              profile: isSelfOrAdmin
+                ? {
+                    ...profileRow,
+                    channel_logo_url: normalizeProfileLogo(profileRow.channel_logo_url),
+                  }
+                : sanitizePublicProfileWithNormalizedLogo(profileRow),
             });
           }
           return jsonResponse({ success: false, error: "Profile not found" }, 404);
@@ -4320,7 +4460,12 @@ export async function handleApiRequest(
             authUser!.id.toUpperCase() === storeUser.id.toUpperCase());
         return jsonResponse({
           success: true,
-          profile: isSelfOrAdmin ? safeProfile : sanitizePublicProfile(safeProfile),
+          profile: isSelfOrAdmin
+            ? {
+                ...safeProfile,
+                channel_logo_url: normalizeProfileLogo(safeProfile.channel_logo_url),
+              }
+            : sanitizePublicProfileWithNormalizedLogo(safeProfile),
         });
       }
       return jsonResponse({ success: false, error: "Profile not found" }, 404);
@@ -4530,7 +4675,7 @@ export async function handleApiRequest(
           storeUser.avatar_url = nextAvatarUrl ?? undefined;
         }
         if (hasChannelLogoUpdate) {
-          storeUser.channel_logo_url = nextChannelLogoUrl ?? undefined;
+          storeUser.channel_logo_url = nextChannelLogoUrl;
         }
         if (hasChannelNameUpdate) {
           storeUser.channel_name = nextChannelName ?? undefined;
@@ -4620,7 +4765,18 @@ export async function handleApiRequest(
       const category = url.searchParams.get("category");
       const search = url.searchParams.get("search");
 
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
       const pool = getMysqlPool();
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Database connection unavailable in production environment",
+          },
+          503,
+        );
+      }
       if (pool) {
         try {
           const where: string[] = [];
@@ -4669,63 +4825,71 @@ export async function handleApiRequest(
             LIMIT 100
           `;
           const [rows] = (await pool.query(sql, params)) as any;
-          if (Array.isArray(rows) && rows.length > 0) {
-            const formatted = rows.map((r: any) => {
-              const active = isAdPromotionActive({
-                is_promoted: r.is_promoted,
-                promotion_expires_at: r.promotion_expires_at,
-              });
-              const channelName = r.creator_channel_name || r.creator_name || "FaceTube Creator";
-              const channelLogoUrl = r.creator_channel_logo_url || null;
-              return {
-                id: String(r.id),
-                userId: r.user_id,
-                user_id: r.user_id,
-                creatorName: channelName,
-                creator_name: channelName,
-                channelName,
-                channel_name: channelName,
-                channelLogoUrl,
-                channel_logo_url: channelLogoUrl,
-                title: r.title,
-                description: r.description || "",
-                videoUrl: r.video_url,
-                video_url: r.video_url,
-                thumbnailUrl: r.thumbnail_url || "",
-                thumbnail_url: r.thumbnail_url || "",
-                videoType: r.video_type,
-                video_type: r.video_type,
-                contentType: r.content_type,
-                content_type: r.content_type,
-                category: r.category || "General",
-                duration: r.duration || "0:00",
-                views: Number(r.views) || 0,
-                likes: Number(r.likes) || 0,
-                paymentStatus: r.payment_status || "not_required",
-                payment_status: r.payment_status || "not_required",
-                paymentId: r.payment_id,
-                payment_id: r.payment_id,
-                paymentAmount: Number(r.payment_amount) || 0,
-                payment_amount: Number(r.payment_amount) || 0,
-                isPromoted: active,
-                is_promoted: active,
-                isActivePromoted: active,
-                is_active_promoted: active,
-                rawIsPromoted: Boolean(r.is_promoted),
-                raw_is_promoted: Boolean(r.is_promoted),
-                promotionPlan: r.promotion_plan,
-                promotion_plan: r.promotion_plan,
-                promotionExpiresAt: r.promotion_expires_at,
-                promotion_expires_at: r.promotion_expires_at,
-                createdAt: r.created_at,
-                created_at: r.created_at,
-                updatedAt: r.updated_at,
-                updated_at: r.updated_at,
-              };
+          const rowList = Array.isArray(rows) ? rows : [];
+          const formatted = rowList.map((r: any) => {
+            const active = isAdPromotionActive({
+              is_promoted: r.is_promoted,
+              promotion_expires_at: r.promotion_expires_at,
             });
-            return jsonResponse({ success: true, videos: formatted, total: formatted.length });
-          }
+            const channelName = r.creator_channel_name || r.creator_name || "FaceTube Creator";
+            const channelLogoUrl = r.creator_channel_logo_url || null;
+            return {
+              id: String(r.id),
+              userId: r.user_id,
+              user_id: r.user_id,
+              creatorName: channelName,
+              creator_name: channelName,
+              channelName,
+              channel_name: channelName,
+              channelLogoUrl,
+              channel_logo_url: channelLogoUrl,
+              title: r.title,
+              description: r.description || "",
+              videoUrl: r.video_url,
+              video_url: r.video_url,
+              thumbnailUrl: r.thumbnail_url || "",
+              thumbnail_url: r.thumbnail_url || "",
+              videoType: r.video_type,
+              video_type: r.video_type,
+              contentType: r.content_type,
+              content_type: r.content_type,
+              category: r.category || "General",
+              duration: r.duration || "0:00",
+              views: Number(r.views) || 0,
+              likes: Number(r.likes) || 0,
+              paymentStatus: r.payment_status || "not_required",
+              payment_status: r.payment_status || "not_required",
+              paymentId: r.payment_id,
+              payment_id: r.payment_id,
+              paymentAmount: Number(r.payment_amount) || 0,
+              payment_amount: Number(r.payment_amount) || 0,
+              isPromoted: active,
+              is_promoted: active,
+              isActivePromoted: active,
+              is_active_promoted: active,
+              rawIsPromoted: Boolean(r.is_promoted),
+              raw_is_promoted: Boolean(r.is_promoted),
+              promotionPlan: r.promotion_plan,
+              promotion_plan: r.promotion_plan,
+              promotionExpiresAt: r.promotion_expires_at,
+              promotion_expires_at: r.promotion_expires_at,
+              createdAt: r.created_at,
+              created_at: r.created_at,
+              updatedAt: r.updated_at,
+              updated_at: r.updated_at,
+            };
+          });
+          return jsonResponse({ success: true, videos: formatted, total: formatted.length });
         } catch (dbErr) {
+          if (isProduction) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database error while fetching videos",
+              },
+              500,
+            );
+          }
           console.warn("MySQL videos/list fallback to local store:", dbErr);
         }
       }
@@ -4818,7 +4982,18 @@ export async function handleApiRequest(
       const id = url.searchParams.get("id");
       if (!id) return jsonResponse({ success: false, error: "Missing video id" }, 400);
 
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
       const pool = getMysqlPool();
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Database connection unavailable in production environment",
+          },
+          503,
+        );
+      }
       if (pool) {
         try {
           const [rows] = (await pool.query(
@@ -4896,8 +5071,18 @@ export async function handleApiRequest(
               },
             });
           }
+          return jsonResponse({ success: false, error: "Video not found" }, 404);
         } catch (_dbErr) {
-          // fallback
+          if (isProduction) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database error while fetching video",
+              },
+              500,
+            );
+          }
+          // Non-production fallback
         }
       }
 
@@ -5498,16 +5683,21 @@ export async function handleApiRequest(
   if (route === "images/list") {
     if (method === "GET") {
       const userId = url.searchParams.get("userId");
-      const normalizeLogo = (rawLogo: unknown): string | null => {
-        if (typeof rawLogo !== "string") return null;
-        const cleaned = rawLogo.trim();
-        if (!cleaned || cleaned.toLowerCase() === "null" || cleaned.toLowerCase() === "undefined") {
-          return null;
-        }
-        return cleaned;
-      };
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+      const normalizeImageCreatorLogo = (rawLogo: unknown): string | null =>
+        normalizeServerMediaUrl(rawLogo, request, { env, isProduction });
 
       const pool = getMysqlPool();
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Database connection unavailable in production environment",
+          },
+          503,
+        );
+      }
       if (pool) {
         try {
           const sql = userId
@@ -5525,45 +5715,52 @@ export async function handleApiRequest(
                LEFT JOIN users u ON UPPER(u.user_id) = UPPER(i.user_id)
                ORDER BY i.created_at DESC`;
           const [rows] = (await pool.query(sql, userId ? [userId.trim()] : [])) as any;
-          if (Array.isArray(rows) && rows.length > 0) {
-            const mapped = rows.map((r: any) => {
-              const rawChannelName =
-                typeof r.creator_channel_name === "string" ? r.creator_channel_name.trim() : "";
-              const rawCreatorName =
-                typeof r.creator_name === "string" ? r.creator_name.trim() : "";
-              const channelName = rawChannelName || rawCreatorName || "FaceTube Creator";
-              const creatorName = rawCreatorName || channelName;
-              const channelLogoUrl = normalizeLogo(r.creator_channel_logo_url);
-              return {
-                id: String(r.id),
-                userId: r.user_id,
-                user_id: r.user_id,
-                creatorName,
-                creator_name: creatorName,
-                channelName,
-                channel_name: channelName,
-                channelLogoUrl,
-                channel_logo_url: channelLogoUrl,
-                title: r.title,
-                description: r.description || "",
-                imageUrl: r.image_url,
-                image_url: r.image_url,
-                thumbnailUrl: r.thumbnail_url || r.image_url,
-                thumbnail_url: r.thumbnail_url || r.image_url,
-                format: r.format || "jpg",
-                fileSize: r.file_size || "1.0 MB",
-                file_size: r.file_size || "1.0 MB",
-                category: r.category || "General",
-                views: Number(r.views) || 0,
-                likes: Number(r.likes) || 0,
-                createdAt: r.created_at,
-                created_at: r.created_at,
-              };
-            });
-            return jsonResponse({ success: true, images: mapped, total: mapped.length });
-          }
+          const rowList = Array.isArray(rows) ? rows : [];
+          const mapped = rowList.map((r: any) => {
+            const rawChannelName =
+              typeof r.creator_channel_name === "string" ? r.creator_channel_name.trim() : "";
+            const rawCreatorName = typeof r.creator_name === "string" ? r.creator_name.trim() : "";
+            const channelName = rawChannelName || rawCreatorName || "FaceTube Creator";
+            const creatorName = rawCreatorName || channelName;
+            const channelLogoUrl = normalizeImageCreatorLogo(r.creator_channel_logo_url);
+            return {
+              id: String(r.id),
+              userId: r.user_id,
+              user_id: r.user_id,
+              creatorName,
+              creator_name: creatorName,
+              channelName,
+              channel_name: channelName,
+              channelLogoUrl,
+              channel_logo_url: channelLogoUrl,
+              title: r.title,
+              description: r.description || "",
+              imageUrl: r.image_url,
+              image_url: r.image_url,
+              thumbnailUrl: r.thumbnail_url || r.image_url,
+              thumbnail_url: r.thumbnail_url || r.image_url,
+              format: r.format || "jpg",
+              fileSize: r.file_size || "1.0 MB",
+              file_size: r.file_size || "1.0 MB",
+              category: r.category || "General",
+              views: Number(r.views) || 0,
+              likes: Number(r.likes) || 0,
+              createdAt: r.created_at,
+              created_at: r.created_at,
+            };
+          });
+          return jsonResponse({ success: true, images: mapped, total: mapped.length });
         } catch (_dbErr) {
-          // fallback to store.images
+          if (isProduction) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database error while fetching images",
+              },
+              500,
+            );
+          }
+          // Non-production fallback to store.images
         }
       }
 
@@ -5581,7 +5778,7 @@ export async function handleApiRequest(
           const rawCreatorName = typeof i.creator_name === "string" ? i.creator_name.trim() : "";
           const channelName = rawChannelName || rawCreatorName || "FaceTube Creator";
           const creatorName = rawCreatorName || channelName;
-          const channelLogoUrl = normalizeLogo(owner?.channel_logo_url);
+          const channelLogoUrl = normalizeImageCreatorLogo(owner?.channel_logo_url);
           return {
             ...i,
             userId: i.user_id,
@@ -6496,11 +6693,22 @@ export async function handleApiRequest(
   if (route === "referrals/dashboard") {
     if (method === "GET") {
       const qUserId = url.searchParams.get("userId") || url.searchParams.get("user_id");
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
       const pool = getMysqlPool();
       const authUser = await getAuthUserFromRequest(request, store, pool);
       const auth = requireAuth(authUser, qUserId);
       if (!auth.success) {
         return auth.response;
+      }
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Database connection unavailable in production environment",
+          },
+          503,
+        );
       }
       const userId = auth.effectiveUserId;
 
@@ -6593,8 +6801,36 @@ export async function handleApiRequest(
               },
             });
           }
+
+          const emptyDownline = calculateDownlineLevelsTs(userId, [], 10);
+          return jsonResponse({
+            success: true,
+            dashboard: {
+              userId,
+              referralCode: userId,
+              referralNumber: "",
+              referralLink: `https://facetube.online/register?ref=${encodeURIComponent(userId)}`,
+              directReferralsCount: 0,
+              teamMembersCount: 0,
+              referralIncome: 0,
+              directReferralIncome: 0,
+              totalReferralIncome: 0,
+              levelCounts: emptyDownline.levelCounts,
+              members: [],
+              referralMembers: [],
+            },
+          });
         } catch (_e) {
-          // fallback to store
+          if (isProduction) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database error while loading referral dashboard",
+              },
+              500,
+            );
+          }
+          // Non-production fallback to store
         }
       }
 
@@ -6666,11 +6902,22 @@ export async function handleApiRequest(
     if (method === "GET") {
       const qUserId = url.searchParams.get("userId") || url.searchParams.get("user_id");
       const levelParam = url.searchParams.get("level");
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
       const pool = getMysqlPool();
       const authUser = await getAuthUserFromRequest(request, store, pool);
       const auth = requireAuth(authUser, qUserId);
       if (!auth.success) {
         return auth.response;
+      }
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Database connection unavailable in production environment",
+          },
+          503,
+        );
       }
       const userId = auth.effectiveUserId;
 
@@ -6691,6 +6938,15 @@ export async function handleApiRequest(
             downline = calculateDownlineLevelsTs(userId, [], 10);
           }
         } catch (_e) {
+          if (isProduction) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database error while loading team members",
+              },
+              500,
+            );
+          }
           downline = calculateDownlineLevelsTs(userId, store.users, 10);
         }
       } else {
@@ -8438,45 +8694,8 @@ export async function handleApiRequest(
         );
       }
 
-      const resolveChannelLogoResponseUrl = (rawUrl: string | null | undefined): string | null => {
-        if (!rawUrl || typeof rawUrl !== "string") return null;
-        let cleaned = rawUrl.trim();
-        const nestedMatch = cleaned.match(/^(https?:\/\/[^/]+)(https?:\/\/.+)$/i);
-        if (nestedMatch && nestedMatch[2]) {
-          cleaned = nestedMatch[2].trim();
-        }
-        if (!cleaned) return null;
-        if (cleaned.startsWith("/uploads/")) {
-          const envBase = (
-            process.env["FACETUBE_API_BASE_URL"] ||
-            process.env["API_BASE_URL"] ||
-            process.env["VITE_MEDIA_BASE_URL"] ||
-            ""
-          )
-            .trim()
-            .replace(/\/+$/, "");
-          if (envBase) {
-            return `${envBase}${cleaned}`;
-          }
-          try {
-            const reqHost = new URL(request.url).hostname.toLowerCase();
-            if (
-              reqHost === "facetube.online" ||
-              reqHost === "www.facetube.online" ||
-              reqHost === "api.facetube.online"
-            ) {
-              return `https://api.facetube.online${cleaned}`;
-            }
-          } catch {
-            // ignore URL parse error
-          }
-          if (isProduction) {
-            return `https://api.facetube.online${cleaned}`;
-          }
-          return cleaned;
-        }
-        return cleaned;
-      };
+      const resolveChannelLogoResponseUrl = (rawUrl: string | null | undefined): string | null =>
+        normalizeServerMediaUrl(rawUrl, request, { env, isProduction });
 
       if (pool) {
         try {
@@ -8908,41 +9127,209 @@ export async function handleApiRequest(
   // 18. Live Streams & Chat
   if (route === "live/streams") {
     if (method === "GET") {
-      if (!store.liveStreams || store.liveStreams.length === 0) {
-        store.liveStreams = [
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+      const pool = getMysqlPool();
+
+      if (isProduction && !pool) {
+        return jsonResponse(
           {
-            id: "live_seed_001",
-            user_id: "FT102857",
-            title: "🔴 LIVE: 24-Hour Full-Stack & System Architecture Sprint",
-            description: "Live coding, production review, and developer Q&A session.",
-            category: "Coding & Tech",
-            stream_key: "sk_live_devforge_001",
-            playback_url: "https://vjs.zencdn.net/v/oceans.mp4",
-            thumbnail_url:
-              "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800&auto=format&fit=crop&q=80",
-            status: "live",
-            viewers_count: 1420,
-            created_at: new Date().toISOString(),
+            success: false,
+            error: "Database connection unavailable in production environment",
           },
-        ];
-        saveStore(store);
-      }
-      const enrichedStreams = store.liveStreams.map((s) => {
-        const owner = store.users.find(
-          (u) => u.user_id.toUpperCase() === (s.user_id || "").toUpperCase(),
+          503,
         );
+      }
+
+      const cleanText = (raw: unknown): string | null => {
+        if (typeof raw !== "string") return null;
+        const trimmed = raw.trim();
+        const lower = trimmed.toLowerCase();
+        if (
+          !trimmed ||
+          lower === "null" ||
+          lower === "undefined" ||
+          lower === "nan" ||
+          lower.includes("[object")
+        ) {
+          return null;
+        }
+        return trimmed;
+      };
+
+      const normalizeLiveMediaUrl = (
+        raw: unknown,
+        defaultSubfolder: "logos" | "images" | "videos" = "logos",
+      ): string | null =>
+        normalizeServerMediaUrl(raw, request, {
+          env,
+          isProduction,
+          defaultSubfolder,
+          prefixBarePaths: true,
+        });
+
+      const isMissingColumnError = (err: unknown): boolean => {
+        if (!err || typeof err !== "object") return false;
+        const e = err as { code?: unknown; errno?: unknown; sqlState?: unknown; message?: unknown };
+        const msg = String(e.message || "");
+        return (
+          e.code === "ER_BAD_FIELD_ERROR" ||
+          e.errno === 1054 ||
+          e.sqlState === "42S22" ||
+          /unknown column/i.test(msg)
+        );
+      };
+
+      const formatPublicStream = (
+        row: any,
+        fallbackOwner?: ServerStore["users"][number],
+      ): Record<string, any> => {
+        const resolvedChannelName =
+          cleanText(row.channel_name) ||
+          cleanText(row.streamer_name) ||
+          cleanText(fallbackOwner?.channel_name) ||
+          cleanText(fallbackOwner?.name) ||
+          "FaceTube Creator";
+        const avatarUrl =
+          normalizeLiveMediaUrl(row.avatar_url ?? fallbackOwner?.avatar_url, "logos") || null;
+        const channelLogoUrl =
+          normalizeLiveMediaUrl(row.channel_logo_url ?? fallbackOwner?.channel_logo_url, "logos") ||
+          avatarUrl;
+
         return {
-          ...s,
-          streamer_name: owner?.channel_name || owner?.name || "FaceTube Creator",
-          channel_name: owner?.channel_name || owner?.name || "FaceTube Creator",
-          channel_logo_url: owner?.channel_logo_url || owner?.avatar_url || null,
+          id: String(row.id),
+          user_id: cleanText(row.user_id) || "",
+          title: cleanText(row.title) || "FaceTube Live Broadcast",
+          description: cleanText(row.description) || "",
+          category: cleanText(row.category) || "General",
+          playback_url: normalizeLiveMediaUrl(row.playback_url, "videos") || "",
+          thumbnail_url: normalizeLiveMediaUrl(row.thumbnail_url, "images") || "",
+          status: row.status === "upcoming" ? "upcoming" : "live",
+          viewers_count: Number(row.viewers_count) || 0,
+          started_at: row.started_at ?? null,
+          ended_at: row.ended_at ?? null,
+          created_at: row.created_at ?? null,
+          updated_at: row.updated_at ?? row.created_at ?? null,
+          streamer_name: resolvedChannelName,
+          channel_name: resolvedChannelName,
+          avatar_url: avatarUrl,
+          channel_logo_url: channelLogoUrl,
         };
-      });
+      };
+
+      const sortLiveStreams = <T extends Record<string, any>>(items: T[]): T[] => {
+        return [...items].sort((a, b) => {
+          const liveA = a["status"] === "live" ? 1 : 0;
+          const liveB = b["status"] === "live" ? 1 : 0;
+          if (liveA !== liveB) return liveB - liveA;
+          const viewersA = Number(a["viewers_count"]) || 0;
+          const viewersB = Number(b["viewers_count"]) || 0;
+          if (viewersA !== viewersB) return viewersB - viewersA;
+          const timeA = a["created_at"] ? new Date(String(a["created_at"])).getTime() : 0;
+          const timeB = b["created_at"] ? new Date(String(b["created_at"])).getTime() : 0;
+          return (Number.isNaN(timeB) ? 0 : timeB) - (Number.isNaN(timeA) ? 0 : timeA);
+        });
+      };
+
+      if (pool) {
+        try {
+          const primarySql = `
+            SELECT
+              s.id,
+              s.user_id,
+              s.title,
+              s.description,
+              s.category,
+              s.playback_url,
+              s.thumbnail_url,
+              s.status,
+              s.viewers_count,
+              s.started_at,
+              s.ended_at,
+              s.created_at,
+              s.updated_at,
+              COALESCE(NULLIF(NULLIF(NULLIF(TRIM(u.channel_name), ''), 'null'), 'undefined'), u.name) AS streamer_name,
+              COALESCE(NULLIF(NULLIF(NULLIF(TRIM(u.channel_name), ''), 'null'), 'undefined'), u.name) AS channel_name,
+              u.avatar_url AS avatar_url,
+              COALESCE(NULLIF(NULLIF(NULLIF(TRIM(u.channel_logo_url), ''), 'null'), 'undefined'), u.avatar_url) AS channel_logo_url
+            FROM live_streams s
+            LEFT JOIN users u ON UPPER(s.user_id) = UPPER(u.user_id)
+            WHERE s.status IN ('live', 'upcoming')
+            ORDER BY (s.status = 'live') DESC, s.viewers_count DESC, s.created_at DESC
+          `;
+
+          let rows: any[] = [];
+          try {
+            const [result]: any = await pool.query(primarySql);
+            rows = Array.isArray(result) ? result : [];
+          } catch (primaryErr) {
+            if (!isMissingColumnError(primaryErr)) {
+              throw primaryErr;
+            }
+            const errMsg = String((primaryErr as any)?.message || "");
+            const includePlaybackAndUpdated = !/playback_url|updated_at/i.test(errMsg);
+            const fallbackSql = `
+              SELECT
+                s.id,
+                s.user_id,
+                s.title,
+                s.description,
+                s.category,
+                ${includePlaybackAndUpdated ? "s.playback_url, s.updated_at," : ""}
+                s.thumbnail_url,
+                s.status,
+                s.viewers_count,
+                s.started_at,
+                s.ended_at,
+                s.created_at,
+                u.name AS streamer_name,
+                u.name AS channel_name,
+                u.avatar_url AS avatar_url,
+                u.avatar_url AS channel_logo_url
+              FROM live_streams s
+              LEFT JOIN users u ON UPPER(s.user_id) = UPPER(u.user_id)
+              WHERE s.status IN ('live', 'upcoming')
+              ORDER BY (s.status = 'live') DESC, s.viewers_count DESC, s.created_at DESC
+            `;
+            const [fallbackResult]: any = await pool.query(fallbackSql);
+            rows = Array.isArray(fallbackResult) ? fallbackResult : [];
+          }
+
+          const streams = sortLiveStreams(
+            rows
+              .filter((r) => r && (r.status === "live" || r.status === "upcoming"))
+              .map((r) => formatPublicStream(r)),
+          );
+          return jsonResponse({ success: true, streams });
+        } catch (_dbErr) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database error while fetching live streams",
+            },
+            500,
+          );
+        }
+      }
+
+      const activeStreams = (store.liveStreams || []).filter(
+        (s) => s && (s.status === "live" || s.status === "upcoming"),
+      );
+      const enrichedStreams = sortLiveStreams(
+        activeStreams.map((s) => {
+          const owner = store.users.find(
+            (u) => u.user_id.toUpperCase() === (s.user_id || "").toUpperCase(),
+          );
+          return formatPublicStream(s, owner);
+        }),
+      );
       return jsonResponse({ success: true, streams: enrichedStreams });
     }
     if (method === "POST") {
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
       const pool = getMysqlPool();
-      if (process.env["NODE_ENV"] === "production" && !pool) {
+      if (isProduction && !pool) {
         return jsonResponse(
           {
             success: false,
@@ -8974,6 +9361,23 @@ export async function handleApiRequest(
         created_at: new Date().toISOString(),
       };
       if (pool) {
+        const isMissingRoomColError = (err: unknown): boolean => {
+          if (!err || typeof err !== "object") return false;
+          const e = err as {
+            code?: unknown;
+            errno?: unknown;
+            sqlState?: unknown;
+            message?: unknown;
+          };
+          const msg = String(e.message || "");
+          return (
+            (e.code === "ER_BAD_FIELD_ERROR" ||
+              e.errno === 1054 ||
+              e.sqlState === "42S22" ||
+              /unknown column/i.test(msg)) &&
+            /livekit_room_name/i.test(msg)
+          );
+        };
         try {
           await pool.query(
             `INSERT INTO live_streams (id, user_id, title, description, category, stream_key, playback_url, thumbnail_url, livekit_room_name, status, viewers_count, started_at, created_at)
@@ -8990,31 +9394,45 @@ export async function handleApiRequest(
               roomName,
             ],
           );
-        } catch (_dbErr) {
-          // Fallback if livekit_room_name column doesn't exist yet
-          try {
-            await pool.query(
-              `INSERT INTO live_streams (id, user_id, title, description, category, stream_key, playback_url, thumbnail_url, status, viewers_count, started_at, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', 1, NOW(), NOW())`,
-              [
-                newStream.id,
-                newStream.user_id,
-                newStream.title,
-                newStream.description,
-                newStream.category,
-                newStream.stream_key,
-                newStream.playback_url,
-                newStream.thumbnail_url || null,
-              ],
+        } catch (dbErr) {
+          if (isMissingRoomColError(dbErr)) {
+            // Fallback if livekit_room_name column doesn't exist yet
+            try {
+              await pool.query(
+                `INSERT INTO live_streams (id, user_id, title, description, category, stream_key, playback_url, thumbnail_url, status, viewers_count, started_at, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live', 1, NOW(), NOW())`,
+                [
+                  newStream.id,
+                  newStream.user_id,
+                  newStream.title,
+                  newStream.description,
+                  newStream.category,
+                  newStream.stream_key,
+                  newStream.playback_url,
+                  newStream.thumbnail_url || null,
+                ],
+              );
+            } catch (_fallbackErr) {
+              if (isProduction) {
+                return jsonResponse(
+                  { success: false, error: "Database error while creating live stream" },
+                  500,
+                );
+              }
+            }
+          } else if (isProduction) {
+            return jsonResponse(
+              { success: false, error: "Database error while creating live stream" },
+              500,
             );
-          } catch (_e) {
-            // Ignore
           }
         }
       }
-      if (!store.liveStreams) store.liveStreams = [];
-      store.liveStreams.unshift(newStream);
-      saveStore(store);
+      if (!isProduction) {
+        if (!store.liveStreams) store.liveStreams = [];
+        store.liveStreams.unshift(newStream);
+        saveStore(store);
+      }
       return jsonResponse({ success: true, message: "Stream created", stream: newStream }, 201);
     }
   }
@@ -9024,8 +9442,10 @@ export async function handleApiRequest(
     if (method !== "POST") {
       return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
     }
+    const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
     const pool = getMysqlPool();
-    if (process.env["NODE_ENV"] === "production" && !pool) {
+    if (isProduction && !pool) {
       return jsonResponse(
         {
           success: false,
@@ -9132,8 +9552,10 @@ export async function handleApiRequest(
     if (method !== "POST") {
       return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
     }
+    const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
     const pool = getMysqlPool();
-    if (process.env["NODE_ENV"] === "production" && !pool) {
+    if (isProduction && !pool) {
       return jsonResponse(
         {
           success: false,
@@ -9164,11 +9586,17 @@ export async function handleApiRequest(
           stream = rows[0];
         }
       } catch (_e) {
-        // Fallback
+        if (isProduction) {
+          return jsonResponse(
+            { success: false, error: "Database error while loading live stream" },
+            500,
+          );
+        }
+        // Non-production fallback
       }
     }
 
-    if (!stream) {
+    if (!stream && !isProduction) {
       stream = (store.liveStreams || []).find((s) => s.id === streamId);
     }
 
@@ -9191,7 +9619,6 @@ export async function handleApiRequest(
           403,
         );
       }
-      stream.broadcaster_last_ping_at = new Date().toISOString();
       if (pool) {
         try {
           await pool.query(
@@ -9199,18 +9626,18 @@ export async function handleApiRequest(
             [stream.id],
           );
         } catch (_e) {
-          // Ignore
+          if (isProduction) {
+            return jsonResponse(
+              { success: false, error: "Database error while updating stream heartbeat" },
+              500,
+            );
+          }
         }
       }
+      if (!isProduction) {
+        stream.broadcaster_last_ping_at = new Date().toISOString();
+      }
     } else {
-      // Record presence in live_stream_viewers without using it as authoritative count
-      if (!store.liveStreamViewers) store.liveStreamViewers = {};
-      const viewerKey = `${stream.id}_${authUser.user_id}`;
-      store.liveStreamViewers[viewerKey] = {
-        stream_id: stream.id,
-        user_id: authUser.user_id,
-        last_seen_at: new Date().toISOString(),
-      };
       if (pool) {
         try {
           await pool.query(
@@ -9220,11 +9647,28 @@ export async function handleApiRequest(
             [stream.id, authUser.user_id],
           );
         } catch (_e) {
-          // Ignore
+          if (isProduction) {
+            return jsonResponse(
+              { success: false, error: "Database error while recording viewer heartbeat" },
+              500,
+            );
+          }
         }
       }
+      if (!isProduction) {
+        // Record presence in live_stream_viewers without using it as authoritative count
+        if (!store.liveStreamViewers) store.liveStreamViewers = {};
+        const viewerKey = `${stream.id}_${authUser.user_id}`;
+        store.liveStreamViewers[viewerKey] = {
+          stream_id: stream.id,
+          user_id: authUser.user_id,
+          last_seen_at: new Date().toISOString(),
+        };
+      }
     }
-    saveStore(store);
+    if (!isProduction) {
+      saveStore(store);
+    }
 
     return jsonResponse({
       success: true,
@@ -9240,8 +9684,10 @@ export async function handleApiRequest(
     if (method !== "POST") {
       return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
     }
+    const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
     const pool = getMysqlPool();
-    if (process.env["NODE_ENV"] === "production" && !pool) {
+    if (isProduction && !pool) {
       return jsonResponse(
         {
           success: false,
@@ -9272,11 +9718,17 @@ export async function handleApiRequest(
           stream = rows[0];
         }
       } catch (_e) {
-        // Fallback
+        if (isProduction) {
+          return jsonResponse(
+            { success: false, error: "Database error while loading live stream" },
+            500,
+          );
+        }
+        // Non-production fallback
       }
     }
 
-    if (!stream) {
+    if (!stream && !isProduction) {
       stream = (store.liveStreams || []).find((s) => s.id === streamId);
     }
 
@@ -9311,9 +9763,6 @@ export async function handleApiRequest(
     }
 
     const endedAt = new Date().toISOString();
-    stream.status = "ended";
-    stream.ended_at = endedAt;
-    stream.viewers_count = 0;
 
     if (pool) {
       try {
@@ -9321,12 +9770,35 @@ export async function handleApiRequest(
           "UPDATE live_streams SET status = 'ended', ended_at = NOW(), viewers_count = 0 WHERE id = ?",
           [stream.id],
         );
-        await pool.query("DELETE FROM live_stream_viewers WHERE stream_id = ?", [stream.id]);
       } catch (_e) {
-        // Ignore
+        if (isProduction) {
+          return jsonResponse(
+            { success: false, error: "Database error while ending live stream" },
+            500,
+          );
+        }
+      }
+      try {
+        await pool.query("DELETE FROM live_stream_viewers WHERE stream_id = ?", [stream.id]);
+      } catch (viewerErr: any) {
+        const isMissingTable =
+          viewerErr?.code === "ER_NO_SUCH_TABLE" ||
+          viewerErr?.errno === 1146 ||
+          viewerErr?.sqlState === "42S02";
+        if (isProduction && !isMissingTable) {
+          return jsonResponse(
+            { success: false, error: "Database error while cleaning up live stream viewers" },
+            500,
+          );
+        }
       }
     }
-    saveStore(store);
+    if (!isProduction) {
+      stream.status = "ended";
+      stream.ended_at = endedAt;
+      stream.viewers_count = 0;
+      saveStore(store);
+    }
 
     return jsonResponse({
       success: true,
@@ -9345,8 +9817,10 @@ export async function handleApiRequest(
     if (method !== "POST") {
       return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
     }
+    const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
     const pool = getMysqlPool();
-    if (process.env["NODE_ENV"] === "production" && !pool) {
+    if (isProduction && !pool) {
       return jsonResponse(
         {
           success: false,
@@ -9358,7 +9832,7 @@ export async function handleApiRequest(
 
     const rawBody = await request.text();
     const authHeader = request.headers.get("authorization");
-    const apiSecret = process.env["LIVEKIT_API_SECRET"] || "secret";
+    const apiSecret = readEnv("LIVEKIT_API_SECRET") || "secret";
 
     const verification = verifyLiveKitWebhook(authHeader, rawBody, apiSecret);
     if (!verification.valid) {
@@ -9379,18 +9853,20 @@ export async function handleApiRequest(
     }
 
     const eventId = String(eventData.id || eventData.sid || "").trim();
-    if (!store.livekitWebhookEvents) store.livekitWebhookEvents = {};
+    if (!isProduction) {
+      if (!store.livekitWebhookEvents) store.livekitWebhookEvents = {};
 
-    if (eventId && store.livekitWebhookEvents[eventId]) {
-      return jsonResponse(
-        {
-          success: true,
-          idempotent: true,
-          duplicate: true,
-          message: "Webhook event already processed",
-        },
-        200,
-      );
+      if (eventId && store.livekitWebhookEvents[eventId]) {
+        return jsonResponse(
+          {
+            success: true,
+            idempotent: true,
+            duplicate: true,
+            message: "Webhook event already processed",
+          },
+          200,
+        );
+      }
     }
 
     if (pool && eventId) {
@@ -9420,12 +9896,29 @@ export async function handleApiRequest(
             rawBody.slice(0, 10000),
           ],
         );
-      } catch (_e) {
-        // Ignore duplicate key collision
+      } catch (evtErr) {
+        if (isMysqlDuplicateKeyError(evtErr)) {
+          return jsonResponse(
+            {
+              success: true,
+              idempotent: true,
+              duplicate: true,
+              message: "Webhook event already processed",
+            },
+            200,
+          );
+        }
+        if (isProduction) {
+          return jsonResponse(
+            { success: false, error: "Database error processing webhook event" },
+            500,
+          );
+        }
       }
     }
 
-    if (eventId) {
+    if (!isProduction && eventId) {
+      if (!store.livekitWebhookEvents) store.livekitWebhookEvents = {};
       store.livekitWebhookEvents[eventId] = {
         event_id: eventId,
         event_type: eventData.event,
@@ -9448,11 +9941,17 @@ export async function handleApiRequest(
           stream = rows[0];
         }
       } catch (_e) {
-        // Fallback
+        if (isProduction) {
+          return jsonResponse(
+            { success: false, error: "Database error loading webhook live stream" },
+            500,
+          );
+        }
+        // Non-production fallback
       }
     }
 
-    if (!stream && roomName) {
+    if (!stream && !isProduction && roomName) {
       const streamIdFromRoom = roomName.replace(/^room_/, "");
       stream = (store.liveStreams || []).find(
         (s) => s.livekit_room_name === roomName || s.id === streamIdFromRoom,
@@ -9465,7 +9964,6 @@ export async function handleApiRequest(
           typeof eventData.room?.numParticipants === "number"
             ? Math.max(0, eventData.room.numParticipants - 1)
             : (stream.viewers_count || 0) + 1;
-        stream.viewers_count = num;
         if (pool) {
           try {
             await pool.query("UPDATE live_streams SET viewers_count = ? WHERE id = ?", [
@@ -9473,15 +9971,22 @@ export async function handleApiRequest(
               stream.id,
             ]);
           } catch (_e) {
-            // Ignore
+            if (isProduction) {
+              return jsonResponse(
+                { success: false, error: "Database error updating viewer count" },
+                500,
+              );
+            }
           }
+        }
+        if (!isProduction) {
+          stream.viewers_count = num;
         }
       } else if (eventType === "participant_left") {
         const num =
           typeof eventData.room?.numParticipants === "number"
             ? Math.max(0, eventData.room.numParticipants - 1)
             : Math.max(0, (stream.viewers_count || 1) - 1);
-        stream.viewers_count = num;
         if (pool) {
           try {
             await pool.query("UPDATE live_streams SET viewers_count = ? WHERE id = ?", [
@@ -9489,13 +9994,18 @@ export async function handleApiRequest(
               stream.id,
             ]);
           } catch (_e) {
-            // Ignore
+            if (isProduction) {
+              return jsonResponse(
+                { success: false, error: "Database error updating viewer count" },
+                500,
+              );
+            }
           }
         }
+        if (!isProduction) {
+          stream.viewers_count = num;
+        }
       } else if (eventType === "room_finished") {
-        stream.status = "ended";
-        stream.ended_at = new Date().toISOString();
-        stream.viewers_count = 0;
         if (pool) {
           try {
             await pool.query(
@@ -9503,11 +10013,23 @@ export async function handleApiRequest(
               [stream.id],
             );
           } catch (_e) {
-            // Ignore
+            if (isProduction) {
+              return jsonResponse(
+                { success: false, error: "Database error finalizing ended stream" },
+                500,
+              );
+            }
           }
         }
+        if (!isProduction) {
+          stream.status = "ended";
+          stream.ended_at = new Date().toISOString();
+          stream.viewers_count = 0;
+        }
       }
-      saveStore(store);
+      if (!isProduction) {
+        saveStore(store);
+      }
     }
 
     return jsonResponse({
