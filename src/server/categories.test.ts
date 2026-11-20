@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { handleApiRequest } from "./api-handler";
+import { buildDashboardCategoryCatalog } from "../lib/dashboard-categories";
 
 describe("Priority 3: Admin Category Management & Verification Tests", () => {
   let adminToken = "";
@@ -311,6 +312,105 @@ describe("Priority 3: Admin Category Management & Verification Tests", () => {
         assert.ok(names.includes("Coding"));
       } finally {
         process.env["NODE_ENV"] = prevEnv;
+      }
+    });
+  });
+
+  // Test Suite 7: Dashboard Category Integration (Health, Sports, Drama)
+  describe("7. Dashboard Category Integration & Deduplication", () => {
+    it("displays Health, Sports, and Drama together while preserving existing categories and avoiding duplicates when missing from DB", () => {
+      const apiCats = [
+        { id: 1, name: "Cartoon", slug: "cartoon", created_by: "SYSTEM" },
+        { id: 2, name: "Coding", slug: "coding", created_by: "SYSTEM" },
+        { id: 3, name: "Music", slug: "music", created_by: "SYSTEM" },
+      ];
+
+      const catalog = buildDashboardCategoryCatalog(apiCats);
+
+      assert.deepEqual(
+        catalog.featured.map((c) => c.name),
+        ["Health", "Sports", "Drama"],
+      );
+      assert.equal(
+        catalog.featured.every((c) => c.existsInDb === false),
+        true,
+      );
+      assert.deepEqual(
+        catalog.existing.map((c) => c.name),
+        ["Cartoon", "Coding", "Music"],
+      );
+      assert.equal(catalog.allUniqueNames.length, 6);
+    });
+
+    it("reuses existing database Health, Sports, and Drama records case-insensitively without duplicates", () => {
+      const apiCats = [
+        { id: 101, name: "health", slug: "health", created_by: "FT102857" },
+        { id: 102, name: "Sports", slug: "sports", created_by: "FT102857" },
+        { id: 103, name: "DRAMA", slug: "drama", created_by: "FT102857" },
+        { id: 104, name: "drama", slug: "drama", created_by: "FT102857" },
+        { id: 105, name: "Coding", slug: "coding", created_by: "SYSTEM" },
+        { id: 106, name: "coding", slug: "coding", created_by: "SYSTEM" },
+      ];
+
+      const catalog = buildDashboardCategoryCatalog(apiCats);
+
+      assert.equal(catalog.featured.length, 3);
+      assert.equal(catalog.featured[0]?.id, 101);
+      assert.equal(catalog.featured[0]?.existsInDb, true);
+      assert.equal(catalog.featured[1]?.id, 102);
+      assert.equal(catalog.featured[1]?.existsInDb, true);
+      assert.equal(catalog.featured[2]?.id, 103);
+      assert.equal(catalog.featured[2]?.existsInDb, true);
+
+      // Existing list must NOT duplicate Health, Sports, Drama, or Coding
+      assert.deepEqual(
+        catalog.existing.map((c) => c.name),
+        ["Coding"],
+      );
+      assert.equal(catalog.allUniqueNames.length, 4);
+    });
+
+    it("allows both logged-out and logged-in visitors to query categories and category-filtered videos", async () => {
+      // Logged-out category listing
+      const catRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/categories/list", { method: "GET" }),
+      );
+      assert.ok(catRes);
+      assert.equal(catRes.status, 200);
+      const catData = await catRes.json();
+      assert.equal(catData.success, true);
+      assert.ok(Array.isArray(catData.categories));
+
+      // Logged-out category video filtering for Coding (existing videos)
+      const codingRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/list?category=Coding", { method: "GET" }),
+      );
+      assert.ok(codingRes);
+      assert.equal(codingRes.status, 200);
+      const codingData = await codingRes.json();
+      assert.equal(codingData.success, true);
+      assert.ok(Array.isArray(codingData.videos));
+      assert.ok(codingData.videos.every((v: any) => String(v.category).toLowerCase() === "coding"));
+
+      // Logged-in category video filtering for Health/Sports/Drama returns only real matching records (no fake demo videos)
+      for (const catName of ["Health", "Sports", "Drama"]) {
+        const res = await handleApiRequest(
+          new Request(
+            `http://localhost:3000/api/videos/list?category=${encodeURIComponent(catName)}`,
+            {
+              method: "GET",
+              headers: { Authorization: `Bearer ${userToken}` },
+            },
+          ),
+        );
+        assert.ok(res);
+        assert.equal(res.status, 200);
+        const data = await res.json();
+        assert.equal(data.success, true);
+        assert.ok(Array.isArray(data.videos));
+        assert.ok(
+          data.videos.every((v: any) => String(v.category).toLowerCase() === catName.toLowerCase()),
+        );
       }
     });
   });

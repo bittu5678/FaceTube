@@ -1225,6 +1225,8 @@ export interface AuthUser {
   role: "admin" | "user";
   referral_code: string | null;
   avatar_url?: string | undefined;
+  channel_logo_url?: string | null | undefined;
+  channel_name?: string | null | undefined;
   created_at: string;
 }
 
@@ -1242,7 +1244,7 @@ export async function getAuthUserFromRequest(
   if (activePool) {
     try {
       const [rows]: any = await activePool.query(
-        `SELECT u.id, u.user_id, u.name, u.mobile, u.email, u.role, u.referral_code, u.avatar_url, u.created_at
+        `SELECT u.id, u.user_id, u.name, u.mobile, u.email, u.role, u.referral_code, u.avatar_url, u.channel_logo_url, u.channel_name, u.created_at
          FROM sessions s
          INNER JOIN users u ON (s.user_id = u.id OR s.user_id = u.user_id)
          WHERE s.token = ? AND s.expires_at > NOW()
@@ -1272,6 +1274,8 @@ export async function getAuthUserFromRequest(
         role: user.role,
         referral_code: user.referral_code,
         avatar_url: user.avatar_url,
+        channel_logo_url: user.channel_logo_url ?? null,
+        channel_name: user.channel_name ?? null,
         created_at: user.created_at,
       };
     }
@@ -3405,7 +3409,7 @@ export async function handleApiRequest(
 
         if (pool) {
           const [rows]: any = await pool.query(
-            `SELECT id, user_id, name, mobile, email, password_hash, role, referral_code, avatar_url, created_at
+            `SELECT id, user_id, name, mobile, email, password_hash, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
              FROM users
              WHERE UPPER(user_id) = UPPER(?) OR LOWER(email) = LOWER(?)
              LIMIT 1`,
@@ -4078,32 +4082,70 @@ export async function handleApiRequest(
   if (route === "users/profile") {
     if (method === "GET") {
       const qUserId = url.searchParams.get("userId") || url.searchParams.get("user_id");
-      if (qUserId) {
-        const norm = qUserId.trim().toUpperCase();
-        const pool = getMysqlPool();
-        if (pool) {
-          try {
-            const [rows]: any = await pool.query(
-              `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, created_at
-               FROM users
-               WHERE UPPER(user_id) = UPPER(?) OR LOWER(email) = LOWER(?) OR id = ?
-               LIMIT 1`,
-              [norm, norm, norm],
-            );
-            if (rows && rows.length > 0) {
-              return jsonResponse({ success: true, profile: rows[0] });
-            }
-          } catch (_e) {
-            // Ignore query error and fall through
-          }
+      const pool = getMysqlPool();
+      if (!qUserId) {
+        const authUser = await getAuthUserFromRequest(request, store, pool);
+        if (authUser) {
+          return jsonResponse({ success: true, profile: authUser });
         }
+        return jsonResponse({ success: false, error: "User identifier required." }, 400);
+      }
+
+      const norm = qUserId.trim().toUpperCase();
+      if (pool) {
+        try {
+          const [rows]: any = await pool.query(
+            `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
+             FROM users
+             WHERE UPPER(user_id) = UPPER(?) OR LOWER(email) = LOWER(?) OR id = ?
+             LIMIT 1`,
+            [norm, norm, qUserId.trim()],
+          );
+          if (rows && rows.length > 0) {
+            return jsonResponse({ success: true, profile: rows[0] });
+          }
+        } catch (_e) {
+          // Ignore query error and fall through
+        }
+      }
+
+      const storeUser = store.users.find(
+        (u) =>
+          u.user_id.toUpperCase() === norm ||
+          u.email.toUpperCase() === norm ||
+          u.id === qUserId.trim(),
+      );
+      if (storeUser) {
+        const { password_hash: _ph, ...safeProfile } = storeUser;
+        return jsonResponse({ success: true, profile: safeProfile });
       }
       return jsonResponse({ success: false, error: "Profile not found" }, 404);
     }
     if (method === "POST") {
       const body = await request.json();
-      const targetUserId = body.userId || "FT102857";
       const pool = getMysqlPool();
+      const authUser = await getAuthUserFromRequest(request, store, pool);
+      const requestedUserId = String(body.userId || body.user_id || body.id || "").trim();
+      const targetUserId = requestedUserId || authUser?.user_id || "";
+      if (!targetUserId) {
+        return jsonResponse(
+          { success: false, error: "Unauthorized or missing user identifier." },
+          401,
+        );
+      }
+      if (
+        authUser &&
+        requestedUserId &&
+        requestedUserId.toUpperCase() !== authUser.user_id.toUpperCase() &&
+        requestedUserId !== authUser.id &&
+        authUser.role !== "admin"
+      ) {
+        return jsonResponse(
+          { success: false, error: "Unauthorized: Cross-user access is restricted." },
+          403,
+        );
+      }
+
       if (pool) {
         try {
           const updates: string[] = [];
@@ -4120,6 +4162,14 @@ export async function handleApiRequest(
             updates.push("avatar_url = ?");
             params.push(body.avatar_url);
           }
+          if (body.channel_logo_url !== undefined) {
+            updates.push("channel_logo_url = ?");
+            params.push(String(body.channel_logo_url).trim());
+          }
+          if (body.channel_name !== undefined) {
+            updates.push("channel_name = ?");
+            params.push(String(body.channel_name).trim());
+          }
           if (updates.length > 0) {
             params.push(targetUserId);
             params.push(targetUserId);
@@ -4128,19 +4178,43 @@ export async function handleApiRequest(
               params,
             );
             const [rows]: any = await pool.query(
-              `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, created_at
+              `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
                FROM users WHERE id = ? OR UPPER(user_id) = UPPER(?) LIMIT 1`,
               [targetUserId, targetUserId],
             );
-            return jsonResponse({
-              success: true,
-              profile: rows[0],
-              message: "Profile updated",
-            });
+            if (rows && rows.length > 0) {
+              return jsonResponse({
+                success: true,
+                profile: rows[0],
+                message: "Profile updated",
+              });
+            }
           }
         } catch (_e) {
           // Ignore update error
         }
+      }
+
+      const storeUser = store.users.find(
+        (u) => u.user_id.toUpperCase() === targetUserId.toUpperCase() || u.id === targetUserId,
+      );
+      if (storeUser) {
+        if (body.name) storeUser.name = String(body.name).trim();
+        if (body.mobile) storeUser.mobile = String(body.mobile).trim();
+        if (body.avatar_url) storeUser.avatar_url = String(body.avatar_url).trim();
+        if (body.channel_logo_url !== undefined) {
+          storeUser.channel_logo_url = String(body.channel_logo_url).trim();
+        }
+        if (body.channel_name !== undefined) {
+          storeUser.channel_name = String(body.channel_name).trim();
+        }
+        saveStore(store);
+        const { password_hash: _ph, ...safeProfile } = storeUser;
+        return jsonResponse({
+          success: true,
+          profile: safeProfile,
+          message: "Profile updated",
+        });
       }
       return jsonResponse({ success: false, error: "User not found" }, 404);
     }
@@ -4152,7 +4226,7 @@ export async function handleApiRequest(
       if (pool) {
         try {
           const [rows]: any = await pool.query(
-            `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, created_at
+            `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
              FROM users ORDER BY created_at DESC LIMIT 100`,
           );
           return jsonResponse({
@@ -4166,7 +4240,7 @@ export async function handleApiRequest(
       }
       return jsonResponse({
         success: true,
-        users: store.users,
+        users: store.users.map(({ password_hash: _ph, ...u }) => u),
         total: store.users.length,
       });
     }
@@ -4187,41 +4261,46 @@ export async function handleApiRequest(
           const where: string[] = [];
           const params: any[] = [];
           if (userId) {
-            where.push("UPPER(user_id) = UPPER(?)");
+            where.push("UPPER(v.user_id) = UPPER(?)");
             params.push(userId.trim());
           }
           if (videoType && videoType !== "all") {
-            where.push("video_type = ?");
+            where.push("v.video_type = ?");
             params.push(videoType);
           }
           if (contentType && contentType !== "all") {
-            where.push("content_type = ?");
+            where.push("v.content_type = ?");
             params.push(contentType);
           }
           if (category && category !== "All") {
-            where.push("LOWER(category) = LOWER(?)");
+            where.push("LOWER(v.category) = LOWER(?)");
             params.push(category);
           }
           if (search) {
-            where.push("(title LIKE ? OR description LIKE ? OR creator_name LIKE ?)");
+            where.push(
+              '(v.title LIKE ? OR v.description LIKE ? OR v.creator_name LIKE ? OR COALESCE(u.channel_name, "") LIKE ?)',
+            );
             const s = `%${search}%`;
-            params.push(s, s, s);
+            params.push(s, s, s, s);
           }
           if (!url.searchParams.get("include_blocked")) {
-            where.push("COALESCE(is_blocked, 0) = 0");
+            where.push("COALESCE(v.is_blocked, 0) = 0");
           }
 
           const whereSql = where.length > 0 ? "WHERE " + where.join(" AND ") : "";
           const sql = `
             SELECT 
-              id, user_id, creator_name, title, description, video_url, thumbnail_url,
-              video_type, content_type, category, duration, views, likes,
-              payment_status, payment_id, payment_amount, is_promoted,
-              promotion_plan, promotion_expires_at, created_at, updated_at,
-              (is_promoted = 1 AND promotion_expires_at IS NOT NULL AND promotion_expires_at > NOW()) AS is_active_promoted
-            FROM uploaded_videos
+              v.id, v.user_id, v.creator_name, v.title, v.description, v.video_url, v.thumbnail_url,
+              v.video_type, v.content_type, v.category, v.duration, v.views, v.likes,
+              v.payment_status, v.payment_id, v.payment_amount, v.is_promoted,
+              v.promotion_plan, v.promotion_expires_at, v.created_at, v.updated_at,
+              (v.is_promoted = 1 AND v.promotion_expires_at IS NOT NULL AND v.promotion_expires_at > NOW()) AS is_active_promoted,
+              u.channel_logo_url AS creator_channel_logo_url,
+              u.channel_name AS creator_channel_name
+            FROM uploaded_videos v
+            LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
             ${whereSql}
-            ORDER BY is_active_promoted DESC, created_at DESC
+            ORDER BY is_active_promoted DESC, v.created_at DESC
             LIMIT 100
           `;
           const [rows] = (await pool.query(sql, params)) as any;
@@ -4231,12 +4310,18 @@ export async function handleApiRequest(
                 is_promoted: r.is_promoted,
                 promotion_expires_at: r.promotion_expires_at,
               });
+              const channelName = r.creator_channel_name || r.creator_name || "FaceTube Creator";
+              const channelLogoUrl = r.creator_channel_logo_url || null;
               return {
                 id: String(r.id),
                 userId: r.user_id,
                 user_id: r.user_id,
-                creatorName: r.creator_name,
-                creator_name: r.creator_name,
+                creatorName: channelName,
+                creator_name: channelName,
+                channelName,
+                channel_name: channelName,
+                channelLogoUrl,
+                channel_logo_url: channelLogoUrl,
                 title: r.title,
                 description: r.description || "",
                 videoUrl: r.video_url,
@@ -4300,12 +4385,17 @@ export async function handleApiRequest(
       }
       if (search) {
         const s = search.toLowerCase();
-        filtered = filtered.filter(
-          (v) =>
+        filtered = filtered.filter((v) => {
+          const owner = store.users.find(
+            (u) => u.user_id.toUpperCase() === (v.user_id || "").toUpperCase(),
+          );
+          const ownerName = (owner?.channel_name || v.creator_name || "").toLowerCase();
+          return (
             v.title.toLowerCase().includes(s) ||
             v.description.toLowerCase().includes(s) ||
-            v.creator_name.toLowerCase().includes(s),
-        );
+            ownerName.includes(s)
+          );
+        });
       }
 
       // Prioritize actively promoted videos (expiry still in the future) at top of feeds
@@ -4318,10 +4408,20 @@ export async function handleApiRequest(
 
       const formatted = filtered.map((v) => {
         const active = isAdPromotionActive(v);
+        const owner = store.users.find(
+          (u) => u.user_id.toUpperCase() === (v.user_id || "").toUpperCase(),
+        );
+        const channelName = owner?.channel_name || v.creator_name || "FaceTube Creator";
+        const channelLogoUrl = owner?.channel_logo_url || null;
         return {
           ...v,
           userId: v.user_id,
-          creatorName: v.creator_name,
+          creatorName: channelName,
+          creator_name: channelName,
+          channelName,
+          channel_name: channelName,
+          channelLogoUrl,
+          channel_logo_url: channelLogoUrl,
           videoUrl: v.video_url,
           thumbnailUrl: v.thumbnail_url,
           videoType: v.video_type,
@@ -4356,9 +4456,14 @@ export async function handleApiRequest(
       const pool = getMysqlPool();
       if (pool) {
         try {
-          const [rows] = (await pool.query("SELECT * FROM uploaded_videos WHERE id = ? LIMIT 1", [
-            id,
-          ])) as any;
+          const [rows] = (await pool.query(
+            `SELECT v.*, u.channel_logo_url AS creator_channel_logo_url, u.channel_name AS creator_channel_name
+             FROM uploaded_videos v
+             LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
+             WHERE v.id = ?
+             LIMIT 1`,
+            [id],
+          )) as any;
           if (Array.isArray(rows) && rows.length > 0) {
             const r = rows[0];
             if (r.is_blocked) {
@@ -4375,14 +4480,20 @@ export async function handleApiRequest(
               is_promoted: r.is_promoted,
               promotion_expires_at: r.promotion_expires_at,
             });
+            const channelName = r.creator_channel_name || r.creator_name || "FaceTube Creator";
+            const channelLogoUrl = r.creator_channel_logo_url || null;
             return jsonResponse({
               success: true,
               video: {
                 id: String(r.id),
                 userId: r.user_id,
                 user_id: r.user_id,
-                creatorName: r.creator_name,
-                creator_name: r.creator_name,
+                creatorName: channelName,
+                creator_name: channelName,
+                channelName,
+                channel_name: channelName,
+                channelLogoUrl,
+                channel_logo_url: channelLogoUrl,
                 title: r.title,
                 description: r.description || "",
                 videoUrl: r.video_url,
@@ -4438,12 +4549,22 @@ export async function handleApiRequest(
           );
         }
         const active = isAdPromotionActive(v);
+        const owner = store.users.find(
+          (u) => u.user_id.toUpperCase() === (v.user_id || "").toUpperCase(),
+        );
+        const channelName = owner?.channel_name || v.creator_name || "FaceTube Creator";
+        const channelLogoUrl = owner?.channel_logo_url || null;
         return jsonResponse({
           success: true,
           video: {
             ...v,
             userId: v.user_id,
-            creatorName: v.creator_name,
+            creatorName: channelName,
+            creator_name: channelName,
+            channelName,
+            channel_name: channelName,
+            channelLogoUrl,
+            channel_logo_url: channelLogoUrl,
             videoUrl: v.video_url,
             thumbnailUrl: v.thumbnail_url,
             videoType: v.video_type,
@@ -4841,6 +4962,20 @@ export async function handleApiRequest(
     if (method === "POST") {
       try {
         const formData = await request.formData();
+        const purpose = String(formData.get("purpose") || "").trim().toLowerCase();
+        const isChannelLogo = purpose === "channel_logo";
+
+        if (isChannelLogo) {
+          const pool = getMysqlPool();
+          const authUser = await getAuthUserFromRequest(request, store, pool);
+          if (!authUser) {
+            return jsonResponse(
+              { success: false, error: "Authentication required for channel logo upload." },
+              401,
+            );
+          }
+        }
+
         const file = formData.get("image");
 
         if (!file || typeof file === "string") {
@@ -4868,31 +5003,59 @@ export async function handleApiRequest(
           );
         }
 
-        const maxSizeBytes = 25 * 1024 * 1024; // 25 MB
+        const maxSizeBytes = isChannelLogo ? 10 * 1024 * 1024 : 25 * 1024 * 1024;
         if (imgFile.size <= 0) {
           return jsonResponse({ success: false, error: "Uploaded image file is empty." }, 400);
         }
         if (imgFile.size > maxSizeBytes) {
+          const maxLabel = isChannelLogo ? "10MB" : "25MB";
           return jsonResponse(
-            { success: false, error: "Image file exceeds maximum permitted limit of 25MB." },
+            { success: false, error: `Image file exceeds maximum permitted limit of ${maxLabel}.` },
             400,
           );
         }
 
-        const uploadDir = path.resolve(process.cwd(), "uploads", "images");
+        const arrayBuf = await imgFile.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+
+        if (isChannelLogo) {
+          const isJpeg = buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+          const isPng =
+            buf.length >= 8 &&
+            buf[0] === 0x89 &&
+            buf[1] === 0x50 &&
+            buf[2] === 0x4e &&
+            buf[3] === 0x47;
+          const isWebp =
+            buf.length >= 12 &&
+            buf.subarray(0, 4).toString("ascii") === "RIFF" &&
+            buf.subarray(8, 12).toString("ascii") === "WEBP";
+          if (!isJpeg && !isPng && !isWebp) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Invalid channel logo image data. Only JPG, PNG, or WEBP files are allowed.",
+              },
+              400,
+            );
+          }
+        }
+
+        const subfolder = isChannelLogo ? "logos" : "images";
+        const prefix = isChannelLogo ? "logo" : "img";
+        const uploadDir = path.resolve(process.cwd(), "uploads", subfolder);
         await fs.promises.mkdir(uploadDir, { recursive: true });
 
-        const uniqueName = `img_${Date.now()}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
+        const uniqueName = `${prefix}_${Date.now()}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
         const targetPath = path.join(uploadDir, uniqueName);
-        const arrayBuf = await imgFile.arrayBuffer();
-        await fs.promises.writeFile(targetPath, Buffer.from(arrayBuf));
+        await fs.promises.writeFile(targetPath, buf);
 
         const fileSizeMb = `${(imgFile.size / (1024 * 1024)).toFixed(2)} MB`;
 
         return jsonResponse(
           {
             success: true,
-            url: `/uploads/images/${uniqueName}`,
+            url: `/uploads/${subfolder}/${uniqueName}`,
             fileName: uniqueName,
             format: ext,
             fileSize: fileSizeMb,
@@ -4922,14 +5085,25 @@ export async function handleApiRequest(
       const cmts = videoId ? store.comments.filter((c) => c.video_id === videoId) : store.comments;
       return jsonResponse({
         success: true,
-        comments: cmts.map((c) => ({
-          ...c,
-          videoId: c.video_id,
-          userId: c.user_id,
-          userName: c.user_name,
-          avatarUrl: c.avatar_url,
-          createdAt: c.created_at,
-        })),
+        comments: cmts.map((c) => {
+          const owner = store.users.find(
+            (u) => u.user_id.toUpperCase() === (c.user_id || "").toUpperCase(),
+          );
+          const resolvedLogo = owner?.channel_logo_url || c.avatar_url || null;
+          const displayName = owner?.channel_name || c.user_name;
+          return {
+            ...c,
+            videoId: c.video_id,
+            userId: c.user_id,
+            userName: displayName,
+            user_name: displayName,
+            avatarUrl: resolvedLogo || "",
+            avatar_url: resolvedLogo || "",
+            channelLogoUrl: resolvedLogo,
+            channel_logo_url: resolvedLogo,
+            createdAt: c.created_at,
+          };
+        }),
         total: cmts.length,
       });
     }
@@ -7676,29 +7850,97 @@ export async function handleApiRequest(
         return jsonResponse({ success: false, error: "Authentication required" }, 401);
       }
       const body = await request.json();
-      const logoUrl = body.channel_logo_url || body.channelLogoUrl;
-      const channelName = body.channel_name || body.channelName;
+      const requestedUserId = String(body.userId || body.user_id || "").trim();
+      let effectiveUserId = authUser.user_id;
+      if (
+        requestedUserId &&
+        requestedUserId.toUpperCase() !== authUser.user_id.toUpperCase() &&
+        requestedUserId !== authUser.id
+      ) {
+        if (authUser.role !== "admin") {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Unauthorized: Cross-user access is restricted to verified administrators.",
+            },
+            403,
+          );
+        }
+        effectiveUserId = requestedUserId;
+      }
+
+      const logoUrl = String(body.channel_logo_url ?? body.channelLogoUrl ?? "").trim();
+      const channelName = String(body.channel_name ?? body.channelName ?? "").trim();
+
+      if (!logoUrl && !channelName) {
+        return jsonResponse({ success: false, error: "No channel updates provided" }, 400);
+      }
+
+      if (logoUrl) {
+        if (logoUrl.length > 500) {
+          return jsonResponse(
+            { success: false, error: "Channel logo URL must be 500 characters or fewer" },
+            400,
+          );
+        }
+        const isSafeUrl = logoUrl.startsWith("/uploads/") || /^https?:\/\/.+/i.test(logoUrl);
+        if (!isSafeUrl) {
+          return jsonResponse(
+            { success: false, error: "Invalid channel logo URL format" },
+            400,
+          );
+        }
+      }
+
+      if (channelName && channelName.length > 255) {
+        return jsonResponse(
+          { success: false, error: "Channel name must be 255 characters or fewer" },
+          400,
+        );
+      }
+
       const user = store.users.find(
-        (u) => u.user_id.toUpperCase() === authUser.user_id.toUpperCase(),
+        (u) => u.user_id.toUpperCase() === effectiveUserId.toUpperCase() || u.id === effectiveUserId,
       );
       if (user) {
         if (logoUrl) user.channel_logo_url = logoUrl;
         if (channelName) user.channel_name = channelName;
         saveStore(store);
       }
+
+      let dbLogoUrl: string | null = null;
+      let dbChannelName: string | null = null;
       if (pool) {
         await pool
           .query(
             "UPDATE users SET channel_logo_url = COALESCE(?, channel_logo_url), channel_name = COALESCE(?, channel_name), updated_at = NOW() WHERE UPPER(user_id) = UPPER(?)",
-            [logoUrl || null, channelName || null, authUser.user_id],
+            [logoUrl || null, channelName || null, effectiveUserId],
           )
           .catch(() => {});
+        try {
+          const [rows]: any = await pool.query(
+            "SELECT channel_logo_url, channel_name FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1",
+            [effectiveUserId],
+          );
+          if (rows && rows.length > 0) {
+            dbLogoUrl = rows[0].channel_logo_url ?? null;
+            dbChannelName = rows[0].channel_name ?? null;
+          }
+        } catch {
+          // ignore
+        }
       }
+
+      const finalLogoUrl = logoUrl || dbLogoUrl || user?.channel_logo_url || null;
+      const finalChannelName = channelName || dbChannelName || user?.channel_name || null;
+
       return jsonResponse({
         success: true,
         message: "Channel details updated successfully",
-        channel_logo_url: logoUrl || user?.channel_logo_url,
-        channel_name: channelName || user?.channel_name,
+        channel_logo_url: finalLogoUrl,
+        channel_name: finalChannelName,
+        channelLogoUrl: finalLogoUrl,
+        channelName: finalChannelName,
       });
     }
   }
@@ -8039,7 +8281,18 @@ export async function handleApiRequest(
         ];
         saveStore(store);
       }
-      return jsonResponse({ success: true, streams: store.liveStreams });
+      const enrichedStreams = store.liveStreams.map((s) => {
+        const owner = store.users.find(
+          (u) => u.user_id.toUpperCase() === (s.user_id || "").toUpperCase(),
+        );
+        return {
+          ...s,
+          streamer_name: owner?.channel_name || owner?.name || "FaceTube Creator",
+          channel_name: owner?.channel_name || owner?.name || "FaceTube Creator",
+          channel_logo_url: owner?.channel_logo_url || owner?.avatar_url || null,
+        };
+      });
+      return jsonResponse({ success: true, streams: enrichedStreams });
     }
     if (method === "POST") {
       const pool = getMysqlPool();

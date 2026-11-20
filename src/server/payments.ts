@@ -872,10 +872,13 @@ export async function createServerPaymentOrder(
   if (skipRemote) {
     orderId = `order_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
   } else {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
       const authHeader = `Basic ${Buffer.from(`${keyId}:${keySecret}`).toString("base64")}`;
       const response = await fetch("https://api.razorpay.com/v1/orders", {
         method: "POST",
+        signal: controller.signal,
         headers: {
           Authorization: authHeader,
           "Content-Type": "application/json",
@@ -902,7 +905,12 @@ export async function createServerPaymentOrder(
       const orderData = (await response.json()) as { id: string };
       orderId = orderData.id;
     } catch (err: any) {
+      if (err?.name === "AbortError") {
+        throw new Error("Razorpay gateway timed out while creating order. Please try again.");
+      }
       throw new Error(`Failed to create Razorpay order: ${err?.message || "Gateway error"}`);
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 

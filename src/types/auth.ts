@@ -81,6 +81,7 @@ export interface UserWithRole {
   mobile?: string;
   email: string;
   role: RoleType;
+  avatar_url?: string | null;
   channel_logo_url?: string | null;
   channel_name?: string | null;
   referral_code?: string | null;
@@ -135,6 +136,10 @@ export interface AuthContextType {
   signIn: (params: SignInParams) => Promise<SignInResult>;
   signOut: () => Promise<void>;
   updateUserRole: (targetUserId: string, newRole: RoleType) => Promise<boolean>;
+  updateChannelBranding: (updates: {
+    channel_logo_url?: string | null;
+    channel_name?: string | null;
+  }) => void;
   allUsers: (UserWithRole & { password?: string; user_id?: string })[];
   refreshUsers: () => Promise<void>;
 }

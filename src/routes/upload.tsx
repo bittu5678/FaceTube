@@ -27,6 +27,7 @@ import {
   Plus,
   RotateCcw,
   SlidersHorizontal,
+  Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Logo } from "@/components/videohub/Logo";
@@ -49,6 +50,7 @@ import {
 import {
   captureVideoThumbnail,
   captureAndUploadThumbnail,
+  uploadThumbnailDataUrl,
   getCategoryFallbackThumbnail,
   resolveVideoThumbnail,
 } from "@/lib/thumbnail-service";
@@ -67,7 +69,11 @@ import {
   setMusicPreviewVolume,
   type SelectedImageMusic,
 } from "@/lib/image-music-library";
-import { initiatePremiumVideoPayment, initiateAdsPromotionPayment } from "@/lib/razorpay-service";
+import {
+  initiatePremiumVideoPayment,
+  initiateAdsPromotionPayment,
+  preloadRazorpayScript,
+} from "@/lib/razorpay-service";
 import { getUserWallet, type UserWallet } from "@/lib/ledger-service";
 
 export type MainUploadMode = "free" | "premium" | "ad_promotion" | "image" | "bulk" | null;
@@ -130,6 +136,12 @@ function UploadStudioPage() {
   useEffect(() => {
     refreshWallet();
   }, [refreshWallet]);
+
+  useEffect(() => {
+    if (activeMode === "premium" || activeMode === "ad_promotion" || activeMode === "bulk") {
+      preloadRazorpayScript();
+    }
+  }, [activeMode]);
 
   const setMode = (mode: MainUploadMode, format?: VideoFormatChoice) => {
     navigate({
@@ -2051,6 +2063,7 @@ function PremiumVideoUploadView({
   const [capturedThumbnail, setCapturedThumbnail] = useState<string>("");
   const [detectedDuration, setDetectedDuration] = useState<string>("");
   const [uploading, setUploading] = useState(false);
+  const [paymentStageLabel, setPaymentStageLabel] = useState("");
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [promotionConsent, setPromotionConsent] = useState(false);
@@ -2058,6 +2071,10 @@ function PremiumVideoUploadView({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isSubmittingRef = useRef(false);
   const notifiedSuccessIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    preloadRazorpayScript();
+  }, []);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2159,9 +2176,21 @@ function PremiumVideoUploadView({
     isSubmittingRef.current = true;
     setUploadError(null);
     setUploading(true);
+    setPaymentStageLabel("Uploading video & preparing gateway...");
+    preloadRazorpayScript();
     try {
-      // 1. Upload video file to server storage first
-      const uploadRes = await api.uploads.uploadVideo(videoFile);
+      // 1. Upload video file and prepare thumbnail concurrently (avoids sequential waterfall before gateway)
+      const thumbnailPromise = (
+        capturedThumbnail
+          ? uploadThumbnailDataUrl(capturedThumbnail, category)
+          : captureAndUploadThumbnail(videoFile, category)
+      ).catch(() => capturedThumbnail || getCategoryFallbackThumbnail(category));
+
+      const [uploadRes, posterUrl] = await Promise.all([
+        api.uploads.uploadVideo(videoFile),
+        thumbnailPromise,
+      ]);
+
       if (!uploadRes || !uploadRes.url) {
         const serverError =
           (uploadRes as any)?.error ||
@@ -2178,12 +2207,6 @@ function PremiumVideoUploadView({
       }
 
       const vidId = `vid-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-      let posterUrl = "";
-      try {
-        posterUrl = await captureAndUploadThumbnail(videoFile, category);
-      } catch (_e) {
-        posterUrl = capturedThumbnail || getCategoryFallbackThumbnail(category);
-      }
 
       // 2. Initiate Razorpay ₹6 payment flow with server verification
       await initiatePremiumVideoPayment({
@@ -2199,9 +2222,16 @@ function PremiumVideoUploadView({
         contentType: format,
         duration: detectedDuration || (format === "short" ? "0:45" : "14:20"),
         ...(referrerId ? { directReferrerId: referrerId } : {}),
+        onStageChange: (stage) => {
+          if (stage === "creating_order") setPaymentStageLabel("Creating payment order...");
+          else if (stage === "loading_gateway") setPaymentStageLabel("Loading Razorpay SDK...");
+          else if (stage === "opening_gateway") setPaymentStageLabel("Opening Razorpay...");
+          else if (stage === "verifying") setPaymentStageLabel("Verifying payment...");
+        },
         onSuccess: async () => {
           isSubmittingRef.current = false;
           setUploading(false);
+          setPaymentStageLabel("");
           setUploadError(null);
           setUploadSuccess(true);
           if (!notifiedSuccessIdsRef.current.has(vidId)) {
@@ -2218,6 +2248,7 @@ function PremiumVideoUploadView({
         onFailure: (err) => {
           isSubmittingRef.current = false;
           setUploading(false);
+          setPaymentStageLabel("");
           setUploadSuccess(false);
           const msg = err || "Payment failed. Video was not published.";
           setUploadError(msg);
@@ -2226,6 +2257,7 @@ function PremiumVideoUploadView({
         onCancel: () => {
           isSubmittingRef.current = false;
           setUploading(false);
+          setPaymentStageLabel("");
           setUploadSuccess(false);
           setUploadError("Payment was cancelled. Your video promotion was not activated.");
           toast.info("Payment cancelled.");
@@ -2234,6 +2266,7 @@ function PremiumVideoUploadView({
     } catch (err: any) {
       isSubmittingRef.current = false;
       setUploading(false);
+      setPaymentStageLabel("");
       setUploadSuccess(false);
       const msg = err?.message || "Failed to initiate sponsor upload.";
       setUploadError(msg);
@@ -2510,9 +2543,17 @@ function PremiumVideoUploadView({
           <button
             type="submit"
             disabled={uploading || !promotionConsent}
-            className="rounded-xl bg-amber-600 px-8 py-3 text-xs font-bold text-white hover:bg-amber-500 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-busy={uploading}
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-600 px-8 py-3 text-xs font-bold text-white hover:bg-amber-500 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {uploading ? "Uploading & Connecting Gateway..." : "Proceed to Pay ₹6.00"}
+            {uploading ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>{paymentStageLabel || "Uploading & Connecting Gateway..."}</span>
+              </>
+            ) : (
+              "Proceed to Pay ₹6.00"
+            )}
           </button>
         </div>
       </form>
@@ -2596,10 +2637,15 @@ function AdPromotionUploadView({
   const [availableVideos, setAvailableVideos] = useState<UploadedVideo[]>([]);
   const [selectedVideoId, setSelectedVideoId] = useState<string>("");
   const [isProcessing, setIsProcessing] = useState(false);
+  const [promoStageLabel, setPromoStageLabel] = useState("");
   const [activated, setActivated] = useState(false);
   const [promoError, setPromoError] = useState<string | null>(null);
   const isSubmittingRef = useRef(false);
   const notifiedPromoKeysRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    preloadRazorpayScript();
+  }, []);
 
   useEffect(() => {
     fetchUploadedVideos(userId).then((vids) => {
@@ -2628,6 +2674,8 @@ function AdPromotionUploadView({
     isSubmittingRef.current = true;
     setPromoError(null);
     setIsProcessing(true);
+    setPromoStageLabel("Creating payment order...");
+    preloadRazorpayScript();
 
     try {
       await initiateAdsPromotionPayment({
@@ -2640,9 +2688,16 @@ function AdPromotionUploadView({
         durationDays: currentPlan.days,
         price: currentPlan.price,
         ...(referrerId ? { directReferrerId: referrerId } : {}),
+        onStageChange: (stage) => {
+          if (stage === "creating_order") setPromoStageLabel("Creating payment order...");
+          else if (stage === "loading_gateway") setPromoStageLabel("Loading Razorpay SDK...");
+          else if (stage === "opening_gateway") setPromoStageLabel("Opening Razorpay...");
+          else if (stage === "verifying") setPromoStageLabel("Verifying payment...");
+        },
         onSuccess: (result) => {
           isSubmittingRef.current = false;
           setIsProcessing(false);
+          setPromoStageLabel("");
           setPromoError(null);
           setActivated(true);
           const paymentId = (result as { paymentId?: string } | null)?.paymentId;
@@ -2661,6 +2716,7 @@ function AdPromotionUploadView({
         onFailure: (err) => {
           isSubmittingRef.current = false;
           setIsProcessing(false);
+          setPromoStageLabel("");
           setActivated(false);
           const msg = err || "Ad Promotion payment failed.";
           setPromoError(msg);
@@ -2669,6 +2725,7 @@ function AdPromotionUploadView({
         onCancel: () => {
           isSubmittingRef.current = false;
           setIsProcessing(false);
+          setPromoStageLabel("");
           setActivated(false);
           setPromoError("Payment was cancelled. Promotion was not activated.");
           toast.info("Payment cancelled.");
@@ -2677,6 +2734,7 @@ function AdPromotionUploadView({
     } catch (err: any) {
       isSubmittingRef.current = false;
       setIsProcessing(false);
+      setPromoStageLabel("");
       setActivated(false);
       const msg = err?.message || "Failed to initiate ad promotion payment.";
       setPromoError(msg);
@@ -2886,11 +2944,17 @@ function AdPromotionUploadView({
           <button
             type="submit"
             disabled={isProcessing}
-            className="rounded-xl bg-emerald-600 px-8 py-3 text-xs font-bold text-white hover:bg-emerald-500 transition shadow-sm disabled:opacity-50"
+            aria-busy={isProcessing}
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-8 py-3 text-xs font-bold text-white hover:bg-emerald-500 transition shadow-sm disabled:opacity-50"
           >
-            {isProcessing
-              ? "Connecting Gateway..."
-              : `Launch Ad Campaign (₹${currentPlan.price.toLocaleString("en-IN")})`}
+            {isProcessing ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>{promoStageLabel || "Connecting Gateway..."}</span>
+              </>
+            ) : (
+              `Launch Ad Campaign (₹${currentPlan.price.toLocaleString("en-IN")})`
+            )}
           </button>
         </div>
       </form>

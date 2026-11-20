@@ -28,6 +28,7 @@ import {
 import {
   fetchUploadedVideos,
   convertUploadedToCatalogVideo,
+  getAvailableCategories,
   type UploadedVideo,
 } from "@/lib/video-service";
 import { AdSenseAd } from "@/components/adsense/AdSenseAd";
@@ -94,6 +95,7 @@ function Index() {
   const [query, setQuery] = useState(searchParams.q || "");
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
+  const [dynamicCategories, setDynamicCategories] = useState<string[]>(categories);
 
   useEffect(() => {
     if (searchParams.q !== undefined) {
@@ -135,6 +137,31 @@ function Index() {
         }
       })
       .catch((err) => console.error("Error loading feed videos:", err));
+
+    const loadHomeCategories = () => {
+      getAvailableCategories()
+        .then((apiCats) => {
+          const seen = new Set<string>(["all"]);
+          const merged: string[] = ["All"];
+          for (const c of [...categories.slice(1), ...apiCats]) {
+            const trimmed = String(c || "").trim();
+            if (!trimmed) continue;
+            const norm = trimmed.toLowerCase();
+            if (!seen.has(norm)) {
+              seen.add(norm);
+              merged.push(trimmed);
+            }
+          }
+          setDynamicCategories(merged);
+        })
+        .catch(() => {});
+    };
+
+    loadHomeCategories();
+    window.addEventListener("facetube:categories-updated", loadHomeCategories);
+    return () => {
+      window.removeEventListener("facetube:categories-updated", loadHomeCategories);
+    };
   }, []);
 
   // Combined video catalog: uploaded videos from DB + baseline static catalog
@@ -234,13 +261,13 @@ function Index() {
               </div>
             </div>
             <div className="flex gap-2 overflow-x-auto px-4 py-3 [scrollbar-width:none] sm:px-6 [&::-webkit-scrollbar]:hidden">
-              {categories.map((c) => (
+              {dynamicCategories.map((c) => (
                 <button
                   key={c}
                   type="button"
                   onClick={() => handleSelectCategory(c)}
                   className={`shrink-0 rounded-full px-4 py-1.5 text-sm font-medium transition-all ${
-                    activeCategory === c
+                    activeCategory.toLowerCase() === c.toLowerCase()
                       ? "bg-foreground text-background shadow-card font-semibold"
                       : "bg-secondary text-foreground/75 hover:-translate-y-0.5 hover:bg-brand/10 hover:text-brand"
                   }`}

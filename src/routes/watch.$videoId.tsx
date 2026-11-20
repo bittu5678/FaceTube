@@ -19,6 +19,7 @@ import { Navbar } from "@/components/videohub/Navbar";
 import { BottomNav } from "@/components/videohub/BottomNav";
 import { VideoCard } from "@/components/videohub/VideoCard";
 import { ImageCard } from "@/components/videohub/ImageCard";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { FaceTubeVideoPlayer } from "@/components/videohub/FaceTubeVideoPlayer";
 import { allVideos, findVideo, findVideoAsync, type Video } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
@@ -182,7 +183,9 @@ function WatchPage() {
   const [saved, setSaved] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [commentText, setCommentText] = useState("");
-  const [comments, setComments] = useState([
+  const [comments, setComments] = useState<
+    Array<{ id: string; n: string; i: string; t: string; time: string; avatar?: string | null }>
+  >([
     {
       id: "c1",
       n: "Aria Kapoor",
@@ -274,8 +277,10 @@ function WatchPage() {
     e.preventDefault();
     if (!commentText.trim()) return;
 
-    const authorName = profile?.full_name || user?.email?.split("@")[0] || "You";
+    const authorName =
+      profile?.channel_name || profile?.full_name || user?.email?.split("@")[0] || "You";
     const authorInitials = authorName.slice(0, 2).toUpperCase();
+    const authorAvatar = profile?.channel_logo_url || profile?.avatar_url || null;
 
     setComments((prev) => [
       {
@@ -284,6 +289,7 @@ function WatchPage() {
         i: authorInitials,
         t: commentText.trim(),
         time: "Just now",
+        avatar: authorAvatar,
       },
       ...prev,
     ]);
@@ -295,10 +301,22 @@ function WatchPage() {
     <div className="min-h-screen bg-background font-sans text-foreground">
       <Navbar onToggleSidebar={() => {}} />
 
-      <main className="mx-auto grid max-w-[1600px] gap-8 px-4 py-6 pb-24 sm:px-6 lg:grid-cols-[minmax(0,1fr)_400px] lg:pb-10">
+      <main className="mx-auto grid max-w-[1600px] gap-8 px-4 pt-2 pb-24 sm:px-6 sm:pt-3 lg:grid-cols-[minmax(0,1fr)_400px] lg:pb-10">
         <div className="min-w-0">
-          {/* Top Back Navigation Bar */}
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mx-auto w-full overflow-hidden rounded-2xl bg-black shadow-lift">
+            <FaceTubeVideoPlayer
+              key={video.id}
+              src={video.videoUrl}
+              poster={video.thumb || video.thumbnailUrl}
+              title={video.title}
+              duration={video.duration}
+              autoPlay={true}
+              onBack={handleBack}
+            />
+          </div>
+
+          {/* Back Navigation & Category Bar below player */}
+          <div className="mt-3 flex items-center justify-between gap-3">
             <button
               type="button"
               onClick={handleBack}
@@ -314,18 +332,7 @@ function WatchPage() {
             )}
           </div>
 
-          <div className="overflow-hidden rounded-2xl bg-black shadow-lift">
-            <FaceTubeVideoPlayer
-              src={video.videoUrl}
-              poster={video.thumb || video.thumbnailUrl}
-              title={video.title}
-              duration={video.duration}
-              autoPlay={true}
-              onBack={handleBack}
-            />
-          </div>
-
-          <h1 className="mt-4 text-xl font-extrabold leading-snug tracking-tight sm:text-2xl">
+          <h1 className="mt-2.5 text-xl font-extrabold leading-snug tracking-tight sm:text-2xl">
             {video.title}
           </h1>
 
@@ -350,20 +357,15 @@ function WatchPage() {
           })()}
 
           <div className="mt-4 flex flex-wrap items-center gap-3">
-            {(video as any).channelLogoUrl || (video as any).channel_logo_url ? (
-              <img
-                src={(video as any).channelLogoUrl || (video as any).channel_logo_url}
-                alt={video.channel}
-                className="h-11 w-11 shrink-0 rounded-full object-cover ring-2 ring-brand/30 shadow-sm"
-              />
-            ) : (
-              <span
-                className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-sm font-bold text-white shadow-sm"
-                style={{ backgroundColor: video.tint || "#ef4444" }}
-              >
-                {video.initials}
-              </span>
-            )}
+            <ChannelAvatar
+              src={(video as any).channelLogoUrl || (video as any).channel_logo_url}
+              name={video.channel}
+              initials={video.initials}
+              tint={video.tint || "#ef4444"}
+              sizeClassName="h-11 w-11"
+              imageRingClassName="ring-2 ring-brand/30 shadow-sm"
+              fallbackClassName="text-sm font-bold text-white shadow-sm"
+            />
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold">{video.channel}</p>
               <p className="truncate text-xs text-muted-foreground">
@@ -484,9 +486,14 @@ function WatchPage() {
 
             {/* Add Comment Input Form */}
             <form onSubmit={handleAddComment} className="flex items-start gap-3">
-              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-white shadow-sm">
-                {(profile?.username || user?.email || "U").charAt(0).toUpperCase()}
-              </span>
+              <ChannelAvatar
+                src={profile?.channel_logo_url || profile?.avatar_url}
+                name={profile?.channel_name || profile?.full_name || user?.email || "You"}
+                initials={(profile?.username || user?.email || "U").charAt(0).toUpperCase()}
+                sizeClassName="h-9 w-9"
+                imageRingClassName="ring-1 ring-border shadow-sm"
+                fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-white shadow-sm"
+              />
               <div className="flex-1 space-y-2">
                 <input
                   type="text"
@@ -519,9 +526,14 @@ function WatchPage() {
             <div className="space-y-5">
               {comments.map((c) => (
                 <div key={c.id} className="flex gap-3 animate-in fade-in">
-                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-brand-foreground">
-                    {c.i}
-                  </span>
+                  <ChannelAvatar
+                    src={c.avatar}
+                    name={c.n}
+                    initials={c.i}
+                    sizeClassName="h-9 w-9"
+                    imageRingClassName="ring-1 ring-border shadow-sm"
+                    fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-brand-foreground"
+                  />
                   <div className="min-w-0">
                     <p className="text-sm font-semibold">
                       {c.n} <span className="font-normal text-muted-foreground">· {c.time}</span>

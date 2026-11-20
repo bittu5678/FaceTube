@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   Clapperboard,
   Radio,
@@ -30,7 +30,7 @@ import { VideoCard } from "@/components/videohub/VideoCard";
 import { creators, allVideos } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
-import { initiatePaidSubscriptionPayment } from "@/lib/razorpay-service";
+import { initiatePaidSubscriptionPayment, preloadRazorpayScript } from "@/lib/razorpay-service";
 
 export const Route = createFileRoute("/subscriptions")({
   head: () => ({
@@ -167,6 +167,8 @@ function SubscriptionsPage() {
   const [plans, setPlans] = useState<SubscriberPlan[]>(DEFAULT_PLANS);
   const [isLoadingPlans, setIsLoadingPlans] = useState<boolean>(true);
   const [subscribingPlanId, setSubscribingPlanId] = useState<string | null>(null);
+  const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const isSubscribingRef = useRef<boolean>(false);
 
   // Phase 2D: My Subscriptions & History state
   const [activeSubscription, setActiveSubscription] = useState<UserSubscriptionItem | null>(null);
@@ -332,6 +334,7 @@ function SubscriptionsPage() {
   }, [user]);
 
   useEffect(() => {
+    preloadRazorpayScript();
     fetchPlans();
     if (user) {
       fetchUserSubscriptions();
@@ -370,7 +373,7 @@ function SubscriptionsPage() {
 
   // Handle subscribe action (Phase 2C checkout)
   const handleSubscribe = async (plan: SubscriberPlan) => {
-    if (subscribingPlanId) return;
+    if (isSubscribingRef.current || subscribingPlanId) return;
 
     if (!user || !user.id) {
       toast.error("Please sign in to subscribe to a membership plan.", {
@@ -390,7 +393,10 @@ function SubscriptionsPage() {
       return;
     }
 
+    isSubscribingRef.current = true;
+    setCheckoutError(null);
     setSubscribingPlanId(plan.plan_id);
+    preloadRazorpayScript();
 
     try {
       const effectiveUserId = user.user_metadata?.user_id || user.id;
@@ -421,7 +427,9 @@ function SubscriptionsPage() {
         planId: plan.plan_id,
         planName: plan.name,
         onSuccess: async (result) => {
+          isSubscribingRef.current = false;
           setSubscribingPlanId(null);
+          setCheckoutError(null);
           toast.success(`🎉 Subscription Activated! Welcome to ${plan.name}!`, {
             description: `Payment ID: ${result.paymentId}. Your membership perks have been successfully unlocked.`,
             duration: 6000,
@@ -431,10 +439,14 @@ function SubscriptionsPage() {
           switchTab("my");
         },
         onFailure: (errorMsg) => {
+          isSubscribingRef.current = false;
           setSubscribingPlanId(null);
-          toast.error(errorMsg || "Payment verification failed. Please try again.");
+          const msg = errorMsg || "Payment verification failed. Please try again.";
+          setCheckoutError(msg);
+          toast.error(msg);
         },
         onCancel: () => {
+          isSubscribingRef.current = false;
           setSubscribingPlanId(null);
           toast.info("Payment cancelled. Your subscription was not activated.");
         },
@@ -448,8 +460,10 @@ function SubscriptionsPage() {
 
       await initiatePaidSubscriptionPayment(paymentParams);
     } catch (err: unknown) {
+      isSubscribingRef.current = false;
       setSubscribingPlanId(null);
       const msg = err instanceof Error ? err.message : "Could not initialize checkout.";
+      setCheckoutError(msg);
       toast.error(msg);
     }
   };
@@ -1151,6 +1165,17 @@ function SubscriptionsPage() {
                   <span>Razorpay Secure 256-bit Encrypted Checkout</span>
                 </div>
               </div>
+
+              {/* Checkout Error Banner */}
+              {checkoutError && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2.5 rounded-2xl border border-destructive/30 bg-destructive/10 p-4 text-xs text-destructive"
+                >
+                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                  <span>{checkoutError}</span>
+                </div>
+              )}
 
               {/* Pricing Grid */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">

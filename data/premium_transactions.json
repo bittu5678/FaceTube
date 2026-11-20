@@ -3,49 +3,49 @@
   "transactions": [],
   "userSubscriptions": [
     {
-      "subscriptionId": "sub_user_test_refund_1794655419024",
-      "id": "sub_user_test_refund_1794655419024",
+      "subscriptionId": "sub_user_test_refund_1795148416454",
+      "id": "sub_user_test_refund_1795148416454",
       "userId": "FT483921",
       "planId": "member-monthly",
       "planName": "Creator Member",
-      "orderId": "order_refund_test_1794655419024_1",
-      "paymentId": "pay_refund_test_1794655419024_1",
+      "orderId": "order_refund_test_1795148416454_1",
+      "paymentId": "pay_refund_test_1795148416454_1",
       "amount": 499,
       "currency": "INR",
       "status": "active",
-      "startsAt": "2026-11-13T11:23:39.042Z",
-      "expiresAt": "2026-12-13T11:23:39.042Z",
+      "startsAt": "2026-11-19T04:20:16.474Z",
+      "expiresAt": "2026-12-19T04:20:16.474Z",
       "durationDays": 30,
-      "createdAt": "2026-11-13T11:23:39.042Z"
+      "createdAt": "2026-11-19T04:20:16.474Z"
     },
     {
-      "subscriptionId": "sub_other_test_refund_1794655419024",
-      "id": "sub_other_test_refund_1794655419024",
+      "subscriptionId": "sub_other_test_refund_1795148416454",
+      "id": "sub_other_test_refund_1795148416454",
       "userId": "FT900431",
       "planId": "member-vip-monthly",
       "planName": "VIP Supporter",
-      "orderId": "order_refund_test_1794655419024_2",
-      "paymentId": "pay_refund_test_1794655419024_2",
+      "orderId": "order_refund_test_1795148416454_2",
+      "paymentId": "pay_refund_test_1795148416454_2",
       "amount": 999,
       "currency": "INR",
       "status": "active",
-      "startsAt": "2026-11-13T11:23:39.042Z",
-      "expiresAt": "2026-12-13T11:23:39.042Z",
+      "startsAt": "2026-11-19T04:20:16.474Z",
+      "expiresAt": "2026-12-19T04:20:16.474Z",
       "durationDays": 30,
-      "createdAt": "2026-11-13T11:23:39.042Z"
+      "createdAt": "2026-11-19T04:20:16.474Z"
     }
   ],
   "refundRequests": [
     {
-      "id": "rfnd_1794655419206_decaec79",
-      "subscriptionId": "sub_other_test_refund_1794655419024",
+      "id": "rfnd_1795148416650_7d98af5e",
+      "subscriptionId": "sub_other_test_refund_1795148416454",
       "userId": "FT900431",
       "userName": "Maya Lin",
       "userEmail": "maya@facetube.com",
       "planId": "member-vip-monthly",
       "planName": "VIP Supporter",
-      "paymentId": "pay_refund_test_1794655419024_2",
-      "orderId": "order_refund_test_1794655419024_2",
+      "paymentId": "pay_refund_test_1795148416454_2",
+      "orderId": "order_refund_test_1795148416454_2",
       "amount": 999,
       "currency": "INR",
       "reason": "Requesting a refund for VIP supporter plan within 24h.",
@@ -54,20 +54,20 @@
       "gatewayRefundId": null,
       "adminNote": "Approved per SLA. Gateway refund skipped in test environment. [Safe Review: Live gateway refund unavailable - Live gateway refund execution is disabled in this environment (RAZORPAY_SKIP_REMOTE_CHECK). Simulated gateway refunds are strictly prevented per financial security protocol.]",
       "reviewedBy": "FT102857",
-      "reviewedAt": "2026-11-14T11:23:39.213Z",
-      "createdAt": "2026-11-14T11:23:39.206Z",
-      "updatedAt": "2026-11-14T11:23:39.214Z"
+      "reviewedAt": "2026-11-20T04:20:16.670Z",
+      "createdAt": "2026-11-20T04:20:16.650Z",
+      "updatedAt": "2026-11-20T04:20:16.671Z"
     },
     {
-      "id": "rfnd_1794655419153_d2389912",
-      "subscriptionId": "sub_user_test_refund_1794655419024",
+      "id": "rfnd_1795148416599_f8a68689",
+      "subscriptionId": "sub_user_test_refund_1795148416454",
       "userId": "FT483921",
       "userName": "Alex Rivera",
       "userEmail": "alex@facetube.com",
       "planId": "member-monthly",
       "planName": "Creator Member",
-      "paymentId": "pay_refund_test_1794655419024_1",
-      "orderId": "order_refund_test_1794655419024_1",
+      "paymentId": "pay_refund_test_1795148416454_1",
+      "orderId": "order_refund_test_1795148416454_1",
       "amount": 499,
       "currency": "INR",
       "reason": "Accidentally renewed my creator membership, please refund to original payment source.",
@@ -76,9 +76,9 @@
       "gatewayRefundId": null,
       "adminNote": "Rejected because member consumed subscriber perks during active billing cycle.",
       "reviewedBy": "FT102857",
-      "reviewedAt": "2026-11-14T11:23:39.187Z",
-      "createdAt": "2026-11-14T11:23:39.153Z",
-      "updatedAt": "2026-11-14T11:23:39.188Z"
+      "reviewedAt": "2026-11-20T04:20:16.631Z",
+      "createdAt": "2026-11-20T04:20:16.599Z",
+      "updatedAt": "2026-11-20T04:20:16.631Z"
     }
   ]
 }

@@ -21,6 +21,7 @@ export interface ShortItem {
   aspectColor: string;
   videoUrl?: string;
   userId?: string;
+  channelLogoUrl?: string | undefined;
 }
 
 export const SHORTS_LIST: ShortItem[] = [

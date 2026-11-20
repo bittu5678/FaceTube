@@ -63,6 +63,8 @@ export interface UploadedVideo {
   id: string;
   userId: string; // e.g. "FT102857" or UUID
   creatorName: string;
+  channelName?: string | undefined;
+  channelLogoUrl?: string | undefined;
   title: string;
   description: string;
   videoUrl: string;
@@ -378,10 +380,17 @@ export async function fetchUploadedVideos(
           promotionExpiresAt: d.promotion_expires_at || d.promotionExpiresAt,
         });
 
+        const channelName =
+          d.channel_name || d.channelName || d.creator_name || d.creatorName || "FaceTube Creator";
+        const rawLogo = d.channel_logo_url || d.channelLogoUrl || "";
+        const channelLogoUrl = rawLogo ? resolveMediaUrl(rawLogo) || undefined : undefined;
+
         return {
           id: String(d.id),
           userId: d.user_id || d.userId || "FT102857",
-          creatorName: d.creator_name || d.creatorName || "FaceTube Creator",
+          creatorName: channelName,
+          channelName,
+          channelLogoUrl,
           title: d.title || "Untitled Video",
           description: d.description || "",
           videoUrl: resolveMediaUrl(d.video_url || d.videoUrl || ""),
@@ -876,12 +885,18 @@ export function convertUploadedToCatalogVideo(v: UploadedVideo): Video {
   });
 
   const rawVideoUrl = resolveMediaUrl(v.videoUrl || (v as any).video_url || "");
+  const channelName = v.channelName || (v as any).channel_name || v.creatorName || "FaceTube Creator";
+  const rawChannelLogo = v.channelLogoUrl || (v as any).channel_logo_url || "";
+  const channelLogoUrl = rawChannelLogo ? resolveMediaUrl(rawChannelLogo) || undefined : undefined;
 
   return {
     id: String(v.id),
     title: v.title || "Untitled Video",
-    channel: v.creatorName || "FaceTube Creator",
-    initials: (v.creatorName || "FC").slice(0, 2).toUpperCase(),
+    channel: channelName,
+    channelName,
+    channelLogoUrl,
+    channel_logo_url: channelLogoUrl,
+    initials: channelName.slice(0, 2).toUpperCase(),
     views: `${(Number(v.views) || 0).toLocaleString()} views`,
     age: v.createdAt ? new Date(v.createdAt).toLocaleDateString() : "Recently uploaded",
     duration: v.duration || "0:00",
@@ -1025,7 +1040,14 @@ export function convertVideoToShortItem(v: Video | UploadedVideo): ShortItem {
       thumbnailUrl: (v as any).thumbnailUrl,
       category: (v as any).category,
     });
-  const channel = (v as any).channel || (v as any).creatorName || "FaceTube Creator";
+  const channel =
+    (v as any).channelName ||
+    (v as any).channel_name ||
+    (v as any).channel ||
+    (v as any).creatorName ||
+    "FaceTube Creator";
+  const rawChannelLogo = (v as any).channelLogoUrl || (v as any).channel_logo_url || "";
+  const channelLogoUrl = rawChannelLogo ? resolveMediaUrl(rawChannelLogo) || undefined : undefined;
   const views =
     typeof (v as any).views === "number"
       ? `${(v as any).views.toLocaleString()} views`
@@ -1046,5 +1068,7 @@ export function convertVideoToShortItem(v: Video | UploadedVideo): ShortItem {
     thumb: thumbUrl,
     aspectColor: "from-blue-900/60 to-purple-900/80",
     videoUrl: (v as any).videoUrl,
+    userId: (v as any).userId || (v as any).user_id,
+    channelLogoUrl,
   };
 }

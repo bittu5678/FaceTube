@@ -288,3 +288,156 @@ export async function cropAndResizeTo9to16(
     img.src = objectUrl;
   });
 }
+
+export interface SquareCropCalculationResult {
+  cropX: number;
+  cropY: number;
+  cropWidth: number;
+  cropHeight: number;
+  targetSize: number;
+  isAlreadySquare: boolean;
+}
+
+/**
+ * Calculates proportional 1:1 square center-crop box for channel logo uploads
+ * without stretching or distortion.
+ */
+export function calculateSquareCrop(
+  srcWidth: number,
+  srcHeight: number,
+  targetSize = 512,
+): SquareCropCalculationResult {
+  if (srcWidth <= 0 || srcHeight <= 0) {
+    return {
+      cropX: 0,
+      cropY: 0,
+      cropWidth: targetSize,
+      cropHeight: targetSize,
+      targetSize,
+      isAlreadySquare: false,
+    };
+  }
+
+  const side = Math.min(srcWidth, srcHeight);
+  const cropX = Math.max(0, Math.round((srcWidth - side) / 2));
+  const cropY = Math.max(0, Math.round((srcHeight - side) / 2));
+  const isAlreadySquare = Math.abs(srcWidth - srcHeight) <= 1;
+
+  return {
+    cropX,
+    cropY,
+    cropWidth: side,
+    cropHeight: side,
+    targetSize,
+    isAlreadySquare,
+  };
+}
+
+/**
+ * Proportional 1:1 Square Center-Crop & Resize Utility for Channel Logos.
+ * Preserves PNG/WebP transparency and outputs a clean square logo image (default 512x512).
+ */
+export async function cropAndResizeToSquare(file: File, targetSize = 512): Promise<File> {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return file;
+  }
+
+  return new Promise((resolve) => {
+    const img = new window.Image();
+    const objectUrl = URL.createObjectURL(file);
+
+    img.onload = () => {
+      try {
+        const srcW = img.naturalWidth;
+        const srcH = img.naturalHeight;
+
+        if (srcW <= 0 || srcH <= 0) {
+          URL.revokeObjectURL(objectUrl);
+          resolve(file);
+          return;
+        }
+
+        const crop = calculateSquareCrop(srcW, srcH, targetSize);
+
+        if (crop.isAlreadySquare && srcW <= targetSize && srcH <= targetSize) {
+          URL.revokeObjectURL(objectUrl);
+          resolve(file);
+          return;
+        }
+
+        const outputSize = Math.min(targetSize, crop.cropWidth);
+        const canvas = document.createElement("canvas");
+        canvas.width = outputSize;
+        canvas.height = outputSize;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          URL.revokeObjectURL(objectUrl);
+          resolve(file);
+          return;
+        }
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+
+        const mimeType =
+          file.type === "image/png"
+            ? "image/png"
+            : file.type === "image/webp"
+              ? "image/webp"
+              : "image/jpeg";
+
+        if (mimeType === "image/jpeg") {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, outputSize, outputSize);
+        }
+
+        ctx.drawImage(
+          img,
+          crop.cropX,
+          crop.cropY,
+          crop.cropWidth,
+          crop.cropHeight,
+          0,
+          0,
+          outputSize,
+          outputSize,
+        );
+
+        canvas.toBlob(
+          (blob) => {
+            URL.revokeObjectURL(objectUrl);
+            if (!blob) {
+              resolve(file);
+              return;
+            }
+
+            const ext =
+              mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg";
+            const baseName = file.name.replace(/\.[^/.]+$/, "");
+            const newFileName = `${baseName}_logo.${ext}`;
+            resolve(
+              new File([blob], newFileName, {
+                type: mimeType,
+                lastModified: Date.now(),
+              }),
+            );
+          },
+          mimeType,
+          0.92,
+        );
+      } catch (err) {
+        URL.revokeObjectURL(objectUrl);
+        console.error("Error cropping channel logo to square:", err);
+        resolve(file);
+      }
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(file);
+    };
+
+    img.src = objectUrl;
+  });
+}
+

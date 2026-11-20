@@ -52,6 +52,7 @@ import { useAuth } from "@/lib/auth-context";
 import { allVideos } from "@/data/videos";
 import { api } from "@/lib/api";
 import { AdminKycReviewTab } from "@/components/admin/AdminKycReviewTab";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import type { RoleType } from "@/types/auth";
 
 export const Route = createFileRoute("/admin")({
@@ -1368,23 +1369,18 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                         <tr key={u.id} className="transition hover:bg-secondary/30">
                           <td className="py-4 pl-2">
                             <div className="flex items-center gap-3">
-                              {u.channel_logo_url ? (
-                                <img
-                                  src={u.channel_logo_url}
-                                  alt={u.channel_name || u.username}
-                                  className="h-9 w-9 rounded-full object-cover ring-1 ring-border"
-                                />
-                              ) : (
-                                <span
-                                  className={`grid h-9 w-9 shrink-0 place-items-center rounded-full text-xs font-bold text-white ${
-                                    isTargetAdmin
-                                      ? "bg-gradient-to-br from-brand to-brand-dark"
-                                      : "bg-slate-700"
-                                  }`}
-                                >
-                                  {u.username.substring(0, 2).toUpperCase()}
-                                </span>
-                              )}
+                              <ChannelAvatar
+                                src={u.channel_logo_url || u.avatar_url}
+                                name={u.channel_name || u.name || u.username}
+                                initials={u.username.substring(0, 2).toUpperCase()}
+                                sizeClassName="h-9 w-9"
+                                imageRingClassName="ring-1 ring-border"
+                                fallbackClassName={`text-xs font-bold text-white ${
+                                  isTargetAdmin
+                                    ? "bg-gradient-to-br from-brand to-brand-dark"
+                                    : "bg-slate-700"
+                                }`}
+                              />
                               <div>
                                 <p className="font-semibold text-foreground flex items-center gap-1.5">
                                   {u.user_id && (

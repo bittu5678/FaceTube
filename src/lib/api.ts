@@ -4,7 +4,7 @@
  * Base URL configurable via VITE_API_BASE_URL (defaults to /api)
  */
 
-import { cropAndResizeTo9to16 } from "./image-effects";
+import { cropAndResizeTo9to16, cropAndResizeToSquare } from "./image-effects";
 
 export const PRODUCTION_API_URL = "https://api.facetube.online";
 
@@ -117,30 +117,39 @@ export function setStoredAuthToken(token: string | null): void {
   }
 }
 
+export type ApiFetchOptions = RequestInit & {
+  timeoutMs?: number;
+};
+
 /**
  * Universal API Fetch Wrapper with Bearer Authentication
  */
 export async function apiFetch<T = unknown>(
   endpoint: string,
-  options: RequestInit = {},
+  options: ApiFetchOptions = {},
 ): Promise<T> {
+  const { timeoutMs, signal: externalSignal, ...fetchOptions } = options;
   const token = getStoredAuthToken();
   const headers: Record<string, string> = {
     Accept: "application/json",
   };
 
-  if (options.headers) {
-    if (typeof (options.headers as any).entries === "function") {
-      for (const [k, v] of (options.headers as any).entries()) {
+  if (fetchOptions.headers) {
+    if (typeof (fetchOptions.headers as any).entries === "function") {
+      for (const [k, v] of (fetchOptions.headers as any).entries()) {
         headers[k] = v;
       }
     } else {
-      Object.assign(headers, options.headers);
+      Object.assign(headers, fetchOptions.headers);
     }
   }
 
   // Do not set Content-Type if sending FormData (browser sets boundary)
-  if (!(options.body instanceof FormData) && !headers["Content-Type"] && !headers["content-type"]) {
+  if (
+    !(fetchOptions.body instanceof FormData) &&
+    !headers["Content-Type"] &&
+    !headers["content-type"]
+  ) {
     headers["Content-Type"] = "application/json";
   }
 
@@ -162,10 +171,51 @@ export async function apiFetch<T = unknown>(
     url = `http://127.0.0.1:${port}${url.startsWith("/") ? "" : "/"}${url}`;
   }
 
-  const res = await fetch(url, {
-    ...options,
-    headers,
-  });
+  let controller: AbortController | undefined;
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+
+  const onExternalAbort = () => {
+    controller?.abort();
+  };
+
+  if (timeoutMs && timeoutMs > 0 && typeof AbortController !== "undefined") {
+    controller = new AbortController();
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        controller.abort();
+      } else {
+        externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+      }
+    }
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      controller?.abort();
+    }, timeoutMs);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...fetchOptions,
+      headers,
+      ...(controller
+        ? { signal: controller.signal }
+        : externalSignal
+          ? { signal: externalSignal }
+          : {}),
+    });
+  } catch (err: any) {
+    if (timedOut || err?.name === "AbortError") {
+      throw new Error("Request timed out. Please check your internet connection and try again.");
+    }
+    throw err;
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    if (externalSignal && controller) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
+  }
 
   const contentType = res.headers.get("content-type") || "";
   let data: any = null;
@@ -313,7 +363,13 @@ export const api = {
       return apiFetch<{ success: boolean; profile: any }>(`/users/profile.php${q}`);
     },
 
-    updateProfile: async (data: { name?: string; mobile?: string; avatar_url?: string }) => {
+    updateProfile: async (data: {
+      name?: string;
+      mobile?: string;
+      avatar_url?: string;
+      channel_logo_url?: string;
+      channel_name?: string;
+    }) => {
       return apiFetch<{ success: boolean; profile: any; message?: string }>("/users/profile.php", {
         method: "POST",
         body: JSON.stringify(data),
@@ -332,8 +388,10 @@ export const api = {
       return apiFetch<{
         success: boolean;
         message?: string;
-        channel_logo_url?: string;
-        channel_name?: string;
+        channel_logo_url?: string | null;
+        channel_name?: string | null;
+        channelLogoUrl?: string | null;
+        channelName?: string | null;
       }>("/users/channel-logo.php", {
         method: "POST",
         body: JSON.stringify({
@@ -645,6 +703,7 @@ export const api = {
       }>("/payments/create-order.php", {
         method: "POST",
         body: JSON.stringify(data),
+        timeoutMs: 15000,
       });
     },
 
@@ -705,11 +764,21 @@ export const api = {
 
   // File Uploads
   uploads: {
-    uploadImage: async (file: File) => {
-      // Proportional 9:16 crop & resize to 1080x1920 (strict vertical format requirement)
-      const processedFile = await cropAndResizeTo9to16(file);
+    uploadImage: async (
+      file: File,
+      options?: { purpose?: "default" | "channel_logo" },
+    ) => {
+      const purpose = options?.purpose || "default";
+      // Square 1:1 center-crop for channel logos; strict 9:16 vertical crop for all other uploads
+      const processedFile =
+        purpose === "channel_logo"
+          ? await cropAndResizeToSquare(file)
+          : await cropAndResizeTo9to16(file);
       const formData = new FormData();
       formData.append("image", processedFile);
+      if (purpose === "channel_logo") {
+        formData.append("purpose", "channel_logo");
+      }
       return apiFetch<{
         success: boolean;
         url: string;

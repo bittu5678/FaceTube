@@ -19,6 +19,7 @@ export interface LiveStream {
   thumb: string;
   isLive: boolean;
   startedTime: string;
+  channelLogoUrl?: string | undefined;
   chatMessages: { user: string; text: string; isMod?: boolean; color: string }[];
 }
 

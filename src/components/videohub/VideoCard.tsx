@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import type { Video } from "@/data/videos";
 import { resolveVideoThumbnail, SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
 import { getVideoBadgeLabels } from "@/lib/video-service";
+import { ChannelAvatar } from "./ChannelAvatar";
 
 export function VideoCard({ video }: { video: Video }) {
   const thumbSrc = resolveVideoThumbnail(video);
@@ -38,20 +39,15 @@ export function VideoCard({ video }: { video: Video }) {
       </Link>
 
       <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3">
-        {(video as any).channelLogoUrl || (video as any).channel_logo_url ? (
-          <img
-            src={(video as any).channelLogoUrl || (video as any).channel_logo_url}
-            alt={video.channel}
-            className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-border shadow-sm"
-          />
-        ) : (
-          <span
-            className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-xs font-bold text-white shadow-sm"
-            style={{ backgroundColor: video.tint || "#ef4444" }}
-          >
-            {video.initials}
-          </span>
-        )}
+        <ChannelAvatar
+          src={(video as any).channelLogoUrl || (video as any).channel_logo_url}
+          name={video.channel}
+          initials={video.initials}
+          tint={video.tint || "#ef4444"}
+          sizeClassName="h-9 w-9"
+          imageRingClassName="ring-1 ring-border shadow-sm"
+          fallbackClassName="text-xs font-bold text-white shadow-sm"
+        />
         <div className="min-w-0">
           <Link to="/watch/$videoId" params={{ videoId: video.id }}>
             <h3 className="line-clamp-2 text-[0.95rem] font-semibold leading-snug text-foreground transition-colors group-hover:text-brand">

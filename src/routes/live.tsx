@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { Logo } from "@/components/videohub/Logo";
 import { ThemeToggle } from "@/components/videohub/ThemeToggle";
 import { BottomNav } from "@/components/videohub/BottomNav";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { LIVE_SUBJECTS, LIVE_CATEGORIES, matchStreamCategory, type LiveStream } from "@/data/live";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
@@ -94,6 +95,7 @@ export function LivePage() {
             s.thumbnail_url || "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800",
           isLive: s.status === "live",
           startedTime: s.status === "live" ? "Live now" : "Upcoming",
+          channelLogoUrl: s.channel_logo_url || s.channelLogoUrl || s.avatar_url || undefined,
           chatMessages: [],
         }));
 
@@ -438,9 +440,14 @@ export function LivePage() {
                 {/* Streamer Profile Snippet */}
                 <div className="flex items-center justify-between pt-3 border-t border-border">
                   <div className="flex items-center gap-3">
-                    <div className="grid h-10 w-10 place-items-center rounded-full bg-brand text-white font-bold text-sm shadow-md">
-                      {activeStream.initials}
-                    </div>
+                    <ChannelAvatar
+                      src={activeStream.channelLogoUrl}
+                      name={activeStream.streamer}
+                      initials={activeStream.initials}
+                      sizeClassName="h-10 w-10"
+                      imageRingClassName="ring-1 ring-border shadow-md"
+                      fallbackClassName="bg-brand text-white font-bold text-sm shadow-md"
+                    />
                     <div>
                       <h3 className="text-sm font-bold text-foreground">{activeStream.streamer}</h3>
                       <p className="text-xs text-muted-foreground">{activeStream.streamerHandle}</p>
@@ -653,9 +660,14 @@ export function LivePage() {
                     </div>
 
                     <div className="flex items-start gap-2.5">
-                      <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-brand text-white font-bold text-xs">
-                        {stream.initials}
-                      </div>
+                      <ChannelAvatar
+                        src={stream.channelLogoUrl}
+                        name={stream.streamer}
+                        initials={stream.initials}
+                        sizeClassName="h-8 w-8"
+                        imageRingClassName="ring-1 ring-border"
+                        fallbackClassName="bg-brand text-white font-bold text-xs"
+                      />
                       <div className="min-w-0 flex-1">
                         <h4 className="text-xs font-bold text-foreground line-clamp-2 group-hover:text-brand transition-colors">
                           {stream.title}

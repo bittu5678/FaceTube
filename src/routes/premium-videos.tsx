@@ -13,6 +13,7 @@ import {
   Filter,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { allVideos, type Video as CatalogVideo } from "@/data/videos";
 import {
   fetchUploadedVideos,
@@ -377,7 +378,16 @@ export function PremiumVideosPage() {
                           </span>
                         )}
                       </div>
-                      <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1">
+                      <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1.5">
+                        <ChannelAvatar
+                          src={video.channelLogoUrl || video.channel_logo_url}
+                          name={video.channel}
+                          initials={video.initials}
+                          tint={video.tint || "#f59e0b"}
+                          sizeClassName="h-5 w-5"
+                          imageRingClassName="ring-1 ring-border"
+                          fallbackClassName="text-[9px] font-bold text-white"
+                        />
                         <span className="truncate">{video.channel}</span>
                         <span>·</span>
                         <span className="font-semibold text-amber-400/90">{video.category}</span>

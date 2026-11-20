@@ -1,5 +1,5 @@
 import { api } from "./api";
-import { distributePremiumVideoIncome, getUserWallet } from "./ledger-service";
+import { distributePremiumVideoIncome } from "./ledger-service";
 import {
   recordNewVideoUpload,
   markVideoPromoted,
@@ -49,26 +49,113 @@ export interface RazorpayPaymentSuccessResponse {
   razorpay_signature?: string;
 }
 
+export type RazorpayCheckoutStage =
+  "creating_order" | "loading_gateway" | "opening_gateway" | "verifying";
+
+const RAZORPAY_SCRIPT_URL = "https://checkout.razorpay.com/v1/checkout.js";
+const RAZORPAY_SCRIPT_TIMEOUT_MS = 12000;
+
+let scriptLoadPromise: Promise<boolean> | null = null;
+let activeCheckoutLock = false;
+
+export function isRazorpayCheckoutActive(): boolean {
+  return activeCheckoutLock;
+}
+
+export function resetRazorpayClientStateForTests(): void {
+  scriptLoadPromise = null;
+  activeCheckoutLock = false;
+}
+
+function extractGatewayFailureMessage(response: unknown): string {
+  const err = (response as { error?: { description?: string; reason?: string; code?: string } })
+    ?.error;
+  return (
+    err?.description ||
+    err?.reason ||
+    "Payment was declined or interrupted inside Razorpay. Please try again."
+  );
+}
+
 /**
- * Dynamically loads Razorpay checkout script
+ * Dynamically loads Razorpay checkout script with singleton deduplication,
+ * existing-tag reuse, timeout handling, and clean retry on failure.
  */
-export function loadRazorpayScript(): Promise<boolean> {
-  return new Promise((resolve) => {
-    if (typeof window === "undefined") {
-      resolve(false);
+export function loadRazorpayScript(timeoutMs = RAZORPAY_SCRIPT_TIMEOUT_MS): Promise<boolean> {
+  if (typeof window === "undefined") {
+    return Promise.resolve(false);
+  }
+  if (window.Razorpay) {
+    return Promise.resolve(true);
+  }
+  if (typeof document === "undefined") {
+    return Promise.resolve(false);
+  }
+  if (scriptLoadPromise) {
+    return scriptLoadPromise;
+  }
+
+  scriptLoadPromise = new Promise<boolean>((resolve) => {
+    let settled = false;
+    let existingScript =
+      typeof document.querySelector === "function"
+        ? (document.querySelector(
+            `script[src="${RAZORPAY_SCRIPT_URL}"]`,
+          ) as HTMLScriptElement | null)
+        : null;
+
+    const cleanupAndResolve = (ok: boolean, removeFailedScript: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (existingScript) {
+        existingScript.onload = null;
+        existingScript.onerror = null;
+        if (removeFailedScript && typeof existingScript.remove === "function") {
+          existingScript.remove();
+        }
+      }
+      scriptLoadPromise = null;
+      resolve(ok);
+    };
+
+    const timer = setTimeout(() => {
+      cleanupAndResolve(false, true);
+    }, timeoutMs);
+
+    if (existingScript) {
+      if (window.Razorpay) {
+        cleanupAndResolve(true, false);
+        return;
+      }
+      existingScript.onload = () => cleanupAndResolve(Boolean(window.Razorpay), !window.Razorpay);
+      existingScript.onerror = () => cleanupAndResolve(false, true);
       return;
     }
-    if (window.Razorpay) {
-      resolve(true);
-      return;
-    }
+
     const script = document.createElement("script");
-    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    existingScript = script;
+    script.src = RAZORPAY_SCRIPT_URL;
     script.async = true;
-    script.onload = () => resolve(true);
-    script.onerror = () => resolve(false);
-    document.body.appendChild(script);
+    script.onload = () => cleanupAndResolve(Boolean(window.Razorpay), !window.Razorpay);
+    script.onerror = () => cleanupAndResolve(false, true);
+    (document.head || document.body).appendChild(script);
   });
+
+  return scriptLoadPromise;
+}
+
+/**
+ * Non-blocking warm-up so Razorpay checkout.js is cached before "Proceed to Pay" is clicked.
+ */
+export function preloadRazorpayScript(): void {
+  if (typeof window === "undefined" || typeof document === "undefined") {
+    return;
+  }
+  if (window.Razorpay) {
+    return;
+  }
+  void loadRazorpayScript();
 }
 
 export interface InitiatePremiumVideoPaymentParams {
@@ -89,6 +176,7 @@ export interface InitiatePremiumVideoPaymentParams {
   videoType?: VideoType;
   contentType: ContentType; // "short" | "long"
   directReferrerId?: string | null;
+  onStageChange?: (stage: RazorpayCheckoutStage) => void;
   onSuccess: (paymentIdOrVideo: unknown) => void;
   onFailure: (errorMsg: string) => void;
   onCancel?: () => void;
@@ -102,6 +190,11 @@ export interface InitiatePremiumVideoPaymentParams {
 export async function initiatePremiumVideoPayment(
   params: InitiatePremiumVideoPaymentParams,
 ): Promise<void> {
+  if (activeCheckoutLock) {
+    return;
+  }
+  activeCheckoutLock = true;
+
   const effectiveUserId = params.userId || params.uploaderUserId || "FT483921";
   const effectiveUserName = params.userName || params.uploaderName || "Alex Rivera";
   const effectiveTitle = params.title || params.videoTitle || "Untitled Premium Video";
@@ -110,6 +203,10 @@ export async function initiatePremiumVideoPayment(
     params.videoId || `vid-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
   try {
+    // Warm SDK download in parallel with server order creation (no sequential waterfall)
+    const scriptPromise = loadRazorpayScript();
+    params.onStageChange?.("creating_order");
+
     // 1. Create real Order via server API (fails closed if credentials missing)
     let orderData: {
       orderId: string;
@@ -143,6 +240,7 @@ export async function initiatePremiumVideoPayment(
         keyId: res.keyId,
       };
     } catch (orderErr: any) {
+      activeCheckoutLock = false;
       params.onFailure(
         orderErr?.message ||
           "Could not create Razorpay payment order. Real Razorpay credentials (RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET) must be configured in server environment.",
@@ -150,16 +248,22 @@ export async function initiatePremiumVideoPayment(
       return;
     }
 
-    const scriptLoaded = await loadRazorpayScript();
+    if (!window.Razorpay) {
+      params.onStageChange?.("loading_gateway");
+    }
+    const scriptLoaded = await scriptPromise;
     if (!scriptLoaded || !window.Razorpay) {
+      activeCheckoutLock = false;
       params.onFailure(
-        "Razorpay checkout SDK could not be loaded. Please check your internet connection.",
+        "Razorpay checkout SDK could not be loaded. Please check your internet connection and try again.",
       );
       return;
     }
 
     // 2. Setup checkout handler with duplicate completion protection
     let completionStarted = false;
+    let lastGatewayFailure: string | null = null;
+
     const handlePaymentCompletion = async (
       paymentId: string,
       orderId: string,
@@ -169,8 +273,10 @@ export async function initiatePremiumVideoPayment(
         return;
       }
       completionStarted = true;
+      params.onStageChange?.("verifying");
 
       if (!signature) {
+        activeCheckoutLock = false;
         params.onFailure(
           "Payment signature missing from Razorpay checkout response. Verification aborted.",
         );
@@ -191,6 +297,7 @@ export async function initiatePremiumVideoPayment(
         });
 
         if (!res?.verified) {
+          activeCheckoutLock = false;
           params.onFailure(res?.error || "Payment verification failed on the server.");
           return;
         }
@@ -234,9 +341,11 @@ export async function initiatePremiumVideoPayment(
           });
         }
 
+        activeCheckoutLock = false;
         params.onSuccess(paymentId);
       } catch (err: any) {
         console.error("Error finalizing premium payment:", err);
+        activeCheckoutLock = false;
         params.onFailure(err?.message || "Failed to complete payment verification on server.");
       }
     };
@@ -247,7 +356,7 @@ export async function initiatePremiumVideoPayment(
       currency: "INR",
       name: "FaceTube Creator Studio",
       description: `Premium ${params.contentType === "short" ? "Short" : "Long"} Video Upload (₹5 Base + 18% GST + 2% PG = ₹6 Total)`,
-      image: "/favicon.ico",
+      image: "/favicon.png",
       order_id: orderData.orderId,
       handler: (response) => {
         void handlePaymentCompletion(
@@ -266,16 +375,30 @@ export async function initiatePremiumVideoPayment(
       },
       modal: {
         ondismiss: () => {
-          if (!completionStarted && params.onCancel) params.onCancel();
+          if (!completionStarted) {
+            activeCheckoutLock = false;
+            if (lastGatewayFailure) {
+              params.onFailure(lastGatewayFailure);
+            } else if (params.onCancel) {
+              params.onCancel();
+            }
+          }
         },
       },
     };
 
+    params.onStageChange?.("opening_gateway");
     const rzp = new window.Razorpay(options);
+    if (typeof rzp.on === "function") {
+      rzp.on("payment.failed", (response) => {
+        lastGatewayFailure = extractGatewayFailureMessage(response);
+      });
+    }
     rzp.open();
-  } catch (err: unknown) {
+  } catch (err: any) {
     console.error("Razorpay initiation error:", err);
-    params.onFailure("Could not initiate payment gateway.");
+    activeCheckoutLock = false;
+    params.onFailure(err?.message || "Could not initiate payment gateway.");
   }
 }
 
@@ -294,11 +417,21 @@ export async function initiateAdsPromotionPayment(params: {
   durationDays: number;
   price: number;
   directReferrerId?: string | null;
+  onStageChange?: (stage: RazorpayCheckoutStage) => void;
   onSuccess: (result: unknown) => void;
   onFailure: (errorMsg: string) => void;
   onCancel?: () => void;
 }): Promise<void> {
+  if (activeCheckoutLock) {
+    return;
+  }
+  activeCheckoutLock = true;
+
   try {
+    // Warm SDK download in parallel with server order creation
+    const scriptPromise = loadRazorpayScript();
+    params.onStageChange?.("creating_order");
+
     let orderData: {
       orderId: string;
       amount: number;
@@ -331,6 +464,7 @@ export async function initiateAdsPromotionPayment(params: {
         keyId: res.keyId,
       };
     } catch (orderErr: any) {
+      activeCheckoutLock = false;
       params.onFailure(
         orderErr?.message ||
           "Could not create Razorpay payment order. Real Razorpay credentials (RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET) must be configured in server environment.",
@@ -338,22 +472,30 @@ export async function initiateAdsPromotionPayment(params: {
       return;
     }
 
-    const scriptLoaded = await loadRazorpayScript();
+    if (!window.Razorpay) {
+      params.onStageChange?.("loading_gateway");
+    }
+    const scriptLoaded = await scriptPromise;
     if (!scriptLoaded || !window.Razorpay) {
+      activeCheckoutLock = false;
       params.onFailure(
-        "Razorpay checkout SDK could not be loaded. Please check your internet connection.",
+        "Razorpay checkout SDK could not be loaded. Please check your internet connection and try again.",
       );
       return;
     }
 
     let completionStarted = false;
+    let lastGatewayFailure: string | null = null;
+
     const handleAdsCompletion = async (paymentId: string, orderId: string, signature?: string) => {
       if (completionStarted) {
         return;
       }
       completionStarted = true;
+      params.onStageChange?.("verifying");
 
       if (!signature) {
+        activeCheckoutLock = false;
         params.onFailure(
           "Payment signature missing from Razorpay checkout response. Verification aborted.",
         );
@@ -373,6 +515,7 @@ export async function initiateAdsPromotionPayment(params: {
         });
 
         if (!res?.verified) {
+          activeCheckoutLock = false;
           params.onFailure(res?.error || "Payment verification failed on the server.");
           return;
         }
@@ -385,6 +528,7 @@ export async function initiateAdsPromotionPayment(params: {
           paymentId,
         });
 
+        activeCheckoutLock = false;
         params.onSuccess({
           paymentId,
           orderId,
@@ -394,6 +538,7 @@ export async function initiateAdsPromotionPayment(params: {
         });
       } catch (err: any) {
         console.error("Error completing ads promotion:", err);
+        activeCheckoutLock = false;
         params.onFailure(err?.message || "Could not activate promotion.");
       }
     };
@@ -404,7 +549,7 @@ export async function initiateAdsPromotionPayment(params: {
       currency: "INR",
       name: "FaceTube Ads Promotions",
       description: `Promotion Campaign: ${params.planName} (₹${params.price})`,
-      image: "/favicon.ico",
+      image: "/favicon.png",
       order_id: orderData.orderId,
       handler: (response) => {
         void handleAdsCompletion(
@@ -423,15 +568,29 @@ export async function initiateAdsPromotionPayment(params: {
       },
       modal: {
         ondismiss: () => {
-          if (!completionStarted && params.onCancel) params.onCancel();
+          if (!completionStarted) {
+            activeCheckoutLock = false;
+            if (lastGatewayFailure) {
+              params.onFailure(lastGatewayFailure);
+            } else if (params.onCancel) {
+              params.onCancel();
+            }
+          }
         },
       },
     };
 
+    params.onStageChange?.("opening_gateway");
     const rzp = new window.Razorpay(options);
+    if (typeof rzp.on === "function") {
+      rzp.on("payment.failed", (response) => {
+        lastGatewayFailure = extractGatewayFailureMessage(response);
+      });
+    }
     rzp.open();
   } catch (err: any) {
     console.error("Ads promotion error:", err);
+    activeCheckoutLock = false;
     params.onFailure(err?.message || "Could not initiate ads payment gateway.");
   }
 }
@@ -443,6 +602,7 @@ export interface InitiatePaidSubscriptionPaymentParams {
   userMobile?: string;
   planId: string;
   planName?: string;
+  onStageChange?: (stage: RazorpayCheckoutStage) => void;
   onSuccess: (result: {
     paymentId: string;
     orderId: string;
@@ -461,7 +621,16 @@ export interface InitiatePaidSubscriptionPaymentParams {
 export async function initiatePaidSubscriptionPayment(
   params: InitiatePaidSubscriptionPaymentParams,
 ): Promise<void> {
+  if (activeCheckoutLock) {
+    return;
+  }
+  activeCheckoutLock = true;
+
   try {
+    // Warm SDK download in parallel with server order creation
+    const scriptPromise = loadRazorpayScript();
+    params.onStageChange?.("creating_order");
+
     let orderData: {
       orderId: string;
       amount: number;
@@ -501,6 +670,7 @@ export async function initiatePaidSubscriptionPayment(
         keyId: res.keyId,
       };
     } catch (orderErr: any) {
+      activeCheckoutLock = false;
       params.onFailure(
         orderErr?.message ||
           "Could not create Razorpay payment order. Real Razorpay credentials (RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET) must be configured in server environment.",
@@ -508,20 +678,34 @@ export async function initiatePaidSubscriptionPayment(
       return;
     }
 
-    const scriptLoaded = await loadRazorpayScript();
+    if (!window.Razorpay) {
+      params.onStageChange?.("loading_gateway");
+    }
+    const scriptLoaded = await scriptPromise;
     if (!scriptLoaded || !window.Razorpay) {
+      activeCheckoutLock = false;
       params.onFailure(
-        "Razorpay checkout SDK could not be loaded. Please check your internet connection.",
+        "Razorpay checkout SDK could not be loaded. Please check your internet connection and try again.",
       );
       return;
     }
+
+    let completionStarted = false;
+    let lastGatewayFailure: string | null = null;
 
     const handleSubscriptionCompletion = async (
       paymentId: string,
       orderId: string,
       signature?: string,
     ) => {
+      if (completionStarted) {
+        return;
+      }
+      completionStarted = true;
+      params.onStageChange?.("verifying");
+
       if (!signature) {
+        activeCheckoutLock = false;
         params.onFailure(
           "Payment signature missing from Razorpay checkout response. Verification aborted.",
         );
@@ -551,10 +735,12 @@ export async function initiatePaidSubscriptionPayment(
         const res = await api.payments.verify(verifyPayload);
 
         if (!res?.verified) {
+          activeCheckoutLock = false;
           params.onFailure(res?.error || "Payment verification failed on the server.");
           return;
         }
 
+        activeCheckoutLock = false;
         params.onSuccess({
           paymentId,
           orderId,
@@ -563,6 +749,7 @@ export async function initiatePaidSubscriptionPayment(
         });
       } catch (err: any) {
         console.error("Error finalizing subscription payment:", err);
+        activeCheckoutLock = false;
         params.onFailure(err?.message || "Failed to complete subscription verification on server.");
       }
     };
@@ -573,7 +760,7 @@ export async function initiatePaidSubscriptionPayment(
       currency: "INR",
       name: "FaceTube Membership",
       description: `${params.planName || "Subscriber Membership"} (${params.planId})`,
-      image: "/favicon.ico",
+      image: "/favicon.png",
       order_id: orderData.orderId,
       handler: (response) => {
         return handleSubscriptionCompletion(
@@ -592,15 +779,29 @@ export async function initiatePaidSubscriptionPayment(
       },
       modal: {
         ondismiss: () => {
-          if (params.onCancel) params.onCancel();
+          if (!completionStarted) {
+            activeCheckoutLock = false;
+            if (lastGatewayFailure) {
+              params.onFailure(lastGatewayFailure);
+            } else if (params.onCancel) {
+              params.onCancel();
+            }
+          }
         },
       },
     };
 
+    params.onStageChange?.("opening_gateway");
     const rzp = new window.Razorpay(options);
+    if (typeof rzp.on === "function") {
+      rzp.on("payment.failed", (response) => {
+        lastGatewayFailure = extractGatewayFailureMessage(response);
+      });
+    }
     rzp.open();
-  } catch (err: unknown) {
+  } catch (err: any) {
     console.error("Paid subscription initiation error:", err);
-    params.onFailure("Could not initiate payment gateway.");
+    activeCheckoutLock = false;
+    params.onFailure(err?.message || "Could not initiate payment gateway.");
   }
 }

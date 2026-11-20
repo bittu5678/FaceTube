@@ -27,6 +27,9 @@ export type Video = {
   isPromoted?: boolean;
   uploadedAt?: string;
   userId?: string;
+  channelLogoUrl?: string | undefined;
+  channel_logo_url?: string | undefined;
+  channelName?: string | undefined;
 };
 
 export const VIDEO_CATEGORIES = [
@@ -502,11 +505,19 @@ export async function findVideoAsync(id: string): Promise<Video | undefined> {
           ).toLocaleDateString()
         : "Recently uploaded";
 
+      const channelName =
+        v.channel_name || v.channelName || v.creator_name || v.creatorName || "FaceTube Creator";
+      const rawChannelLogo = v.channel_logo_url || v.channelLogoUrl || "";
+      const channelLogoUrl = rawChannelLogo ? resolveMediaUrl(rawChannelLogo) || undefined : undefined;
+
       return {
         id: String(v.id),
         title: v.title || "Untitled Video",
-        channel: v.creator_name || v.creatorName || "FaceTube Creator",
-        initials: (v.creator_name || v.creatorName || "FC").slice(0, 2).toUpperCase(),
+        channel: channelName,
+        channelName,
+        channelLogoUrl,
+        channel_logo_url: channelLogoUrl,
+        initials: channelName.slice(0, 2).toUpperCase(),
         views: `${(Number(v.views) || 0).toLocaleString()} views`,
         age: parsedAge,
         duration: v.duration || "0:00",

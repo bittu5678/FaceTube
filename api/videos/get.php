@@ -16,7 +16,16 @@ if (empty($id)) {
 $pdo = getDatabaseConnection();
 
 try {
-    $stmt = $pdo->prepare('SELECT * FROM uploaded_videos WHERE id = ? LIMIT 1');
+    $stmt = $pdo->prepare('
+        SELECT
+            v.*,
+            u.channel_logo_url AS creator_channel_logo_url,
+            u.channel_name AS creator_channel_name
+        FROM uploaded_videos v
+        LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
+        WHERE v.id = ?
+        LIMIT 1
+    ');
     $stmt->execute([$id]);
     $row = $stmt->fetch();
 
@@ -38,13 +47,23 @@ try {
 
     $expiryTime = !empty($row['promotion_expires_at']) ? strtotime($row['promotion_expires_at']) : false;
     $isActivePromoted = !empty($row['is_promoted']) && $expiryTime !== false && $expiryTime > time();
+    $channelLogoUrl = !empty($row['creator_channel_logo_url'])
+        ? toAbsoluteMediaUrl($row['creator_channel_logo_url'], 'logos')
+        : null;
+    $channelName = !empty($row['creator_channel_name'])
+        ? $row['creator_channel_name']
+        : ($row['creator_name'] ?? 'FaceTube Creator');
 
     $video = [
         'id' => $row['id'],
         'userId' => $row['user_id'],
         'user_id' => $row['user_id'],
-        'creatorName' => $row['creator_name'],
-        'creator_name' => $row['creator_name'],
+        'creatorName' => $channelName,
+        'creator_name' => $channelName,
+        'channelName' => $channelName,
+        'channel_name' => $channelName,
+        'channelLogoUrl' => $channelLogoUrl,
+        'channel_logo_url' => $channelLogoUrl,
         'title' => $row['title'],
         'description' => $row['description'] ?? '',
         'videoUrl' => toAbsoluteMediaUrl($row['video_url'], 'videos'),

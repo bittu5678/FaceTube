@@ -19,6 +19,7 @@ import {
 } from "./user-service";
 import { verifyPassword } from "./password";
 import { api, setStoredAuthToken, getStoredAuthToken } from "./api";
+import { resolveMediaUrl } from "./media-url";
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -158,6 +159,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           const u = res.user;
           const resolvedRole: RoleType =
             u.role === "admin" || u.email === "admin@facetube.com" ? "admin" : "user";
+          const normalizedLogoUrl = u.channel_logo_url
+            ? resolveMediaUrl(u.channel_logo_url) || null
+            : null;
           const newProfile: Profile = {
             id: u.id,
             user_id: u.user_id,
@@ -167,13 +171,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             mobile: u.mobile,
             email: u.email,
             avatar_url: u.avatar_url,
-            channel_logo_url: u.channel_logo_url || null,
+            channel_logo_url: normalizedLogoUrl,
             channel_name: u.channel_name || null,
             referral_code: u.referral_code,
             created_at: u.created_at,
           };
           const authUser: User = {
             id: u.id,
+            user_id: u.user_id,
             email: u.email,
             user_metadata: {
               name: u.name,
@@ -181,7 +186,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               mobile: u.mobile,
               user_id: u.user_id,
               avatar_url: u.avatar_url,
-              channel_logo_url: u.channel_logo_url,
+              channel_logo_url: normalizedLogoUrl,
               channel_name: u.channel_name,
             },
           };
@@ -192,6 +197,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             mobile: u.mobile,
             email: u.email,
             password_hash: "SECURED_BY_PHP_BCRYPT",
+            channel_logo_url: normalizedLogoUrl,
+            channel_name: u.channel_name || null,
             referral_code: u.referral_code,
             created_at: u.created_at,
             role: resolvedRole,
@@ -419,6 +426,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const resolvedRole: RoleType =
         authenticatedUser.role ||
         (authenticatedUser.email === "admin@facetube.com" ? "admin" : "user");
+      const normalizedLogoUrl = authenticatedUser.channel_logo_url
+        ? resolveMediaUrl(authenticatedUser.channel_logo_url) || null
+        : null;
 
       const authProfile: Profile = {
         id: authenticatedUser.id,
@@ -428,7 +438,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         full_name: authenticatedUser.name,
         mobile: authenticatedUser.mobile,
         email: authenticatedUser.email,
-        channel_logo_url: authenticatedUser.channel_logo_url || null,
+        avatar_url: authenticatedUser.avatar_url,
+        channel_logo_url: normalizedLogoUrl,
         channel_name: authenticatedUser.channel_name || null,
         referral_code: authenticatedUser.referral_code,
         created_at: authenticatedUser.created_at,
@@ -436,13 +447,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       const authUser: User = {
         id: authenticatedUser.id,
+        user_id: authenticatedUser.user_id,
         email: authenticatedUser.email,
         user_metadata: {
           user_id: authenticatedUser.user_id,
           name: authenticatedUser.name,
           full_name: authenticatedUser.name,
           mobile: authenticatedUser.mobile,
-          channel_logo_url: authenticatedUser.channel_logo_url,
+          avatar_url: authenticatedUser.avatar_url,
+          channel_logo_url: normalizedLogoUrl,
           channel_name: authenticatedUser.channel_name,
         },
       };
@@ -454,7 +467,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         mobile: authenticatedUser.mobile,
         email: authenticatedUser.email,
         password_hash: "SECURED_BY_PHP_BCRYPT",
-        channel_logo_url: authenticatedUser.channel_logo_url || null,
+        channel_logo_url: normalizedLogoUrl,
         channel_name: authenticatedUser.channel_name || null,
         referral_code: authenticatedUser.referral_code,
         created_at: authenticatedUser.created_at,
@@ -547,6 +560,94 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return true;
   };
 
+  /**
+   * Immediately updates authenticated user's channel logo and name across AuthContext,
+   * usersList, and local session cache after a successful backend update.
+   */
+  const updateChannelBranding = useCallback(
+    (updates: { channel_logo_url?: string | null; channel_name?: string | null }) => {
+      const hasLogo = updates.channel_logo_url !== undefined;
+      const hasName = updates.channel_name !== undefined;
+      const nextLogo =
+        hasLogo && updates.channel_logo_url
+          ? resolveMediaUrl(updates.channel_logo_url) || updates.channel_logo_url
+          : updates.channel_logo_url;
+
+      let updatedProfile: Profile | null = null;
+      let updatedDbUser: DbUser | null = null;
+      let updatedAuthUser: User | null = null;
+
+      setProfile((prev) => {
+        if (!prev) return prev;
+        updatedProfile = {
+          ...prev,
+          ...(hasLogo ? { channel_logo_url: nextLogo ?? null } : {}),
+          ...(hasName ? { channel_name: updates.channel_name ?? null } : {}),
+        };
+        return updatedProfile;
+      });
+
+      setDbUser((prev) => {
+        if (!prev) return prev;
+        updatedDbUser = {
+          ...prev,
+          ...(hasLogo ? { channel_logo_url: nextLogo ?? null } : {}),
+          ...(hasName ? { channel_name: updates.channel_name ?? null } : {}),
+        };
+        return updatedDbUser;
+      });
+
+      setUser((prev) => {
+        if (!prev) return prev;
+        updatedAuthUser = {
+          ...prev,
+          user_metadata: {
+            ...prev.user_metadata,
+            ...(hasLogo ? { channel_logo_url: nextLogo ?? null } : {}),
+            ...(hasName ? { channel_name: updates.channel_name ?? null } : {}),
+          },
+        };
+        return updatedAuthUser;
+      });
+
+      const activeUserId = profile?.user_id || dbUser?.user_id || user?.user_id;
+      if (activeUserId) {
+        setUsersList((prev) =>
+          prev.map((u) => {
+            if (u.user_id?.toUpperCase() === activeUserId.toUpperCase()) {
+              return {
+                ...u,
+                ...(hasLogo ? { channel_logo_url: nextLogo ?? null } : {}),
+                ...(hasName ? { channel_name: updates.channel_name ?? null } : {}),
+              };
+            }
+            return u;
+          }),
+        );
+      }
+
+      try {
+        const cached = getCachedSession();
+        const currentToken = getStoredAuthToken();
+        if (cached) {
+          localStorage.setItem(
+            LOCAL_STORAGE_SESSION_KEY,
+            JSON.stringify({
+              ...cached,
+              user: updatedAuthUser || cached.user,
+              profile: updatedProfile || cached.profile,
+              dbUser: updatedDbUser || cached.dbUser,
+              token: currentToken || cached.token || undefined,
+            }),
+          );
+        }
+      } catch (_e) {
+        // storage disabled
+      }
+    },
+    [profile?.user_id, dbUser?.user_id, user?.user_id],
+  );
+
   return (
     <AuthContext.Provider
       value={{
@@ -561,6 +662,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         signIn,
         signOut,
         updateUserRole,
+        updateChannelBranding,
         allUsers: usersList,
         refreshUsers,
       }}

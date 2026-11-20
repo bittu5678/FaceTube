@@ -33,19 +33,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             jsonResponse(['success' => false, 'error' => 'Profile not found.'], 404);
         }
 
+        if (!empty($profile['channel_logo_url'])) {
+            $profile['channel_logo_url'] = toAbsoluteMediaUrl($profile['channel_logo_url'], 'logos');
+        }
+
         jsonResponse(['success' => true, 'profile' => $profile]);
     } catch (PDOException $e) {
         jsonResponse(['success' => false, 'error' => 'Database error: ' . $e->getMessage()], 500);
     }
 } elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $authUser = getAuthUser($pdo);
     $input = getRequestPayload();
-
-    $userId = $authUser ? $authUser['id'] : trim($input['userId'] ?? ($input['id'] ?? ''));
-
-    if (empty($userId)) {
-        jsonResponse(['success' => false, 'error' => 'Unauthorized or missing user identifier.'], 401);
-    }
+    $requestedUserId = trim($input['userId'] ?? ($input['user_id'] ?? ($input['id'] ?? '')));
+    [$authUser, $effectiveUserId] = requireAuthUser($pdo, $requestedUserId ?: null);
+    $userId = $effectiveUserId ?: $authUser['id'];
 
     $updates = [];
     $params = [];
@@ -88,13 +88,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $stmt->execute($params);
 
         $stmtGet = $pdo->prepare('
-            SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, created_at
+            SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
             FROM users
             WHERE id = ? OR UPPER(user_id) = UPPER(?)
             LIMIT 1
         ');
         $stmtGet->execute([$userId, $userId]);
         $updatedProfile = $stmtGet->fetch();
+
+        if ($updatedProfile && !empty($updatedProfile['channel_logo_url'])) {
+            $updatedProfile['channel_logo_url'] = toAbsoluteMediaUrl($updatedProfile['channel_logo_url'], 'logos');
+        }
 
         jsonResponse([
             'success' => true,

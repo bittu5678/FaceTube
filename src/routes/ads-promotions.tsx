@@ -31,6 +31,7 @@ import { type UploadedVideo } from "@/lib/video-service";
 import { resolveVideoThumbnail, SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
 import { resolveMediaUrl } from "@/lib/media-url";
 import { api } from "@/lib/api";
+import { initiateAdsPromotionPayment, preloadRazorpayScript } from "@/lib/razorpay-service";
 
 export const Route = createFileRoute("/ads-promotions")({
   head: () => ({
@@ -318,6 +319,7 @@ function AdsPromotionsPage() {
   }, [effectiveUserId, userName, marketingPercentage]);
 
   useEffect(() => {
+    preloadRazorpayScript();
     loadVideosAndCampaigns();
   }, [loadVideosAndCampaigns]);
 
@@ -379,7 +381,7 @@ function AdsPromotionsPage() {
     setIsActivating(true);
 
     try {
-      const { initiateAdsPromotionPayment } = await import("@/lib/razorpay-service");
+      preloadRazorpayScript();
       const userEmail = user?.email || undefined;
       const userMobile = profile?.mobile || dbUser?.mobile || undefined;
 

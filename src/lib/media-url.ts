@@ -5,11 +5,11 @@
  * Prevents double domains, handles SSR, and supports local dev environments.
  */
 
-export const PRODUCTION_API_DOMAIN = "https://facetube.online";
+export const PRODUCTION_API_DOMAIN = "https://api.facetube.online";
 
 /**
  * Returns the base URL for uploaded media files.
- * In production (facetube.online), media files are hosted on https://facetube.online.
+ * In production (facetube.online), media files are hosted on https://api.facetube.online.
  * In local dev or emulator, media files are served from the current origin.
  */
 export function getMediaBaseUrl(): string {

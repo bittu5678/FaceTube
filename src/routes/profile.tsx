@@ -1,5 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
   User,
   Settings,
@@ -33,8 +33,10 @@ import { toast } from "sonner";
 import { Logo } from "@/components/videohub/Logo";
 import { ThemeToggle } from "@/components/videohub/ThemeToggle";
 import { BottomNav } from "@/components/videohub/BottomNav";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
+import { resolveMediaUrl } from "@/lib/media-url";
 import { recommended, recent, type Video as VideoType } from "@/data/videos";
 import { SHORTS_LIST } from "@/data/shorts";
 import { PersonalKycTab } from "@/components/profile/PersonalKycTab";
@@ -75,6 +77,7 @@ function ProfilePage() {
     isAdmin,
     signOut,
     signIn,
+    updateChannelBranding,
     allUsers,
     refreshUsers,
   } = useAuth();
@@ -108,13 +111,24 @@ function ProfilePage() {
     (typeof userMeta?.["mobile"] === "string" ? userMeta["mobile"] : "") ||
     "+1 555-014-8392";
 
-  // Editable Profile State (Req 2: Channel Logo & Channel Name)
-  const [channelName, setChannelName] = useState(
-    profile?.channel_name || profile?.full_name || profile?.name || dbUser?.name || "Alex Rivera",
+  const hydratedChannelName =
+    profile?.channel_name ||
+    dbUser?.channel_name ||
+    (typeof userMeta?.["channel_name"] === "string" ? userMeta["channel_name"] : "") ||
+    profile?.full_name ||
+    profile?.name ||
+    dbUser?.name ||
+    "Alex Rivera";
+  const hydratedChannelLogo = resolveMediaUrl(
+    profile?.channel_logo_url ||
+      dbUser?.channel_logo_url ||
+      (typeof userMeta?.["channel_logo_url"] === "string" ? userMeta["channel_logo_url"] : "") ||
+      "",
   );
-  const [channelLogoUrl, setChannelLogoUrl] = useState(
-    profile?.channel_logo_url || dbUser?.channel_logo_url || "",
-  );
+
+  // Editable Profile State (Channel Logo & Channel Name)
+  const [channelName, setChannelName] = useState(hydratedChannelName);
+  const [channelLogoUrl, setChannelLogoUrl] = useState(hydratedChannelLogo);
   const [channelHandle, setChannelHandle] = useState(
     profile?.username || currentUserId.toLowerCase(),
   );
@@ -123,6 +137,15 @@ function ProfilePage() {
   );
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const logoInputRef = useRef<HTMLInputElement>(null);
+
+  // Sync local profile state whenever AuthContext hydrates from backend or updates
+  useEffect(() => {
+    setChannelName(hydratedChannelName);
+    setChannelLogoUrl(hydratedChannelLogo);
+    if (profile?.username || currentUserId) {
+      setChannelHandle(profile?.username || currentUserId.toLowerCase());
+    }
+  }, [hydratedChannelName, hydratedChannelLogo, profile?.username, currentUserId]);
   const subscriberCount =
     (profile as any)?.subscriber_count ||
     (profile as any)?.subscribers ||
@@ -210,26 +233,36 @@ function ProfilePage() {
     const validTypes = ["image/jpeg", "image/png", "image/webp"];
     if (!validTypes.includes(file.type)) {
       toast.error("Please upload a JPG, PNG, or WEBP image for channel logo.");
+      e.target.value = "";
       return;
     }
 
     if (file.size > 10 * 1024 * 1024) {
       toast.error("Image file size cannot exceed 10MB.");
+      e.target.value = "";
       return;
     }
 
     setUploadingLogo(true);
     try {
-      const uploadRes = await api.uploads.uploadImage(file);
+      const uploadRes = await api.uploads.uploadImage(file, { purpose: "channel_logo" });
       if (uploadRes && uploadRes.url) {
-        setChannelLogoUrl(uploadRes.url);
-        await api.users.updateChannelLogo({
+        const saveRes = await api.users.updateChannelLogo({
           userId: currentUserId,
           channelLogoUrl: uploadRes.url,
           channelName,
         });
+        const persistedLogoUrl =
+          resolveMediaUrl(saveRes?.channel_logo_url || saveRes?.channelLogoUrl || uploadRes.url) ||
+          uploadRes.url;
+        const persistedName = saveRes?.channel_name || saveRes?.channelName || channelName;
+        setChannelLogoUrl(persistedLogoUrl);
+        updateChannelBranding({
+          channel_logo_url: persistedLogoUrl,
+          channel_name: persistedName,
+        });
         await refreshUsers();
-        toast.success("🎉 Channel logo updated successfully!");
+        toast.success("Channel logo updated successfully!");
       } else {
         toast.error("Failed to upload channel logo image.");
       }
@@ -237,23 +270,42 @@ function ProfilePage() {
       toast.error(err?.message || "Failed to update channel logo.");
     } finally {
       setUploadingLogo(false);
+      e.target.value = "";
     }
   };
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await api.users.updateChannelLogo({
+      const savePayload: {
+        userId?: string;
+        channelLogoUrl?: string;
+        channelName?: string;
+      } = {
         userId: currentUserId,
-        channelLogoUrl,
-        channelName,
+        channelName: channelName.trim(),
+      };
+      if (channelLogoUrl) {
+        savePayload.channelLogoUrl = channelLogoUrl;
+      }
+      const res = await api.users.updateChannelLogo(savePayload);
+      const persistedLogoUrl =
+        resolveMediaUrl(res?.channel_logo_url || res?.channelLogoUrl || channelLogoUrl) ||
+        channelLogoUrl;
+      const persistedName = res?.channel_name || res?.channelName || channelName.trim();
+      setChannelName(persistedName);
+      if (persistedLogoUrl) {
+        setChannelLogoUrl(persistedLogoUrl);
+      }
+      updateChannelBranding({
+        channel_logo_url: persistedLogoUrl || null,
+        channel_name: persistedName,
       });
       await refreshUsers();
       setEditProfileOpen(false);
       toast.success("Profile and channel branding updated successfully!");
-    } catch {
-      setEditProfileOpen(false);
-      toast.success("Profile saved locally!");
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to save channel profile changes.");
     }
   };
 
@@ -300,17 +352,14 @@ function ProfilePage() {
             <div className="flex items-center gap-4">
               {/* Channel Logo Avatar with Camera Upload Trigger */}
               <div className="relative group shrink-0">
-                {channelLogoUrl ? (
-                  <img
-                    src={channelLogoUrl}
-                    alt={channelName}
-                    className="h-20 w-20 shrink-0 rounded-full object-cover ring-4 ring-brand/20 shadow-md"
-                  />
-                ) : (
-                  <div className="grid h-20 w-20 shrink-0 place-items-center rounded-full bg-gradient-to-br from-brand via-brand-dark to-black text-2xl font-bold text-white ring-4 ring-brand/20 shadow-md">
-                    {(channelName || "A").charAt(0).toUpperCase()}
-                  </div>
-                )}
+                <ChannelAvatar
+                  src={channelLogoUrl}
+                  name={channelName}
+                  initials={(channelName || "A").charAt(0).toUpperCase()}
+                  sizeClassName="h-20 w-20"
+                  imageRingClassName="ring-4 ring-brand/20 shadow-md"
+                  fallbackClassName="bg-gradient-to-br from-brand via-brand-dark to-black text-2xl font-bold text-white ring-4 ring-brand/20 shadow-md"
+                />
                 <button
                   type="button"
                   disabled={uploadingLogo}
@@ -798,17 +847,14 @@ function ProfilePage() {
               <div>
                 <label className="text-xs font-semibold text-foreground">Channel Logo</label>
                 <div className="mt-2 flex items-center gap-3">
-                  {channelLogoUrl ? (
-                    <img
-                      src={channelLogoUrl}
-                      alt={channelName}
-                      className="h-12 w-12 rounded-full object-cover ring-2 ring-brand/30"
-                    />
-                  ) : (
-                    <div className="grid h-12 w-12 place-items-center rounded-full bg-brand text-sm font-bold text-white">
-                      {(channelName || "A").charAt(0).toUpperCase()}
-                    </div>
-                  )}
+                  <ChannelAvatar
+                    src={channelLogoUrl}
+                    name={channelName}
+                    initials={(channelName || "A").charAt(0).toUpperCase()}
+                    sizeClassName="h-12 w-12"
+                    imageRingClassName="ring-2 ring-brand/30"
+                    fallbackClassName="bg-brand text-sm font-bold text-white"
+                  />
                   <button
                     type="button"
                     onClick={() => logoInputRef.current?.click()}

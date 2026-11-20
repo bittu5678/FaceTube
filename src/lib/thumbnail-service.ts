@@ -168,6 +168,32 @@ export async function captureVideoThumbnail(file: File): Promise<string> {
 }
 
 /**
+ * Uploads an already-captured image data URL to server storage via /api/uploads/image.php,
+ * returning the persistent URL or falling back to the category thumbnail.
+ */
+export async function uploadThumbnailDataUrl(dataUrl: string, category?: string): Promise<string> {
+  const fallback = getCategoryFallbackThumbnail(category);
+  try {
+    if (!dataUrl || !dataUrl.startsWith("data:image/")) {
+      return fallback;
+    }
+
+    const res = await fetch(dataUrl);
+    const blob = await res.blob();
+    const imageFile = new File([blob], `thumb_${Date.now()}.jpg`, { type: "image/jpeg" });
+
+    const { api } = await import("./api");
+    const uploadRes = await api.uploads.uploadImage(imageFile);
+    if (uploadRes && uploadRes.url) {
+      return uploadRes.url;
+    }
+  } catch (err) {
+    console.warn("uploadThumbnailDataUrl fallback to category thumbnail:", err);
+  }
+  return fallback;
+}
+
+/**
  * Captures a video frame and uploads it directly to server storage via /api/uploads/image.php,
  * returning the persistent URL (e.g. /uploads/images/img_xxxx.jpg).
  * Falls back to category fallback thumbnail if upload fails or is unavailable.
@@ -179,17 +205,7 @@ export async function captureAndUploadThumbnail(file: File, category?: string): 
     if (!dataUrl || !dataUrl.startsWith("data:image/")) {
       return fallback;
     }
-
-    // Convert data URL to Blob for upload
-    const res = await fetch(dataUrl);
-    const blob = await res.blob();
-    const imageFile = new File([blob], `thumb_${Date.now()}.jpg`, { type: "image/jpeg" });
-
-    const { api } = await import("./api");
-    const uploadRes = await api.uploads.uploadImage(imageFile);
-    if (uploadRes && uploadRes.url) {
-      return uploadRes.url;
-    }
+    return await uploadThumbnailDataUrl(dataUrl, category);
   } catch (err) {
     console.warn("captureAndUploadThumbnail fallback to category thumbnail:", err);
   }

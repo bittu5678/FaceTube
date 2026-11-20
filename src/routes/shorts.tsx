@@ -23,6 +23,7 @@ import { toast } from "sonner";
 import { Logo } from "@/components/videohub/Logo";
 import { ThemeToggle } from "@/components/videohub/ThemeToggle";
 import { BottomNav } from "@/components/videohub/BottomNav";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
 import { useAuth } from "@/lib/auth-context";
 import { fetchUploadedVideos, isShortVideo } from "@/lib/video-service";
@@ -86,19 +87,20 @@ function ShortsPage() {
           .map((v): ShortItem => ({
             id: v.id,
             title: v.title,
-            creator: v.creatorName || "FaceTube Creator",
-            creatorHandle: `@${(v.creatorName || "creator").toLowerCase().replace(/\s+/g, "")}`,
-            initials: (v.creatorName || "FC").slice(0, 2).toUpperCase(),
+            creator: v.channelName || v.creatorName || "FaceTube Creator",
+            creatorHandle: `@${(v.channelName || v.creatorName || "creator").toLowerCase().replace(/\s+/g, "")}`,
+            initials: (v.channelName || v.creatorName || "FC").slice(0, 2).toUpperCase(),
             views: `${(v.views || 0).toLocaleString()} views`,
             likes: (v.likes || 0).toLocaleString(),
             comments: "0",
             shares: "0",
-            soundTrack: `${v.creatorName || "FaceTube"} · Original Audio`,
+            soundTrack: `${v.channelName || v.creatorName || "FaceTube"} · Original Audio`,
             tags: [v.category?.toLowerCase() || "shorts", "facetube"],
             thumb: v.thumbnailUrl,
             aspectColor: "from-purple-900/60 to-brand/80",
             videoUrl: v.videoUrl,
             userId: v.userId || (v as any).user_id || "FT483921",
+            channelLogoUrl: v.channelLogoUrl || (v as any).channel_logo_url,
           }));
         if (mapped.length > 0) {
           setUploadedShorts(mapped);
@@ -634,9 +636,14 @@ function ShortsPage() {
               {/* Creator Row with Subscribe */}
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2.5">
-                  <div className="grid h-10 w-10 place-items-center rounded-full bg-brand text-white font-bold text-xs ring-2 ring-white/50">
-                    {activeShort.initials}
-                  </div>
+                  <ChannelAvatar
+                    src={activeShort.channelLogoUrl}
+                    name={activeShort.creator}
+                    initials={activeShort.initials}
+                    sizeClassName="h-10 w-10"
+                    imageRingClassName="ring-2 ring-white/50"
+                    fallbackClassName="bg-brand text-white font-bold text-xs ring-2 ring-white/50"
+                  />
                   <div>
                     <p className="text-sm font-bold text-white drop-shadow-sm">
                       {activeShort.creator}

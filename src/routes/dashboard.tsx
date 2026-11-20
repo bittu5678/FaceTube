@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
 import {
   LayoutDashboard,
@@ -31,6 +31,7 @@ import {
 } from "recharts";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { DashboardSummaryCards } from "@/components/videohub/DashboardSummaryCards";
+import { DashboardCategoriesSection } from "@/components/videohub/DashboardCategoriesSection";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
 import { calculateUserVideoCounts, type VideoCategoryCounts } from "@/lib/video-service";
@@ -38,7 +39,14 @@ import { getUserWallet, type UserWallet } from "@/lib/ledger-service";
 import { getReferralDashboardData, type ReferralDashboardData } from "@/lib/referral-service";
 import { calculateRankFromSubscribers } from "@/lib/certificate-service";
 
+export interface DashboardSearch {
+  category?: string | undefined;
+}
+
 export const Route = createFileRoute("/dashboard")({
+  validateSearch: (search: Record<string, unknown>): DashboardSearch => ({
+    category: typeof search["category"] === "string" ? search["category"] : undefined,
+  }),
   head: () => ({
     meta: [
       { title: "Dashboard Summary — FaceTube" },
@@ -65,8 +73,29 @@ const WATCH_TIME_CHART_DATA = [
 ];
 
 function DashboardPage() {
+  const searchParams = Route.useSearch();
+  const navigate = useNavigate();
   const { user, profile, dbUser } = useAuth();
   const [filter, setFilter] = useState<"all" | "income" | "videos" | "network">("all");
+  const [selectedCategory, setSelectedCategory] = useState<string>(
+    searchParams.category?.trim() || "",
+  );
+
+  useEffect(() => {
+    const nextCat = searchParams.category?.trim() || "";
+    setSelectedCategory(nextCat);
+  }, [searchParams.category]);
+
+  const handleSelectCategory = (category: string) => {
+    const trimmed = category.trim();
+    setSelectedCategory(trimmed);
+    navigate({
+      to: "/dashboard",
+      search: trimmed ? { category: trimmed } : {},
+      replace: true,
+      resetScroll: false,
+    });
+  };
 
   const [videoCounts, setVideoCounts] = useState<VideoCategoryCounts>({
     freeShort: 1,
@@ -372,6 +401,12 @@ function DashboardPage() {
             </div>
           </div>
         </div>
+
+        {/* Video Categories Section: Health, Sports, Drama & All Existing Categories */}
+        <DashboardCategoriesSection
+          selectedCategory={selectedCategory}
+          onSelectCategory={handleSelectCategory}
+        />
 
         {/* ------------------------------------------------------------------ */}
         {/* REQUIREMENT 10: SUBSCRIBERS, WATCH TIME & ESTIMATED REVENUE CHARTS */}

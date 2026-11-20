@@ -17,34 +17,38 @@ $search = trim($_GET['search'] ?? ($_GET['q'] ?? ''));
 $limit = max(1, min(100, intval($_GET['limit'] ?? 50)));
 $offset = max(0, intval($_GET['offset'] ?? 0));
 
+$where = [];
+$params = [];
+
 $includeBlocked = !empty($_GET['include_blocked']) || !empty($_GET['includeBlocked']);
 if (!$includeBlocked) {
-    $where[] = 'COALESCE(is_blocked, 0) = 0';
+    $where[] = 'COALESCE(v.is_blocked, 0) = 0';
 }
 
 if (!empty($userId)) {
-    $where[] = 'UPPER(user_id) = UPPER(?)';
+    $where[] = 'UPPER(v.user_id) = UPPER(?)';
     $params[] = $userId;
 }
 
 if (!empty($videoType) && in_array($videoType, ['free', 'premium'], true)) {
-    $where[] = 'video_type = ?';
+    $where[] = 'v.video_type = ?';
     $params[] = $videoType;
 }
 
 if (!empty($contentType) && in_array($contentType, ['short', 'long'], true)) {
-    $where[] = 'content_type = ?';
+    $where[] = 'v.content_type = ?';
     $params[] = $contentType;
 }
 
 if (!empty($category) && strcasecmp($category, 'All') !== 0) {
-    $where[] = 'LOWER(category) = LOWER(?)';
+    $where[] = 'LOWER(v.category) = LOWER(?)';
     $params[] = $category;
 }
 
 if (!empty($search)) {
-    $where[] = '(title LIKE ? OR description LIKE ? OR creator_name LIKE ?)';
+    $where[] = '(v.title LIKE ? OR v.description LIKE ? OR v.creator_name LIKE ? OR COALESCE(u.channel_name, "") LIKE ?)';
     $like = "%{$search}%";
+    $params[] = $like;
     $params[] = $like;
     $params[] = $like;
     $params[] = $like;
@@ -55,14 +59,17 @@ $whereSql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
 try {
     $sql = "
         SELECT 
-            id, user_id, creator_name, title, description, video_url, thumbnail_url,
-            video_type, content_type, category, duration, views, likes,
-            payment_status, payment_id, payment_amount, is_promoted,
-            promotion_plan, promotion_expires_at, created_at, updated_at,
-            (is_promoted = 1 AND promotion_expires_at IS NOT NULL AND promotion_expires_at > NOW()) AS is_active_promoted
-        FROM uploaded_videos
+            v.id, v.user_id, v.creator_name, v.title, v.description, v.video_url, v.thumbnail_url,
+            v.video_type, v.content_type, v.category, v.duration, v.views, v.likes,
+            v.payment_status, v.payment_id, v.payment_amount, v.is_promoted,
+            v.promotion_plan, v.promotion_expires_at, v.created_at, v.updated_at,
+            (v.is_promoted = 1 AND v.promotion_expires_at IS NOT NULL AND v.promotion_expires_at > NOW()) AS is_active_promoted,
+            u.channel_logo_url AS creator_channel_logo_url,
+            u.channel_name AS creator_channel_name
+        FROM uploaded_videos v
+        LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
         {$whereSql}
-        ORDER BY is_active_promoted DESC, created_at DESC
+        ORDER BY is_active_promoted DESC, v.created_at DESC
         LIMIT {$limit} OFFSET {$offset}
     ";
 
@@ -73,13 +80,23 @@ try {
     $videos = array_map(function ($row) {
         $expiryTime = !empty($row['promotion_expires_at']) ? strtotime($row['promotion_expires_at']) : false;
         $isActivePromoted = !empty($row['is_promoted']) && $expiryTime !== false && $expiryTime > time();
+        $channelLogoUrl = !empty($row['creator_channel_logo_url'])
+            ? toAbsoluteMediaUrl($row['creator_channel_logo_url'], 'logos')
+            : null;
+        $channelName = !empty($row['creator_channel_name'])
+            ? $row['creator_channel_name']
+            : ($row['creator_name'] ?? 'FaceTube Creator');
 
         return [
             'id' => $row['id'],
             'userId' => $row['user_id'],
             'user_id' => $row['user_id'],
-            'creatorName' => $row['creator_name'],
-            'creator_name' => $row['creator_name'],
+            'creatorName' => $channelName,
+            'creator_name' => $channelName,
+            'channelName' => $channelName,
+            'channel_name' => $channelName,
+            'channelLogoUrl' => $channelLogoUrl,
+            'channel_logo_url' => $channelLogoUrl,
             'title' => $row['title'],
             'description' => $row['description'] ?? '',
             'videoUrl' => toAbsoluteMediaUrl($row['video_url'], 'videos'),

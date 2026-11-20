@@ -14,13 +14,20 @@ $method = $_SERVER['REQUEST_METHOD'];
 if ($method === 'GET') {
     try {
         $stmt = $pdo->query('
-            SELECT s.*, u.name as streamer_name, u.avatar_url, u.avatar_url AS channel_logo_url
+            SELECT s.*, COALESCE(NULLIF(u.channel_name, ""), u.name) AS streamer_name, COALESCE(NULLIF(u.channel_name, ""), u.name) AS channel_name, u.avatar_url, COALESCE(NULLIF(u.channel_logo_url, ""), u.avatar_url) AS channel_logo_url
             FROM live_streams s
-            LEFT JOIN users u ON s.user_id = u.user_id
+            LEFT JOIN users u ON UPPER(s.user_id) = UPPER(u.user_id)
             WHERE s.status IN ("live", "upcoming")
             ORDER BY (s.status = "live") DESC, s.viewers_count DESC, s.created_at DESC
         ');
         $streams = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        foreach ($streams as &$s) {
+            if (!empty($s['channel_logo_url'])) {
+                $s['channel_logo_url'] = toAbsoluteMediaUrl($s['channel_logo_url'], 'logos');
+            }
+        }
+        unset($s);
 
         jsonResponse([
             'success' => true,

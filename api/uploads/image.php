@@ -10,8 +10,25 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
 }
 
+$purpose = strtolower(trim((string)($_POST['purpose'] ?? ($_GET['purpose'] ?? 'default'))));
+$isChannelLogo = ($purpose === 'channel_logo');
+
+if ($isChannelLogo) {
+    require_once __DIR__ . '/../config/database.php';
+    $pdo = getDatabaseConnection();
+    $authUser = getAuthUser($pdo);
+    if (!$authUser) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Authentication required for channel logo upload.'
+        ], 401);
+    }
+}
+
+$subfolder = $isChannelLogo ? 'logos' : 'images';
+
 // Support direct file upload or multipart
-$uploadDir = ensureMediaStorageDir('images');
+$uploadDir = ensureMediaStorageDir($subfolder);
 if (!$uploadDir) {
     jsonResponse([
         'success' => false,
@@ -31,50 +48,85 @@ if (!empty($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
         ], 400);
     }
 
-    if ($_FILES['image']['size'] > 25 * 1024 * 1024) {
+    $maxBytes = $isChannelLogo ? (10 * 1024 * 1024) : (25 * 1024 * 1024);
+    if ($_FILES['image']['size'] <= 0) {
         jsonResponse([
             'success' => false,
-            'error' => 'Image file size exceeds maximum permitted limit (25MB).'
+            'error' => 'Uploaded image file is empty.'
+        ], 400);
+    }
+    if ($_FILES['image']['size'] > $maxBytes) {
+        $maxLabel = $isChannelLogo ? '10MB' : '25MB';
+        jsonResponse([
+            'success' => false,
+            'error' => "Image file size exceeds maximum permitted limit ({$maxLabel})."
         ], 400);
     }
 
-    // Enforce 9:16 aspect ratio for image uploads
     $imageInfo = @getimagesize($tmpName);
-    if ($imageInfo) {
-        $width = $imageInfo[0];
-        $height = $imageInfo[1];
-        if ($width > 0 && $height > 0) {
-            $ratio = $width / $height;
-            $targetRatio = 9 / 16; // 0.5625
-            if (abs($ratio - $targetRatio) > 0.08) {
+    if ($isChannelLogo) {
+        if (!$imageInfo || empty($imageInfo[0]) || empty($imageInfo[1])) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Invalid channel logo image file. Please upload a valid JPG, PNG, or WEBP image.'
+            ], 400);
+        }
+        $allowedTypes = [IMAGETYPE_JPEG, IMAGETYPE_PNG, IMAGETYPE_WEBP];
+        if (!in_array((int)$imageInfo[2], $allowedTypes, true)) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Invalid image content type. Only JPG, PNG, and WEBP images are permitted.'
+            ], 400);
+        }
+        if (class_exists('finfo')) {
+            $finfo = new finfo(FILEINFO_MIME_TYPE);
+            $detectedMime = $finfo->file($tmpName);
+            if (!in_array($detectedMime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
                 jsonResponse([
                     'success' => false,
-                    'error' => "Image must strictly be in 9:16 vertical aspect ratio (e.g. 1080x1920). Current dimensions: {$width}x{$height}."
+                    'error' => 'Image MIME verification failed.'
                 ], 400);
+            }
+        }
+    } else {
+        // Enforce 9:16 aspect ratio for standard image uploads
+        if ($imageInfo) {
+            $width = $imageInfo[0];
+            $height = $imageInfo[1];
+            if ($width > 0 && $height > 0) {
+                $ratio = $width / $height;
+                $targetRatio = 9 / 16; // 0.5625
+                if (abs($ratio - $targetRatio) > 0.08) {
+                    jsonResponse([
+                        'success' => false,
+                        'error' => "Image must strictly be in 9:16 vertical aspect ratio (e.g. 1080x1920). Current dimensions: {$width}x{$height}."
+                    ], 400);
+                }
             }
         }
     }
 
     $uniqueId = time() . '_' . substr(md5(random_bytes(6)), 0, 6);
     $counter = 0;
-    $candidateName = 'img_' . $uniqueId . '.' . ($ext ?: 'jpg');
+    $prefix = $isChannelLogo ? 'logo_' : 'img_';
+    $candidateName = $prefix . $uniqueId . '.' . ($ext ?: 'jpg');
     while (file_exists($uploadDir . $candidateName)) {
         $counter++;
-        $candidateName = 'img_' . $uniqueId . '_' . $counter . '.' . ($ext ?: 'jpg');
+        $candidateName = $prefix . $uniqueId . '_' . $counter . '.' . ($ext ?: 'jpg');
     }
     $fileName = $candidateName;
     $target = $uploadDir . $fileName;
 
     if (@move_uploaded_file($tmpName, $target)) {
         // Sync to secondary storage directories (e.g. root uploads/)
-        $allDirs = getMediaStorageDirectories('images');
+        $allDirs = getMediaStorageDirectories($subfolder);
         foreach ($allDirs as $otherDir) {
             if ($otherDir !== $uploadDir && is_dir($otherDir) && is_writable($otherDir)) {
                 @copy($target, $otherDir . $fileName);
             }
         }
 
-        $publicUrl = toAbsoluteMediaUrl('/uploads/images/' . $fileName, 'images');
+        $publicUrl = toAbsoluteMediaUrl('/uploads/' . $subfolder . '/' . $fileName, $subfolder);
 
         jsonResponse([
             'success' => true,

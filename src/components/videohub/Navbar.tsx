@@ -24,6 +24,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import { Logo } from "./Logo";
 import { ThemeToggle } from "./ThemeToggle";
+import { ChannelAvatar } from "./ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { allVideos } from "@/data/videos";
 
@@ -751,9 +752,26 @@ export function Navbar({
                     setProfileOpen((v) => !v);
                     setNotificationsOpen(false);
                   }}
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-brand-foreground ring-2 ring-transparent transition hover:ring-brand/30"
+                  className="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-full ring-2 ring-transparent transition hover:ring-brand/30"
                 >
-                  {initials}
+                  <ChannelAvatar
+                    src={
+                      profile?.channel_logo_url ||
+                      profile?.avatar_url ||
+                      (user.user_metadata?.["channel_logo_url"] as string | undefined)
+                    }
+                    name={
+                      profile?.channel_name ||
+                      profile?.full_name ||
+                      profile?.username ||
+                      user.email ||
+                      "FaceTube User"
+                    }
+                    initials={initials}
+                    sizeClassName="h-9 w-9"
+                    imageRingClassName=""
+                    fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-brand-foreground"
+                  />
                 </button>
 
                 {profileOpen && (
@@ -761,7 +779,9 @@ export function Navbar({
                     {/* Header */}
                     <div className="border-b border-border/70 px-3 py-2.5">
                       <p className="truncate text-xs font-bold text-foreground">
-                        {profile?.full_name || `@${profile?.username || user.email?.split("@")[0]}`}
+                        {profile?.channel_name ||
+                          profile?.full_name ||
+                          `@${profile?.username || user.email?.split("@")[0]}`}
                       </p>
                       <p className="truncate text-[11px] text-muted-foreground">{user.email}</p>
                       <div className="mt-1.5 flex items-center gap-1.5">

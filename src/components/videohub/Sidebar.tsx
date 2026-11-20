@@ -42,6 +42,9 @@ import {
   Gamepad2,
   Bot,
   GraduationCap,
+  HeartPulse,
+  Trophy,
+  Theater,
 } from "lucide-react";
 import { Link, useRouterState, useNavigate } from "@tanstack/react-router";
 import { useState, useEffect, useCallback } from "react";
@@ -111,6 +114,15 @@ function getCategoryIcon(name: string, isActive: boolean) {
   }
   if (norm === "education" || norm.includes("edu") || norm.includes("learn")) {
     return <GraduationCap className={`${iconClass} ${!isActive ? "text-amber-400" : ""}`} />;
+  }
+  if (norm === "health") {
+    return <HeartPulse className={`${iconClass} ${!isActive ? "text-rose-500" : ""}`} />;
+  }
+  if (norm === "sports" || norm === "sport") {
+    return <Trophy className={`${iconClass} ${!isActive ? "text-amber-500" : ""}`} />;
+  }
+  if (norm === "drama") {
+    return <Theater className={`${iconClass} ${!isActive ? "text-purple-500" : ""}`} />;
   }
   return <Folder className={`${iconClass} ${!isActive ? "text-brand" : ""}`} />;
 }
