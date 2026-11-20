@@ -885,7 +885,8 @@ export function convertUploadedToCatalogVideo(v: UploadedVideo): Video {
   });
 
   const rawVideoUrl = resolveMediaUrl(v.videoUrl || (v as any).video_url || "");
-  const channelName = v.channelName || (v as any).channel_name || v.creatorName || "FaceTube Creator";
+  const channelName =
+    v.channelName || (v as any).channel_name || v.creatorName || "FaceTube Creator";
   const rawChannelLogo = v.channelLogoUrl || (v as any).channel_logo_url || "";
   const channelLogoUrl = rawChannelLogo ? resolveMediaUrl(rawChannelLogo) || undefined : undefined;
 

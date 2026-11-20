@@ -125,27 +125,42 @@ function ProfilePage() {
       (typeof userMeta?.["channel_logo_url"] === "string" ? userMeta["channel_logo_url"] : "") ||
       "",
   );
+  const hydratedChannelDescription =
+    typeof profile?.channel_description === "string"
+      ? profile.channel_description
+      : typeof dbUser?.channel_description === "string"
+        ? dbUser.channel_description
+        : typeof userMeta?.["channel_description"] === "string"
+          ? userMeta["channel_description"]
+          : "";
 
-  // Editable Profile State (Channel Logo & Channel Name)
+  // Editable Profile State (Channel Logo, Channel Name & Channel Description)
   const [channelName, setChannelName] = useState(hydratedChannelName);
   const [channelLogoUrl, setChannelLogoUrl] = useState(hydratedChannelLogo);
   const [channelHandle, setChannelHandle] = useState(
     profile?.username || currentUserId.toLowerCase(),
   );
-  const [channelBio, setChannelBio] = useState(
-    "Building full-stack web applications, modern UI kits, and sharing creative tutorials weekly.",
-  );
+  const [channelBio, setChannelBio] = useState(hydratedChannelDescription);
   const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [removingLogo, setRemovingLogo] = useState(false);
+  const [confirmRemoveLogoOpen, setConfirmRemoveLogoOpen] = useState(false);
   const logoInputRef = useRef<HTMLInputElement>(null);
 
   // Sync local profile state whenever AuthContext hydrates from backend or updates
   useEffect(() => {
     setChannelName(hydratedChannelName);
     setChannelLogoUrl(hydratedChannelLogo);
+    setChannelBio(hydratedChannelDescription);
     if (profile?.username || currentUserId) {
       setChannelHandle(profile?.username || currentUserId.toLowerCase());
     }
-  }, [hydratedChannelName, hydratedChannelLogo, profile?.username, currentUserId]);
+  }, [
+    hydratedChannelName,
+    hydratedChannelLogo,
+    hydratedChannelDescription,
+    profile?.username,
+    currentUserId,
+  ]);
   const subscriberCount =
     (profile as any)?.subscriber_count ||
     (profile as any)?.subscribers ||
@@ -274,16 +289,59 @@ function ProfilePage() {
     }
   };
 
+  const handleRemoveLogo = async () => {
+    if (!channelLogoUrl || removingLogo || uploadingLogo) return;
+    setRemovingLogo(true);
+    try {
+      const res = await api.users.updateChannelLogo({
+        userId: currentUserId,
+        channelLogoUrl: null,
+        removeLogo: true,
+      });
+      if (!res || res.success === false) {
+        throw new Error("Failed to remove channel logo.");
+      }
+      setChannelLogoUrl("");
+      setConfirmRemoveLogoOpen(false);
+      updateChannelBranding({
+        channel_logo_url: null,
+      });
+      await refreshUsers();
+      toast.success("Channel logo removed and reset to initials.");
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to remove channel logo.");
+    } finally {
+      setRemovingLogo(false);
+    }
+  };
+
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
+    const normalizedBio = channelBio.replace(/\r\n?/g, "\n").trim();
+    if (normalizedBio.length > 1000) {
+      toast.error("Channel description must be 1000 characters or fewer.");
+      return;
+    }
+    if (
+      /<\/?[a-zA-Z!/?]/.test(normalizedBio) ||
+      /\b(?:javascript|vbscript)\s*:/i.test(normalizedBio) ||
+      /data\s*:\s*text\/html/i.test(normalizedBio) ||
+      /\bon[a-z]+\s*=/i.test(normalizedBio)
+    ) {
+      toast.error("Channel description must be plain text without HTML tags or scripts.");
+      return;
+    }
+
     try {
       const savePayload: {
         userId?: string;
         channelLogoUrl?: string;
         channelName?: string;
+        channelDescription?: string | null;
       } = {
         userId: currentUserId,
         channelName: channelName.trim(),
+        channelDescription: normalizedBio || null,
       };
       if (channelLogoUrl) {
         savePayload.channelLogoUrl = channelLogoUrl;
@@ -293,15 +351,24 @@ function ProfilePage() {
         resolveMediaUrl(res?.channel_logo_url || res?.channelLogoUrl || channelLogoUrl) ||
         channelLogoUrl;
       const persistedName = res?.channel_name || res?.channelName || channelName.trim();
+      const persistedDescription =
+        res?.channel_description !== undefined
+          ? res.channel_description
+          : res?.channelDescription !== undefined
+            ? res.channelDescription
+            : normalizedBio || null;
       setChannelName(persistedName);
+      setChannelBio(persistedDescription ?? "");
       if (persistedLogoUrl) {
         setChannelLogoUrl(persistedLogoUrl);
       }
       updateChannelBranding({
         channel_logo_url: persistedLogoUrl || null,
         channel_name: persistedName,
+        channel_description: persistedDescription ?? null,
       });
       await refreshUsers();
+      setConfirmRemoveLogoOpen(false);
       setEditProfileOpen(false);
       toast.success("Profile and channel branding updated successfully!");
     } catch (err: any) {
@@ -362,7 +429,7 @@ function ProfilePage() {
                 />
                 <button
                   type="button"
-                  disabled={uploadingLogo}
+                  disabled={uploadingLogo || removingLogo}
                   onClick={() => logoInputRef.current?.click()}
                   className="absolute -bottom-1 -right-1 grid h-7 w-7 place-items-center rounded-full bg-brand text-white shadow-md hover:bg-brand-dark transition active:scale-95 border-2 border-card"
                   title="Upload Channel Logo"
@@ -403,8 +470,8 @@ function ProfilePage() {
                     <strong className="text-foreground">{userVideos.length}</strong> videos
                   </span>
                 </div>
-                <p className="mt-2 text-xs text-foreground/80 line-clamp-2 max-w-xl">
-                  {channelBio}
+                <p className="mt-2 text-xs text-foreground/80 line-clamp-2 max-w-xl whitespace-pre-line">
+                  {channelBio || "No channel description added yet."}
                 </p>
               </div>
             </div>
@@ -835,7 +902,10 @@ function ProfilePage() {
               <h3 className="text-base font-bold text-foreground">Edit Channel Profile</h3>
               <button
                 type="button"
-                onClick={() => setEditProfileOpen(false)}
+                onClick={() => {
+                  setConfirmRemoveLogoOpen(false);
+                  setEditProfileOpen(false);
+                }}
                 className="rounded-full p-1 text-muted-foreground hover:bg-secondary hover:text-foreground"
               >
                 <X className="h-5 w-5" />
@@ -843,10 +913,10 @@ function ProfilePage() {
             </div>
 
             <form onSubmit={handleSaveProfile} className="mt-4 space-y-4">
-              {/* Channel Logo Upload */}
+              {/* Channel Logo Upload & Removal */}
               <div>
                 <label className="text-xs font-semibold text-foreground">Channel Logo</label>
-                <div className="mt-2 flex items-center gap-3">
+                <div className="mt-2 flex flex-wrap items-center gap-3">
                   <ChannelAvatar
                     src={channelLogoUrl}
                     name={channelName}
@@ -858,13 +928,51 @@ function ProfilePage() {
                   <button
                     type="button"
                     onClick={() => logoInputRef.current?.click()}
-                    disabled={uploadingLogo}
-                    className="rounded-xl border border-border bg-secondary/80 px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary flex items-center gap-1.5"
+                    disabled={uploadingLogo || removingLogo}
+                    className="rounded-xl border border-border bg-secondary/80 px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary flex items-center gap-1.5 disabled:opacity-50"
                   >
                     <Upload className="h-3.5 w-3.5" />
                     <span>{uploadingLogo ? "Uploading..." : "Upload New Logo"}</span>
                   </button>
+                  {Boolean(channelLogoUrl) && !confirmRemoveLogoOpen && (
+                    <button
+                      type="button"
+                      onClick={() => setConfirmRemoveLogoOpen(true)}
+                      disabled={uploadingLogo || removingLogo}
+                      className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-semibold text-destructive hover:bg-destructive/20 flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>Remove Channel Logo</span>
+                    </button>
+                  )}
                 </div>
+
+                {Boolean(channelLogoUrl) && confirmRemoveLogoOpen && (
+                  <div className="mt-3 rounded-xl border border-destructive/30 bg-destructive/5 p-3 space-y-2.5">
+                    <p className="text-[11px] font-medium text-foreground">
+                      Remove your channel logo and reset to initials? Your channel name will be
+                      preserved.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={handleRemoveLogo}
+                        disabled={removingLogo || uploadingLogo}
+                        className="rounded-lg bg-destructive px-3 py-1.5 text-[11px] font-bold text-white hover:opacity-90 transition disabled:opacity-50"
+                      >
+                        {removingLogo ? "Removing..." : "Confirm Reset to Initials"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setConfirmRemoveLogoOpen(false)}
+                        disabled={removingLogo}
+                        className="rounded-lg border border-border bg-secondary/80 px-3 py-1.5 text-[11px] font-semibold text-foreground hover:bg-secondary transition disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -893,11 +1001,20 @@ function ProfilePage() {
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-foreground">Channel Description</label>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-foreground">
+                    Channel Description
+                  </label>
+                  <span className="text-[11px] text-muted-foreground">
+                    {channelBio.length}/1000
+                  </span>
+                </div>
                 <textarea
                   rows={3}
+                  maxLength={1000}
                   value={channelBio}
                   onChange={(e) => setChannelBio(e.target.value)}
+                  placeholder="Describe your channel in plain text (up to 1000 characters)..."
                   className="mt-1.5 w-full rounded-xl border border-border bg-secondary/60 px-3.5 py-2 text-xs text-foreground outline-none focus:border-brand"
                 />
               </div>
@@ -905,7 +1022,10 @@ function ProfilePage() {
               <div className="flex justify-end gap-2 pt-2 border-t border-border">
                 <button
                   type="button"
-                  onClick={() => setEditProfileOpen(false)}
+                  onClick={() => {
+                    setConfirmRemoveLogoOpen(false);
+                    setEditProfileOpen(false);
+                  }}
                   className="rounded-full px-4 py-2 text-xs font-semibold text-muted-foreground hover:text-foreground"
                 >
                   Cancel

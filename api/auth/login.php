@@ -30,7 +30,7 @@ $pdo = getDatabaseConnection();
 try {
     // 1. Look up user by user_id OR email (case-insensitive)
     $stmt = $pdo->prepare('
-        SELECT id, user_id, name, mobile, email, password_hash, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
+        SELECT id, user_id, name, mobile, email, password_hash, role, referral_code, avatar_url, channel_logo_url, channel_name, channel_description, created_at
         FROM users
         WHERE UPPER(user_id) = UPPER(?) OR LOWER(email) = LOWER(?)
         LIMIT 1

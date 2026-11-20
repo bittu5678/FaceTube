@@ -140,7 +140,7 @@ function getAuthUser($pdo) {
 
     try {
         $stmt = $pdo->prepare('
-            SELECT u.id, u.user_id, u.name, u.mobile, u.email, u.role, u.referral_code, u.avatar_url, u.channel_logo_url, u.channel_name, u.created_at
+            SELECT u.id, u.user_id, u.name, u.mobile, u.email, u.role, u.referral_code, u.avatar_url, u.channel_logo_url, u.channel_name, u.channel_description, u.created_at
             FROM sessions s
             INNER JOIN users u ON (s.user_id = u.id OR s.user_id = u.user_id)
             WHERE s.token = ? AND s.expires_at > NOW()
@@ -181,7 +181,9 @@ function requireAuthUser($pdo, $requestedUserId = null) {
 
     if (!empty($requestedUserId)) {
         $req = trim($requestedUserId);
-        if (strcasecmp($req, $authUser['user_id']) === 0) {
+        $matchesUserId = strcasecmp($req, (string)$authUser['user_id']) === 0;
+        $matchesUuid = isset($authUser['id']) && $authUser['id'] !== '' && strcasecmp($req, (string)$authUser['id']) === 0;
+        if ($matchesUserId || $matchesUuid) {
             $effectiveUserId = $authUser['user_id'];
         } else {
             // Cross-user requested: strictly require admin role

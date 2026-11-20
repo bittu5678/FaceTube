@@ -369,6 +369,7 @@ export const api = {
       avatar_url?: string;
       channel_logo_url?: string;
       channel_name?: string;
+      channel_description?: string | null;
     }) => {
       return apiFetch<{ success: boolean; profile: any; message?: string }>("/users/profile.php", {
         method: "POST",
@@ -382,23 +383,32 @@ export const api = {
 
     updateChannelLogo: async (data: {
       userId?: string;
-      channelLogoUrl?: string;
+      channelLogoUrl?: string | null;
       channelName?: string;
+      channelDescription?: string | null;
+      removeLogo?: boolean;
     }) => {
+      const payload: Record<string, unknown> = {};
+      if (data.userId !== undefined) payload["userId"] = data.userId;
+      if (data.channelLogoUrl !== undefined) payload["channel_logo_url"] = data.channelLogoUrl;
+      if (data.channelName !== undefined) payload["channel_name"] = data.channelName;
+      if (data.channelDescription !== undefined) {
+        payload["channel_description"] = data.channelDescription;
+      }
+      if (data.removeLogo !== undefined) payload["removeLogo"] = data.removeLogo;
+
       return apiFetch<{
         success: boolean;
         message?: string;
         channel_logo_url?: string | null;
         channel_name?: string | null;
+        channel_description?: string | null;
         channelLogoUrl?: string | null;
         channelName?: string | null;
+        channelDescription?: string | null;
       }>("/users/channel-logo.php", {
         method: "POST",
-        body: JSON.stringify({
-          userId: data.userId,
-          channel_logo_url: data.channelLogoUrl,
-          channel_name: data.channelName,
-        }),
+        body: JSON.stringify(payload),
       });
     },
   },
@@ -764,10 +774,7 @@ export const api = {
 
   // File Uploads
   uploads: {
-    uploadImage: async (
-      file: File,
-      options?: { purpose?: "default" | "channel_logo" },
-    ) => {
+    uploadImage: async (file: File, options?: { purpose?: "default" | "channel_logo" }) => {
       const purpose = options?.purpose || "default";
       // Square 1:1 center-crop for channel logos; strict 9:16 vertical crop for all other uploads
       const processedFile =

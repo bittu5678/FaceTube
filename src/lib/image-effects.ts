@@ -440,4 +440,3 @@ export async function cropAndResizeToSquare(file: File, targetSize = 512): Promi
     img.src = objectUrl;
   });
 }
-

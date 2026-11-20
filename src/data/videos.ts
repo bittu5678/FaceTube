@@ -508,7 +508,9 @@ export async function findVideoAsync(id: string): Promise<Video | undefined> {
       const channelName =
         v.channel_name || v.channelName || v.creator_name || v.creatorName || "FaceTube Creator";
       const rawChannelLogo = v.channel_logo_url || v.channelLogoUrl || "";
-      const channelLogoUrl = rawChannelLogo ? resolveMediaUrl(rawChannelLogo) || undefined : undefined;
+      const channelLogoUrl = rawChannelLogo
+        ? resolveMediaUrl(rawChannelLogo) || undefined
+        : undefined;
 
       return {
         id: String(v.id),

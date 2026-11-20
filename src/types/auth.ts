@@ -31,6 +31,7 @@ export interface DbUser {
   referral_code: string | null; // Optional referral code
   channel_logo_url?: string | null;
   channel_name?: string | null;
+  channel_description?: string | null;
   created_at: string; // Timestamp
   role?: RoleType;
 }
@@ -45,6 +46,7 @@ export interface Profile {
   avatar_url?: string | null;
   channel_logo_url?: string | null;
   channel_name?: string | null;
+  channel_description?: string | null;
   email?: string | null;
   referral_code?: string | null;
   created_at?: string;
@@ -69,6 +71,7 @@ export interface AuthUser {
   avatar_url?: string;
   channel_logo_url?: string;
   channel_name?: string;
+  channel_description?: string | null;
   role: RoleType;
 }
 
@@ -84,6 +87,7 @@ export interface UserWithRole {
   avatar_url?: string | null;
   channel_logo_url?: string | null;
   channel_name?: string | null;
+  channel_description?: string | null;
   referral_code?: string | null;
   created_at: string;
 }
@@ -139,6 +143,7 @@ export interface AuthContextType {
   updateChannelBranding: (updates: {
     channel_logo_url?: string | null;
     channel_name?: string | null;
+    channel_description?: string | null;
   }) => void;
   allUsers: (UserWithRole & { password?: string; user_id?: string })[];
   refreshUsers: () => Promise<void>;

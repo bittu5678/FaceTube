@@ -20,10 +20,9 @@ import {
 import { verifyPassword } from "./password";
 import { api, setStoredAuthToken, getStoredAuthToken } from "./api";
 import { resolveMediaUrl } from "./media-url";
+import { computeUpdatedChannelSession, LOCAL_STORAGE_SESSION_KEY } from "./channel-branding";
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-
-const LOCAL_STORAGE_SESSION_KEY = "facetube_session_v2";
 
 function getCachedSession(): {
   user: User | null;
@@ -82,6 +81,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       role: u.role || (u.email === "admin@facetube.com" ? "admin" : "user"),
       channel_logo_url: u.channel_logo_url || null,
       channel_name: u.channel_name || null,
+      channel_description: u.channel_description ?? null,
       referral_code: u.referral_code,
       created_at: u.created_at,
     }));
@@ -105,6 +105,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             role: u.role === "admin" || u.email === "admin@facetube.com" ? "admin" : "user",
             channel_logo_url: u.channel_logo_url || null,
             channel_name: u.channel_name || null,
+            channel_description: u.channel_description ?? null,
             referral_code: u.referral_code,
             created_at: u.created_at,
           }),
@@ -173,6 +174,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             avatar_url: u.avatar_url,
             channel_logo_url: normalizedLogoUrl,
             channel_name: u.channel_name || null,
+            channel_description: u.channel_description ?? null,
             referral_code: u.referral_code,
             created_at: u.created_at,
           };
@@ -188,6 +190,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               avatar_url: u.avatar_url,
               channel_logo_url: normalizedLogoUrl,
               channel_name: u.channel_name,
+              channel_description: u.channel_description ?? null,
             },
           };
           const newDbUser: DbUser = {
@@ -199,6 +202,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             password_hash: "SECURED_BY_PHP_BCRYPT",
             channel_logo_url: normalizedLogoUrl,
             channel_name: u.channel_name || null,
+            channel_description: u.channel_description ?? null,
             referral_code: u.referral_code,
             created_at: u.created_at,
             role: resolvedRole,
@@ -441,6 +445,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         avatar_url: authenticatedUser.avatar_url,
         channel_logo_url: normalizedLogoUrl,
         channel_name: authenticatedUser.channel_name || null,
+        channel_description: authenticatedUser.channel_description ?? null,
         referral_code: authenticatedUser.referral_code,
         created_at: authenticatedUser.created_at,
       };
@@ -457,6 +462,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           avatar_url: authenticatedUser.avatar_url,
           channel_logo_url: normalizedLogoUrl,
           channel_name: authenticatedUser.channel_name,
+          channel_description: authenticatedUser.channel_description ?? null,
         },
       };
 
@@ -469,6 +475,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         password_hash: "SECURED_BY_PHP_BCRYPT",
         channel_logo_url: normalizedLogoUrl,
         channel_name: authenticatedUser.channel_name || null,
+        channel_description: authenticatedUser.channel_description ?? null,
         referral_code: authenticatedUser.referral_code,
         created_at: authenticatedUser.created_at,
         role: resolvedRole,
@@ -565,53 +572,57 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
    * usersList, and local session cache after a successful backend update.
    */
   const updateChannelBranding = useCallback(
-    (updates: { channel_logo_url?: string | null; channel_name?: string | null }) => {
-      const hasLogo = updates.channel_logo_url !== undefined;
-      const hasName = updates.channel_name !== undefined;
-      const nextLogo =
-        hasLogo && updates.channel_logo_url
-          ? resolveMediaUrl(updates.channel_logo_url) || updates.channel_logo_url
-          : updates.channel_logo_url;
+    (updates: {
+      channel_logo_url?: string | null;
+      channel_name?: string | null;
+      channel_description?: string | null;
+    }) => {
+      const cached = getCachedSession();
+      const currentToken = getStoredAuthToken();
 
-      let updatedProfile: Profile | null = null;
-      let updatedDbUser: DbUser | null = null;
-      let updatedAuthUser: User | null = null;
-
-      setProfile((prev) => {
-        if (!prev) return prev;
-        updatedProfile = {
-          ...prev,
-          ...(hasLogo ? { channel_logo_url: nextLogo ?? null } : {}),
-          ...(hasName ? { channel_name: updates.channel_name ?? null } : {}),
-        };
-        return updatedProfile;
+      const {
+        updatedProfile,
+        updatedDbUser,
+        updatedAuthUser,
+        activeUserId,
+        nextLogo,
+        sessionToPersist,
+      } = computeUpdatedChannelSession({
+        user,
+        profile,
+        dbUser,
+        role,
+        cachedSession: cached,
+        token: currentToken,
+        updates,
       });
 
-      setDbUser((prev) => {
-        if (!prev) return prev;
-        updatedDbUser = {
-          ...prev,
-          ...(hasLogo ? { channel_logo_url: nextLogo ?? null } : {}),
-          ...(hasName ? { channel_name: updates.channel_name ?? null } : {}),
-        };
-        return updatedDbUser;
-      });
+      if (sessionToPersist) {
+        try {
+          localStorage.setItem(LOCAL_STORAGE_SESSION_KEY, JSON.stringify(sessionToPersist));
+        } catch (_e) {
+          // storage disabled
+        }
+      }
 
-      setUser((prev) => {
-        if (!prev) return prev;
-        updatedAuthUser = {
-          ...prev,
-          user_metadata: {
-            ...prev.user_metadata,
-            ...(hasLogo ? { channel_logo_url: nextLogo ?? null } : {}),
-            ...(hasName ? { channel_name: updates.channel_name ?? null } : {}),
-          },
-        };
-        return updatedAuthUser;
-      });
+      if (updatedProfile) {
+        setProfile(updatedProfile);
+      }
+      if (updatedDbUser) {
+        setDbUser(updatedDbUser);
+      }
+      if (updatedAuthUser) {
+        setUser(updatedAuthUser);
+      }
 
-      const activeUserId = profile?.user_id || dbUser?.user_id || user?.user_id;
       if (activeUserId) {
+        const hasLogo = updates.channel_logo_url !== undefined;
+        const hasName = updates.channel_name !== undefined;
+        const hasDescription = updates.channel_description !== undefined;
+        const nextDescription =
+          hasDescription && typeof updates.channel_description === "string"
+            ? updates.channel_description.trim() || null
+            : (updates.channel_description ?? null);
         setUsersList((prev) =>
           prev.map((u) => {
             if (u.user_id?.toUpperCase() === activeUserId.toUpperCase()) {
@@ -619,33 +630,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
                 ...u,
                 ...(hasLogo ? { channel_logo_url: nextLogo ?? null } : {}),
                 ...(hasName ? { channel_name: updates.channel_name ?? null } : {}),
+                ...(hasDescription ? { channel_description: nextDescription } : {}),
               };
             }
             return u;
           }),
         );
       }
-
-      try {
-        const cached = getCachedSession();
-        const currentToken = getStoredAuthToken();
-        if (cached) {
-          localStorage.setItem(
-            LOCAL_STORAGE_SESSION_KEY,
-            JSON.stringify({
-              ...cached,
-              user: updatedAuthUser || cached.user,
-              profile: updatedProfile || cached.profile,
-              dbUser: updatedDbUser || cached.dbUser,
-              token: currentToken || cached.token || undefined,
-            }),
-          );
-        }
-      } catch (_e) {
-        // storage disabled
-      }
     },
-    [profile?.user_id, dbUser?.user_id, user?.user_id],
+    [user, profile, dbUser, role],
   );
 
   return (

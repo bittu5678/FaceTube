@@ -228,8 +228,9 @@ interface ServerStore {
     role: "admin" | "user";
     referral_code: string | null;
     avatar_url?: string | undefined;
-    channel_logo_url?: string | undefined;
+    channel_logo_url?: string | null | undefined;
     channel_name?: string | undefined;
+    channel_description?: string | null | undefined;
     created_at: string;
   }>;
   sessions: Record<string, string>; // token -> userId
@@ -1227,6 +1228,7 @@ export interface AuthUser {
   avatar_url?: string | undefined;
   channel_logo_url?: string | null | undefined;
   channel_name?: string | null | undefined;
+  channel_description?: string | null | undefined;
   created_at: string;
 }
 
@@ -1244,7 +1246,7 @@ export async function getAuthUserFromRequest(
   if (activePool) {
     try {
       const [rows]: any = await activePool.query(
-        `SELECT u.id, u.user_id, u.name, u.mobile, u.email, u.role, u.referral_code, u.avatar_url, u.channel_logo_url, u.channel_name, u.created_at
+        `SELECT u.id, u.user_id, u.name, u.mobile, u.email, u.role, u.referral_code, u.avatar_url, u.channel_logo_url, u.channel_name, u.channel_description, u.created_at
          FROM sessions s
          INNER JOIN users u ON (s.user_id = u.id OR s.user_id = u.user_id)
          WHERE s.token = ? AND s.expires_at > NOW()
@@ -1276,6 +1278,7 @@ export async function getAuthUserFromRequest(
         avatar_url: user.avatar_url,
         channel_logo_url: user.channel_logo_url ?? null,
         channel_name: user.channel_name ?? null,
+        channel_description: user.channel_description ?? null,
         created_at: user.created_at,
       };
     }
@@ -1309,11 +1312,11 @@ export function requireAuth(
 
   if (requestedUserId && requestedUserId.trim() !== "") {
     const reqNorm = requestedUserId.trim().toUpperCase();
-    if (reqNorm === authUser.user_id.toUpperCase()) {
+    if (reqNorm === authUser.user_id.toUpperCase() || reqNorm === authUser.id.toUpperCase()) {
       return { success: true, user: authUser, effectiveUserId: authUser.user_id };
     }
     // Cross-user requested: strictly require admin role
-    const isAdmin = authUser.role === "admin";
+    const isAdmin = String(authUser.role || "").toLowerCase() === "admin";
     if (!isAdmin) {
       return {
         success: false,
@@ -3409,7 +3412,7 @@ export async function handleApiRequest(
 
         if (pool) {
           const [rows]: any = await pool.query(
-            `SELECT id, user_id, name, mobile, email, password_hash, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
+            `SELECT id, user_id, name, mobile, email, password_hash, role, referral_code, avatar_url, channel_logo_url, channel_name, channel_description, created_at
              FROM users
              WHERE UPPER(user_id) = UPPER(?) OR LOWER(email) = LOWER(?)
              LIMIT 1`,
@@ -3547,7 +3550,12 @@ export async function handleApiRequest(
           return jsonResponse({
             success: true,
             token,
-            user: safeUser,
+            user: {
+              ...safeUser,
+              channel_logo_url: safeUser.channel_logo_url ?? null,
+              channel_name: safeUser.channel_name ?? null,
+              channel_description: safeUser.channel_description ?? null,
+            },
             message: "Login successful.",
           });
         }
@@ -4080,11 +4088,146 @@ export async function handleApiRequest(
 
   // 4. Users & Profile
   if (route === "users/profile") {
+    const validateProfileMediaUrl = (
+      rawValue: unknown,
+      fieldName: "channel_logo_url" | "avatar_url",
+    ): { valid: true; value: string | null } | { valid: false; error: string } => {
+      if (rawValue === null) {
+        return { valid: true, value: null };
+      }
+      if (typeof rawValue !== "string") {
+        return { valid: false, error: `Invalid ${fieldName} format.` };
+      }
+      const trimmed = rawValue.trim();
+      if (trimmed === "") {
+        return { valid: true, value: "" };
+      }
+      if (trimmed.length > 500) {
+        return {
+          valid: false,
+          error: `${fieldName} must be 500 characters or fewer.`,
+        };
+      }
+      const hasControlChar = [...trimmed].some((ch) => {
+        const code = ch.charCodeAt(0);
+        return code < 32 || code === 127;
+      });
+      if (hasControlChar || /[\s\\]/.test(trimmed)) {
+        return { valid: false, error: `Invalid ${fieldName} URL format.` };
+      }
+      if (trimmed.startsWith("/uploads/")) {
+        if (
+          trimmed.includes("..") ||
+          trimmed.length <= "/uploads/".length ||
+          !/^\/uploads\/[A-Za-z0-9._\-/]+$/.test(trimmed)
+        ) {
+          return { valid: false, error: `Invalid ${fieldName} path.` };
+        }
+        return { valid: true, value: trimmed };
+      }
+      if (/^https?:\/\//i.test(trimmed)) {
+        try {
+          const parsed = new URL(trimmed);
+          if (
+            (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+            Boolean(parsed.hostname)
+          ) {
+            return { valid: true, value: trimmed };
+          }
+        } catch {
+          // Invalid URL
+        }
+      }
+      return {
+        valid: false,
+        error: `Invalid ${fieldName}: must be an HTTP/HTTPS URL or approved /uploads/ path.`,
+      };
+    };
+
+    const validateChannelDescription = (
+      rawValue: unknown,
+    ): { valid: true; value: string | null } | { valid: false; error: string } => {
+      if (rawValue === null) {
+        return { valid: true, value: null };
+      }
+      if (typeof rawValue !== "string") {
+        return { valid: false, error: "Invalid channel_description format." };
+      }
+      const normalized = rawValue.replace(/\r\n?/g, "\n");
+      const hasDisallowedControlChar = [...normalized].some((ch) => {
+        const code = ch.charCodeAt(0);
+        return (code < 32 && code !== 9 && code !== 10) || code === 127;
+      });
+      if (hasDisallowedControlChar) {
+        return {
+          valid: false,
+          error: "Channel description contains invalid control characters.",
+        };
+      }
+      const trimmed = normalized.trim();
+      if (trimmed === "") {
+        return { valid: true, value: null };
+      }
+      if (trimmed.length > 1000) {
+        return {
+          valid: false,
+          error: "Channel description must be 1000 characters or fewer.",
+        };
+      }
+      if (
+        /<\/?[a-zA-Z!/?]/.test(trimmed) ||
+        /\b(?:javascript|vbscript)\s*:/i.test(trimmed) ||
+        /data\s*:\s*text\/html/i.test(trimmed) ||
+        /\bon[a-z]+\s*=/i.test(trimmed)
+      ) {
+        return {
+          valid: false,
+          error: "Channel description must be plain text without HTML tags or scripts.",
+        };
+      }
+      return { valid: true, value: trimmed };
+    };
+
+    const sanitizePublicProfile = (row: {
+      id: string;
+      user_id: string;
+      name: string;
+      avatar_url?: string | null | undefined;
+      channel_logo_url?: string | null | undefined;
+      channel_name?: string | null | undefined;
+      channel_description?: string | null | undefined;
+      created_at: string;
+    }) => ({
+      id: row.id,
+      user_id: row.user_id,
+      name: row.name,
+      avatar_url: row.avatar_url ?? null,
+      channel_logo_url: row.channel_logo_url ?? null,
+      channel_name: row.channel_name ?? null,
+      channel_description: row.channel_description ?? null,
+      created_at: row.created_at,
+    });
+
     if (method === "GET") {
       const qUserId = url.searchParams.get("userId") || url.searchParams.get("user_id");
       const pool = getMysqlPool();
+      const isProduction = isFailClosedProductionEnv(
+        process.env["APP_ENV"],
+        process.env["NODE_ENV"],
+      );
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required.",
+          },
+          503,
+        );
+      }
+
+      const authUser = await getAuthUserFromRequest(request, store, pool);
       if (!qUserId) {
-        const authUser = await getAuthUserFromRequest(request, store, pool);
         if (authUser) {
           return jsonResponse({ success: true, profile: authUser });
         }
@@ -4095,17 +4238,28 @@ export async function handleApiRequest(
       if (pool) {
         try {
           const [rows]: any = await pool.query(
-            `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
+            `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, channel_description, created_at
              FROM users
-             WHERE UPPER(user_id) = UPPER(?) OR LOWER(email) = LOWER(?) OR id = ?
+             WHERE UPPER(user_id) = UPPER(?) OR LOWER(email) = LOWER(?) OR UPPER(id) = UPPER(?)
              LIMIT 1`,
             [norm, norm, qUserId.trim()],
           );
           if (rows && rows.length > 0) {
-            return jsonResponse({ success: true, profile: rows[0] });
+            const profileRow = rows[0];
+            const isSelfOrAdmin =
+              Boolean(authUser) &&
+              (String(authUser!.role || "").toLowerCase() === "admin" ||
+                authUser!.user_id.toUpperCase() ===
+                  String(profileRow.user_id || "").toUpperCase() ||
+                authUser!.id.toUpperCase() === String(profileRow.id || "").toUpperCase());
+            return jsonResponse({
+              success: true,
+              profile: isSelfOrAdmin ? profileRow : sanitizePublicProfile(profileRow),
+            });
           }
+          return jsonResponse({ success: false, error: "Profile not found" }, 404);
         } catch (_e) {
-          // Ignore query error and fall through
+          return jsonResponse({ success: false, error: "Database query failed." }, 500);
         }
       }
 
@@ -4113,36 +4267,160 @@ export async function handleApiRequest(
         (u) =>
           u.user_id.toUpperCase() === norm ||
           u.email.toUpperCase() === norm ||
-          u.id === qUserId.trim(),
+          u.id.toUpperCase() === norm,
       );
       if (storeUser) {
         const { password_hash: _ph, ...safeProfile } = storeUser;
-        return jsonResponse({ success: true, profile: safeProfile });
+        const isSelfOrAdmin =
+          Boolean(authUser) &&
+          (String(authUser!.role || "").toLowerCase() === "admin" ||
+            authUser!.user_id.toUpperCase() === storeUser.user_id.toUpperCase() ||
+            authUser!.id.toUpperCase() === storeUser.id.toUpperCase());
+        return jsonResponse({
+          success: true,
+          profile: isSelfOrAdmin ? safeProfile : sanitizePublicProfile(safeProfile),
+        });
       }
       return jsonResponse({ success: false, error: "Profile not found" }, 404);
     }
+
     if (method === "POST") {
-      const body = await request.json();
       const pool = getMysqlPool();
       const authUser = await getAuthUserFromRequest(request, store, pool);
-      const requestedUserId = String(body.userId || body.user_id || body.id || "").trim();
-      const targetUserId = requestedUserId || authUser?.user_id || "";
-      if (!targetUserId) {
+      if (!authUser) {
         return jsonResponse(
-          { success: false, error: "Unauthorized or missing user identifier." },
+          {
+            success: false,
+            error: "Authentication required. Please provide a valid Bearer session token.",
+          },
           401,
         );
       }
+
+      const body = await request.json();
+      const requestedUserId = String(body.userId || body.user_id || body.id || "").trim();
+      let targetUserId = authUser.user_id;
+
       if (
-        authUser &&
         requestedUserId &&
         requestedUserId.toUpperCase() !== authUser.user_id.toUpperCase() &&
-        requestedUserId !== authUser.id &&
-        authUser.role !== "admin"
+        requestedUserId.toUpperCase() !== authUser.id.toUpperCase()
       ) {
+        const isAdmin = String(authUser.role || "").toLowerCase() === "admin";
+        if (!isAdmin) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Unauthorized: Cross-user access is restricted to verified administrators.",
+            },
+            403,
+          );
+        }
+        targetUserId = requestedUserId;
+      }
+
+      let nextName: string | undefined;
+      if (body.name !== undefined && body.name !== null) {
+        const trimmedName = String(body.name).trim();
+        if (trimmedName.length >= 2) {
+          nextName = trimmedName;
+        }
+      }
+
+      let nextMobile: string | undefined;
+      if (body.mobile !== undefined && body.mobile !== null) {
+        const trimmedMobile = String(body.mobile).trim();
+        if (trimmedMobile.length >= 7) {
+          nextMobile = trimmedMobile;
+        }
+      }
+
+      let hasAvatarUpdate = false;
+      let nextAvatarUrl: string | null = null;
+      if (body.avatar_url !== undefined || body.avatarUrl !== undefined) {
+        const rawAvatar = body.avatar_url !== undefined ? body.avatar_url : body.avatarUrl;
+        const avatarCheck = validateProfileMediaUrl(rawAvatar, "avatar_url");
+        if (!avatarCheck.valid) {
+          return jsonResponse({ success: false, error: avatarCheck.error }, 400);
+        }
+        hasAvatarUpdate = true;
+        nextAvatarUrl = avatarCheck.value;
+      }
+
+      let hasChannelLogoUpdate = false;
+      let nextChannelLogoUrl: string | null = null;
+      if (body.channel_logo_url !== undefined || body.channelLogoUrl !== undefined) {
+        const rawLogo =
+          body.channel_logo_url !== undefined ? body.channel_logo_url : body.channelLogoUrl;
+        const logoCheck = validateProfileMediaUrl(rawLogo, "channel_logo_url");
+        if (!logoCheck.valid) {
+          return jsonResponse({ success: false, error: logoCheck.error }, 400);
+        }
+        hasChannelLogoUpdate = true;
+        nextChannelLogoUrl = logoCheck.value;
+      }
+
+      let hasChannelNameUpdate = false;
+      let nextChannelName: string | null = null;
+      if (body.channel_name !== undefined || body.channelName !== undefined) {
+        const rawChannelName =
+          body.channel_name !== undefined ? body.channel_name : body.channelName;
+        if (rawChannelName === null) {
+          hasChannelNameUpdate = true;
+          nextChannelName = null;
+        } else if (typeof rawChannelName !== "string") {
+          return jsonResponse({ success: false, error: "Invalid channel_name format." }, 400);
+        } else {
+          const trimmedChannelName = rawChannelName.trim();
+          if (trimmedChannelName.length > 255) {
+            return jsonResponse(
+              { success: false, error: "Channel name must be 255 characters or fewer." },
+              400,
+            );
+          }
+          hasChannelNameUpdate = true;
+          nextChannelName = trimmedChannelName;
+        }
+      }
+
+      let hasChannelDescriptionUpdate = false;
+      let nextChannelDescription: string | null = null;
+      if (body.channel_description !== undefined || body.channelDescription !== undefined) {
+        const rawDescription =
+          body.channel_description !== undefined
+            ? body.channel_description
+            : body.channelDescription;
+        const descriptionCheck = validateChannelDescription(rawDescription);
+        if (!descriptionCheck.valid) {
+          return jsonResponse({ success: false, error: descriptionCheck.error }, 400);
+        }
+        hasChannelDescriptionUpdate = true;
+        nextChannelDescription = descriptionCheck.value;
+      }
+
+      if (
+        nextName === undefined &&
+        nextMobile === undefined &&
+        !hasAvatarUpdate &&
+        !hasChannelLogoUpdate &&
+        !hasChannelNameUpdate &&
+        !hasChannelDescriptionUpdate
+      ) {
+        return jsonResponse({ success: false, error: "No valid fields provided to update." }, 400);
+      }
+
+      const isProduction = isFailClosedProductionEnv(
+        process.env["APP_ENV"],
+        process.env["NODE_ENV"],
+      );
+      if (isProduction && !pool) {
         return jsonResponse(
-          { success: false, error: "Unauthorized: Cross-user access is restricted." },
-          403,
+          {
+            success: false,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required.",
+          },
+          503,
         );
       }
 
@@ -4150,63 +4428,73 @@ export async function handleApiRequest(
         try {
           const updates: string[] = [];
           const params: any[] = [];
-          if (body.name) {
+          if (nextName !== undefined) {
             updates.push("name = ?");
-            params.push(body.name);
+            params.push(nextName);
           }
-          if (body.mobile) {
+          if (nextMobile !== undefined) {
             updates.push("mobile = ?");
-            params.push(body.mobile);
+            params.push(nextMobile);
           }
-          if (body.avatar_url) {
+          if (hasAvatarUpdate) {
             updates.push("avatar_url = ?");
-            params.push(body.avatar_url);
+            params.push(nextAvatarUrl);
           }
-          if (body.channel_logo_url !== undefined) {
+          if (hasChannelLogoUpdate) {
             updates.push("channel_logo_url = ?");
-            params.push(String(body.channel_logo_url).trim());
+            params.push(nextChannelLogoUrl);
           }
-          if (body.channel_name !== undefined) {
+          if (hasChannelNameUpdate) {
             updates.push("channel_name = ?");
-            params.push(String(body.channel_name).trim());
+            params.push(nextChannelName);
           }
-          if (updates.length > 0) {
-            params.push(targetUserId);
-            params.push(targetUserId);
-            await pool.query(
-              `UPDATE users SET ${updates.join(", ")}, updated_at = NOW() WHERE id = ? OR UPPER(user_id) = UPPER(?)`,
-              params,
-            );
-            const [rows]: any = await pool.query(
-              `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
-               FROM users WHERE id = ? OR UPPER(user_id) = UPPER(?) LIMIT 1`,
-              [targetUserId, targetUserId],
-            );
-            if (rows && rows.length > 0) {
-              return jsonResponse({
-                success: true,
-                profile: rows[0],
-                message: "Profile updated",
-              });
-            }
+          if (hasChannelDescriptionUpdate) {
+            updates.push("channel_description = ?");
+            params.push(nextChannelDescription);
           }
+          params.push(targetUserId);
+          params.push(targetUserId);
+          await pool.query(
+            `UPDATE users SET ${updates.join(", ")}, updated_at = NOW() WHERE UPPER(id) = UPPER(?) OR UPPER(user_id) = UPPER(?)`,
+            params,
+          );
+          const [rows]: any = await pool.query(
+            `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, channel_description, created_at
+             FROM users WHERE UPPER(id) = UPPER(?) OR UPPER(user_id) = UPPER(?) LIMIT 1`,
+            [targetUserId, targetUserId],
+          );
+          if (rows && rows.length > 0) {
+            return jsonResponse({
+              success: true,
+              profile: rows[0],
+              message: "Profile updated",
+            });
+          }
+          return jsonResponse({ success: false, error: "User not found" }, 404);
         } catch (_e) {
-          // Ignore update error
+          return jsonResponse({ success: false, error: "Database update failed." }, 500);
         }
       }
 
       const storeUser = store.users.find(
-        (u) => u.user_id.toUpperCase() === targetUserId.toUpperCase() || u.id === targetUserId,
+        (u) =>
+          u.user_id.toUpperCase() === targetUserId.toUpperCase() ||
+          u.id.toUpperCase() === targetUserId.toUpperCase(),
       );
       if (storeUser) {
-        if (body.name) storeUser.name = String(body.name).trim();
-        if (body.mobile) storeUser.mobile = String(body.mobile).trim();
-        if (body.avatar_url) storeUser.avatar_url = String(body.avatar_url).trim();
-        if (body.channel_logo_url !== undefined) {
-          storeUser.channel_logo_url = String(body.channel_logo_url).trim();
+        if (nextName !== undefined) storeUser.name = nextName;
+        if (nextMobile !== undefined) storeUser.mobile = nextMobile;
+        if (hasAvatarUpdate) {
+          storeUser.avatar_url = nextAvatarUrl ?? undefined;
         }
-        if (body.channel_name !== undefined) {
-          storeUser.channel_name = String(body.channel_name).trim();
+        if (hasChannelLogoUpdate) {
+          storeUser.channel_logo_url = nextChannelLogoUrl ?? undefined;
+        }
+        if (hasChannelNameUpdate) {
+          storeUser.channel_name = nextChannelName ?? undefined;
+        }
+        if (hasChannelDescriptionUpdate) {
+          storeUser.channel_description = nextChannelDescription;
         }
         saveStore(store);
         const { password_hash: _ph, ...safeProfile } = storeUser;
@@ -4223,10 +4511,45 @@ export async function handleApiRequest(
   if (route === "users/list") {
     if (method === "GET") {
       const pool = getMysqlPool();
+      const authUser = await getAuthUserFromRequest(request, store, pool);
+      if (!authUser) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Authentication required. Please provide a valid Bearer session token.",
+          },
+          401,
+        );
+      }
+      if (String(authUser.role || "").toLowerCase() !== "admin") {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Admin authorization required. Access denied.",
+          },
+          403,
+        );
+      }
+
+      const isProduction = isFailClosedProductionEnv(
+        process.env["APP_ENV"],
+        process.env["NODE_ENV"],
+      );
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required.",
+          },
+          503,
+        );
+      }
+
       if (pool) {
         try {
           const [rows]: any = await pool.query(
-            `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, created_at
+            `SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, channel_description, created_at
              FROM users ORDER BY created_at DESC LIMIT 100`,
           );
           return jsonResponse({
@@ -4235,7 +4558,7 @@ export async function handleApiRequest(
             total: rows.length,
           });
         } catch (_e) {
-          // Ignore list error
+          return jsonResponse({ success: false, error: "Database query failed." }, 500);
         }
       }
       return jsonResponse({
@@ -4962,7 +5285,9 @@ export async function handleApiRequest(
     if (method === "POST") {
       try {
         const formData = await request.formData();
-        const purpose = String(formData.get("purpose") || "").trim().toLowerCase();
+        const purpose = String(formData.get("purpose") || "")
+          .trim()
+          .toLowerCase();
         const isChannelLogo = purpose === "channel_logo";
 
         if (isChannelLogo) {
@@ -7850,14 +8175,14 @@ export async function handleApiRequest(
         return jsonResponse({ success: false, error: "Authentication required" }, 401);
       }
       const body = await request.json();
-      const requestedUserId = String(body.userId || body.user_id || "").trim();
+      const requestedUserId = String(body.userId || body.user_id || body.id || "").trim();
       let effectiveUserId = authUser.user_id;
       if (
         requestedUserId &&
         requestedUserId.toUpperCase() !== authUser.user_id.toUpperCase() &&
-        requestedUserId !== authUser.id
+        requestedUserId.toUpperCase() !== authUser.id.toUpperCase()
       ) {
-        if (authUser.role !== "admin") {
+        if (String(authUser.role || "").toLowerCase() !== "admin") {
           return jsonResponse(
             {
               success: false,
@@ -7869,26 +8194,121 @@ export async function handleApiRequest(
         effectiveUserId = requestedUserId;
       }
 
-      const logoUrl = String(body.channel_logo_url ?? body.channelLogoUrl ?? "").trim();
+      const hasLogoKey =
+        Object.prototype.hasOwnProperty.call(body, "channel_logo_url") ||
+        Object.prototype.hasOwnProperty.call(body, "channelLogoUrl");
+      const rawLogoField = Object.prototype.hasOwnProperty.call(body, "channel_logo_url")
+        ? body.channel_logo_url
+        : Object.prototype.hasOwnProperty.call(body, "channelLogoUrl")
+          ? body.channelLogoUrl
+          : undefined;
+      const removeLogoFlag = body.removeLogo === true || body.remove_logo === true;
+
+      if (hasLogoKey && rawLogoField !== null && typeof rawLogoField !== "string") {
+        return jsonResponse({ success: false, error: "Invalid channel logo URL format" }, 400);
+      }
+
+      const rawLogoInput = typeof rawLogoField === "string" ? rawLogoField.trim() : "";
+      const doublePrefixMatch = rawLogoInput.match(/^(https?:\/\/[^/]+)(https?:\/\/.+)$/i);
+      const logoUrl =
+        doublePrefixMatch && doublePrefixMatch[2] ? doublePrefixMatch[2].trim() : rawLogoInput;
+      const shouldRemoveLogo =
+        removeLogoFlag || (hasLogoKey && (rawLogoField === null || logoUrl === ""));
+      const hasLogoUpdate = shouldRemoveLogo || (hasLogoKey && logoUrl !== "");
       const channelName = String(body.channel_name ?? body.channelName ?? "").trim();
 
-      if (!logoUrl && !channelName) {
+      const hasDescriptionKey =
+        Object.prototype.hasOwnProperty.call(body, "channel_description") ||
+        Object.prototype.hasOwnProperty.call(body, "channelDescription");
+      const rawDescriptionField = Object.prototype.hasOwnProperty.call(body, "channel_description")
+        ? body.channel_description
+        : Object.prototype.hasOwnProperty.call(body, "channelDescription")
+          ? body.channelDescription
+          : undefined;
+      let channelDescription: string | null = null;
+
+      if (hasDescriptionKey && rawDescriptionField !== null) {
+        if (typeof rawDescriptionField !== "string") {
+          return jsonResponse({ success: false, error: "Invalid channel_description format" }, 400);
+        }
+        const normalizedDescription = rawDescriptionField.replace(/\r\n?/g, "\n");
+        const hasDisallowedControlChar = [...normalizedDescription].some((ch) => {
+          const code = ch.charCodeAt(0);
+          return (code < 32 && code !== 9 && code !== 10) || code === 127;
+        });
+        if (hasDisallowedControlChar) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Channel description contains invalid control characters",
+            },
+            400,
+          );
+        }
+        const trimmedDescription = normalizedDescription.trim();
+        if (trimmedDescription.length > 1000) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Channel description must be 1000 characters or fewer",
+            },
+            400,
+          );
+        }
+        if (
+          trimmedDescription !== "" &&
+          (/<\/?[a-zA-Z!/?]/.test(trimmedDescription) ||
+            /\b(?:javascript|vbscript)\s*:/i.test(trimmedDescription) ||
+            /data\s*:\s*text\/html/i.test(trimmedDescription) ||
+            /\bon[a-z]+\s*=/i.test(trimmedDescription))
+        ) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Channel description must be plain text without HTML tags or scripts",
+            },
+            400,
+          );
+        }
+        channelDescription = trimmedDescription !== "" ? trimmedDescription : null;
+      }
+
+      if (!hasLogoUpdate && !channelName && !hasDescriptionKey) {
         return jsonResponse({ success: false, error: "No channel updates provided" }, 400);
       }
 
-      if (logoUrl) {
+      if (hasLogoUpdate && !shouldRemoveLogo && logoUrl) {
         if (logoUrl.length > 500) {
           return jsonResponse(
             { success: false, error: "Channel logo URL must be 500 characters or fewer" },
             400,
           );
         }
-        const isSafeUrl = logoUrl.startsWith("/uploads/") || /^https?:\/\/.+/i.test(logoUrl);
+        const hasControlChar = [...logoUrl].some((ch) => {
+          const code = ch.charCodeAt(0);
+          return code < 32 || code === 127;
+        });
+        if (hasControlChar || /[\s\\]/.test(logoUrl)) {
+          return jsonResponse({ success: false, error: "Invalid channel logo URL format" }, 400);
+        }
+        let isSafeUrl = false;
+        if (logoUrl.startsWith("/uploads/")) {
+          isSafeUrl =
+            !logoUrl.includes("..") &&
+            logoUrl.length > "/uploads/".length &&
+            /^\/uploads\/[A-Za-z0-9._\-/]+$/.test(logoUrl);
+        } else if (/^https?:\/\//i.test(logoUrl)) {
+          try {
+            const parsed = new URL(logoUrl);
+            isSafeUrl =
+              (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+              Boolean(parsed.hostname);
+          } catch {
+            isSafeUrl = false;
+          }
+        }
         if (!isSafeUrl) {
-          return jsonResponse(
-            { success: false, error: "Invalid channel logo URL format" },
-            400,
-          );
+          return jsonResponse({ success: false, error: "Invalid channel logo URL format" }, 400);
         }
       }
 
@@ -7899,48 +8319,171 @@ export async function handleApiRequest(
         );
       }
 
-      const user = store.users.find(
-        (u) => u.user_id.toUpperCase() === effectiveUserId.toUpperCase() || u.id === effectiveUserId,
+      const isProduction = isFailClosedProductionEnv(
+        process.env["APP_ENV"],
+        process.env["NODE_ENV"],
       );
-      if (user) {
-        if (logoUrl) user.channel_logo_url = logoUrl;
-        if (channelName) user.channel_name = channelName;
-        saveStore(store);
+
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required.",
+          },
+          503,
+        );
       }
 
-      let dbLogoUrl: string | null = null;
-      let dbChannelName: string | null = null;
-      if (pool) {
-        await pool
-          .query(
-            "UPDATE users SET channel_logo_url = COALESCE(?, channel_logo_url), channel_name = COALESCE(?, channel_name), updated_at = NOW() WHERE UPPER(user_id) = UPPER(?)",
-            [logoUrl || null, channelName || null, effectiveUserId],
+      const resolveChannelLogoResponseUrl = (rawUrl: string | null | undefined): string | null => {
+        if (!rawUrl || typeof rawUrl !== "string") return null;
+        let cleaned = rawUrl.trim();
+        const nestedMatch = cleaned.match(/^(https?:\/\/[^/]+)(https?:\/\/.+)$/i);
+        if (nestedMatch && nestedMatch[2]) {
+          cleaned = nestedMatch[2].trim();
+        }
+        if (!cleaned) return null;
+        if (cleaned.startsWith("/uploads/")) {
+          const envBase = (
+            process.env["FACETUBE_API_BASE_URL"] ||
+            process.env["API_BASE_URL"] ||
+            process.env["VITE_MEDIA_BASE_URL"] ||
+            ""
           )
-          .catch(() => {});
-        try {
-          const [rows]: any = await pool.query(
-            "SELECT channel_logo_url, channel_name FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1",
-            [effectiveUserId],
-          );
-          if (rows && rows.length > 0) {
-            dbLogoUrl = rows[0].channel_logo_url ?? null;
-            dbChannelName = rows[0].channel_name ?? null;
+            .trim()
+            .replace(/\/+$/, "");
+          if (envBase) {
+            return `${envBase}${cleaned}`;
           }
-        } catch {
-          // ignore
+          try {
+            const reqHost = new URL(request.url).hostname.toLowerCase();
+            if (
+              reqHost === "facetube.online" ||
+              reqHost === "www.facetube.online" ||
+              reqHost === "api.facetube.online"
+            ) {
+              return `https://api.facetube.online${cleaned}`;
+            }
+          } catch {
+            // ignore URL parse error
+          }
+          if (isProduction) {
+            return `https://api.facetube.online${cleaned}`;
+          }
+          return cleaned;
+        }
+        return cleaned;
+      };
+
+      if (pool) {
+        try {
+          const [targetRows]: any = await pool.query(
+            "SELECT id, user_id, channel_logo_url, channel_name, channel_description FROM users WHERE UPPER(id) = UPPER(?) OR UPPER(user_id) = UPPER(?) LIMIT 1",
+            [effectiveUserId, effectiveUserId],
+          );
+          if (!targetRows || targetRows.length === 0) {
+            return jsonResponse({ success: false, error: "Target user not found" }, 404);
+          }
+          const targetRow = targetRows[0];
+          const canonicalId = targetRow.id;
+          const canonicalUserId = String(targetRow.user_id || effectiveUserId);
+
+          const updates: string[] = [];
+          const params: any[] = [];
+          if (hasLogoUpdate) {
+            updates.push("channel_logo_url = ?");
+            params.push(shouldRemoveLogo ? null : logoUrl);
+          }
+          if (channelName) {
+            updates.push("channel_name = ?");
+            params.push(channelName);
+          }
+          if (hasDescriptionKey) {
+            updates.push("channel_description = ?");
+            params.push(channelDescription);
+          }
+          params.push(canonicalId, canonicalUserId);
+
+          await pool.query(
+            `UPDATE users SET ${updates.join(", ")}, updated_at = NOW() WHERE id = ? OR UPPER(user_id) = UPPER(?)`,
+            params,
+          );
+
+          const [rows]: any = await pool.query(
+            "SELECT channel_logo_url, channel_name, channel_description FROM users WHERE id = ? OR UPPER(user_id) = UPPER(?) LIMIT 1",
+            [canonicalId, canonicalUserId],
+          );
+          if (!rows || rows.length === 0) {
+            return jsonResponse(
+              { success: false, error: "Failed to verify updated channel details" },
+              500,
+            );
+          }
+
+          const finalLogoUrl = resolveChannelLogoResponseUrl(rows[0].channel_logo_url ?? null);
+          const finalChannelName = rows[0].channel_name ?? (channelName || null);
+          const finalChannelDescription =
+            rows[0].channel_description !== undefined
+              ? rows[0].channel_description
+              : hasDescriptionKey
+                ? channelDescription
+                : null;
+
+          return jsonResponse({
+            success: true,
+            message:
+              shouldRemoveLogo && !channelName && !hasDescriptionKey
+                ? "Channel logo removed successfully"
+                : "Channel details updated successfully",
+            channel_logo_url: finalLogoUrl,
+            channel_name: finalChannelName,
+            channel_description: finalChannelDescription,
+            channelLogoUrl: finalLogoUrl,
+            channelName: finalChannelName,
+            channelDescription: finalChannelDescription,
+          });
+        } catch (_dbErr) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database error while updating channel details.",
+            },
+            500,
+          );
         }
       }
 
-      const finalLogoUrl = logoUrl || dbLogoUrl || user?.channel_logo_url || null;
-      const finalChannelName = channelName || dbChannelName || user?.channel_name || null;
+      const user = store.users.find(
+        (u) =>
+          u.user_id.toUpperCase() === effectiveUserId.toUpperCase() ||
+          u.id.toUpperCase() === effectiveUserId.toUpperCase(),
+      );
+      if (!user) {
+        return jsonResponse({ success: false, error: "Target user not found" }, 404);
+      }
+      if (hasLogoUpdate) {
+        user.channel_logo_url = shouldRemoveLogo ? null : logoUrl;
+      }
+      if (channelName) user.channel_name = channelName;
+      if (hasDescriptionKey) user.channel_description = channelDescription;
+      saveStore(store);
+
+      const finalLogoUrl = resolveChannelLogoResponseUrl(user.channel_logo_url ?? null);
+      const finalChannelName = user.channel_name ?? null;
+      const finalChannelDescription = user.channel_description ?? null;
 
       return jsonResponse({
         success: true,
-        message: "Channel details updated successfully",
+        message:
+          shouldRemoveLogo && !channelName && !hasDescriptionKey
+            ? "Channel logo removed successfully"
+            : "Channel details updated successfully",
         channel_logo_url: finalLogoUrl,
         channel_name: finalChannelName,
+        channel_description: finalChannelDescription,
         channelLogoUrl: finalLogoUrl,
         channelName: finalChannelName,
+        channelDescription: finalChannelDescription,
       });
     }
   }
