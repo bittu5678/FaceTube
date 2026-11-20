@@ -579,6 +579,12 @@ export function generateLiveKitAccessToken(params: {
   metadata?: string;
   ttlSeconds?: number;
 }): { token: string; expiresAt: number } {
+  const apiKey = String(params.apiKey ?? "").trim();
+  const apiSecret = String(params.apiSecret ?? "").trim();
+  if (!apiKey || !apiSecret) {
+    throw new Error("LiveKit credentials are required to generate an access token");
+  }
+
   const header = {
     alg: "HS256",
     typ: "JWT",
@@ -605,7 +611,7 @@ export function generateLiveKitAccessToken(params: {
   }
 
   const payload: Record<string, any> = {
-    iss: params.apiKey,
+    iss: apiKey,
     sub: params.identity,
     iat: now,
     nbf: now,
@@ -620,7 +626,7 @@ export function generateLiveKitAccessToken(params: {
   const encodedPayload = base64UrlEncode(JSON.stringify(payload));
   const signingInput = `${encodedHeader}.${encodedPayload}`;
 
-  const signature = crypto.createHmac("sha256", params.apiSecret).update(signingInput).digest();
+  const signature = crypto.createHmac("sha256", apiSecret).update(signingInput).digest();
   const encodedSig = base64UrlEncode(signature);
 
   return {
@@ -638,6 +644,11 @@ export function verifyLiveKitWebhook(
   rawBody: string,
   apiSecret: string,
 ): { valid: boolean; claims?: any; error?: string } {
+  const normalizedSecret = String(apiSecret ?? "").trim();
+  if (!normalizedSecret) {
+    return { valid: false, error: "LiveKit webhook secret is not configured" };
+  }
+
   if (!authHeader) {
     return { valid: false, error: "Missing LiveKit webhook Authorization header" };
   }
@@ -657,7 +668,7 @@ export function verifyLiveKitWebhook(
   try {
     const header = JSON.parse(base64UrlDecode(headerB64).toString("utf8"));
     if (header.alg !== "HS256") {
-      return { valid: false, error: `Unsupported signing algorithm: ${header.alg}` };
+      return { valid: false, error: "Unsupported LiveKit webhook signing algorithm" };
     }
   } catch {
     return { valid: false, error: "Invalid token header JSON" };
@@ -665,7 +676,7 @@ export function verifyLiveKitWebhook(
 
   // 2. Verify signature
   const signingInput = `${headerB64}.${payloadB64}`;
-  const expectedSig = crypto.createHmac("sha256", apiSecret).update(signingInput).digest();
+  const expectedSig = crypto.createHmac("sha256", normalizedSecret).update(signingInput).digest();
   const providedSig = base64UrlDecode(signatureB64);
 
   if (
@@ -675,7 +686,7 @@ export function verifyLiveKitWebhook(
     return { valid: false, error: "LiveKit webhook token signature verification failed" };
   }
 
-  // 3. Verify payload & sha256 claim against raw body
+  // 3. Verify payload, optional expiry, & sha256 claim against raw body
   let claims: any;
   try {
     claims = JSON.parse(base64UrlDecode(payloadB64).toString("utf8"));
@@ -683,12 +694,28 @@ export function verifyLiveKitWebhook(
     return { valid: false, error: "Invalid token payload JSON" };
   }
 
-  if (!claims.sha256) {
+  if (!claims || typeof claims !== "object") {
+    return { valid: false, error: "Invalid token payload JSON" };
+  }
+
+  if (claims.exp !== undefined) {
+    const expNum = Number(claims.exp);
+    if (!Number.isFinite(expNum) || expNum < Math.floor(Date.now() / 1000)) {
+      return { valid: false, error: "LiveKit webhook token expired" };
+    }
+  }
+
+  if (typeof claims.sha256 !== "string" || !claims.sha256) {
     return { valid: false, error: "LiveKit webhook token missing body sha256 claim" };
   }
 
   const computedHash = crypto.createHash("sha256").update(rawBody).digest("base64");
-  if (claims.sha256 !== computedHash) {
+  const expectedHashBuf = Buffer.from(computedHash, "utf8");
+  const providedHashBuf = Buffer.from(claims.sha256, "utf8");
+  if (
+    expectedHashBuf.length !== providedHashBuf.length ||
+    !crypto.timingSafeEqual(expectedHashBuf, providedHashBuf)
+  ) {
     return { valid: false, error: "LiveKit webhook payload hash mismatch" };
   }
 
@@ -1317,7 +1344,17 @@ export interface AuthUser {
   created_at: string;
 }
 
-export async function getAuthUserFromRequest(
+export class AuthDatabaseError extends Error {
+  readonly status: 500 | 503;
+
+  constructor(status: 500 | 503, message: string) {
+    super(message);
+    this.name = "AuthDatabaseError";
+    this.status = status;
+  }
+}
+
+async function resolveAuthUserFromRequest(
   request: Request,
   store: ServerStore,
   pool?: Pool | null,
@@ -1328,7 +1365,48 @@ export async function getAuthUserFromRequest(
   const token = authHeader.replace(/^Bearer\s+/i, "").trim();
   if (!token) return null;
 
+  const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+  const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
   const activePool = pool !== undefined ? pool : getMysqlPool();
+
+  if (isProduction) {
+    if (!activePool) {
+      throw new AuthDatabaseError(
+        503,
+        "Database connection unavailable. In production, persistent database storage is required.",
+      );
+    }
+
+    let rows: any;
+    try {
+      [rows] = await activePool.query(
+        `SELECT u.id, u.user_id, u.name, u.mobile, u.email, u.role, u.referral_code, u.avatar_url, u.channel_logo_url, u.channel_name, u.channel_description, u.created_at
+         FROM sessions s
+         INNER JOIN users u ON (s.user_id = u.id OR s.user_id = u.user_id)
+         WHERE s.token = ? AND s.expires_at > NOW()
+         LIMIT 1`,
+        [token],
+      );
+    } catch (_e) {
+      throw new AuthDatabaseError(500, "Authentication service database error.");
+    }
+
+    if (rows && rows.length > 0) {
+      const rowUser = rows[0] as AuthUser;
+      return {
+        ...rowUser,
+        channel_logo_url: normalizeServerMediaUrl(rowUser.channel_logo_url ?? null, request, {
+          env,
+          isProduction: true,
+          preserveEmptyString: true,
+        }),
+      };
+    }
+
+    // Production must never fall back to JSON store sessions/users when MySQL finds no active session.
+    return null;
+  }
+
   if (activePool) {
     try {
       const [rows]: any = await activePool.query(
@@ -1345,12 +1423,13 @@ export async function getAuthUserFromRequest(
           ...rowUser,
           channel_logo_url: normalizeServerMediaUrl(rowUser.channel_logo_url ?? null, request, {
             env,
+            isProduction: false,
             preserveEmptyString: true,
           }),
         };
       }
     } catch (_e) {
-      // Fall through to store check
+      // Non-production: fall through to local JSON store check
     }
   }
 
@@ -1371,6 +1450,7 @@ export async function getAuthUserFromRequest(
         avatar_url: user.avatar_url,
         channel_logo_url: normalizeServerMediaUrl(user.channel_logo_url ?? null, request, {
           env,
+          isProduction: false,
           preserveEmptyString: true,
         }),
         channel_name: user.channel_name ?? null,
@@ -1381,6 +1461,15 @@ export async function getAuthUserFromRequest(
   }
 
   return null;
+}
+
+export async function getAuthUserFromRequest(
+  request: Request,
+  store: ServerStore,
+  pool?: Pool | null,
+  env?: Record<string, string | undefined> | undefined,
+): Promise<AuthUser | null> {
+  return resolveAuthUserFromRequest(request, store, pool, env);
 }
 
 export type AuthResult =
@@ -1743,6 +1832,27 @@ export async function handleApiRequest(
   request: Request,
   env?: Record<string, string | undefined>,
 ): Promise<Response | null> {
+  try {
+    return await dispatchApiRequest(request, env);
+  } catch (err: unknown) {
+    if (err instanceof AuthDatabaseError) {
+      return jsonResponse({ success: false, error: err.message }, err.status);
+    }
+    throw err;
+  }
+}
+
+async function dispatchApiRequest(
+  request: Request,
+  env?: Record<string, string | undefined>,
+): Promise<Response | null> {
+  const getAuthUserFromRequest = (
+    req: Request,
+    st: ServerStore,
+    p?: Pool | null,
+    overrideEnv?: Record<string, string | undefined>,
+  ) => resolveAuthUserFromRequest(req, st, p, overrideEnv ?? env);
+
   const url = new URL(request.url);
   const pathname = url.pathname;
 
@@ -3744,12 +3854,41 @@ export async function handleApiRequest(
 
   if (route === "auth/me") {
     if (method === "GET") {
+      const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
       const pool = getMysqlPool();
-      const authUser = await getAuthUserFromRequest(request, store, pool, env);
-      if (authUser) {
-        return jsonResponse({ authenticated: true, user: authUser });
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            authenticated: false,
+            user: null,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required.",
+          },
+          503,
+        );
       }
-      return jsonResponse({ authenticated: false, user: null });
+      try {
+        const authUser = await getAuthUserFromRequest(request, store, pool, env);
+        if (authUser) {
+          return jsonResponse({ authenticated: true, user: authUser });
+        }
+        return jsonResponse({ authenticated: false, user: null });
+      } catch (err: unknown) {
+        if (err instanceof AuthDatabaseError) {
+          return jsonResponse(
+            {
+              success: false,
+              authenticated: false,
+              user: null,
+              error: err.message,
+            },
+            err.status,
+          );
+        }
+        throw err;
+      }
     }
   }
 
@@ -3901,6 +4040,9 @@ export async function handleApiRequest(
           });
         }
       } catch (err: unknown) {
+        if (err instanceof AuthDatabaseError) {
+          throw err;
+        }
         const msg = err instanceof Error ? err.message : String(err);
         return jsonResponse(
           { success: false, error: "Database error while updating password: " + msg },
@@ -9479,11 +9621,14 @@ export async function handleApiRequest(
           stream = rows[0];
         }
       } catch (_e) {
-        // Fallback
+        if (isProduction) {
+          return jsonResponse({ success: false, error: "Database error loading live stream" }, 500);
+        }
+        // Non-production fallback
       }
     }
 
-    if (!stream) {
+    if (!stream && !isProduction) {
       stream = (store.liveStreams || []).find((s) => s.id === streamId);
     }
 
@@ -9513,10 +9658,25 @@ export async function handleApiRequest(
     const effectiveRole: "publisher" | "subscriber" =
       isOwner && requestedRole === "publisher" ? "publisher" : "subscriber";
 
-    const livekitUrl = process.env["LIVEKIT_URL"] || "wss://live.facetube.online";
-    const apiKey = process.env["LIVEKIT_API_KEY"] || "devkey";
-    const apiSecret = process.env["LIVEKIT_API_SECRET"] || "secret";
-    const roomName = stream.livekit_room_name || `room_${stream.id}`;
+    const configuredUrl = readEnv("LIVEKIT_URL");
+    const configuredApiKey = readEnv("LIVEKIT_API_KEY");
+    const configuredApiSecret = readEnv("LIVEKIT_API_SECRET");
+    const isLiveKitConfigured = Boolean(configuredApiKey && configuredApiSecret);
+
+    if (isProduction && !isLiveKitConfigured) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "LiveKit streaming service is not configured",
+        },
+        503,
+      );
+    }
+
+    const livekitUrl = configuredUrl || "wss://live.facetube.online";
+    const apiKey = isProduction ? configuredApiKey : configuredApiKey || "devkey";
+    const apiSecret = isProduction ? configuredApiSecret : configuredApiSecret || "secret";
+    const roomName = String(stream.livekit_room_name ?? "").trim() || `room_${stream.id}`;
 
     const { token, expiresAt } = generateLiveKitAccessToken({
       apiKey,
@@ -9541,9 +9701,7 @@ export async function handleApiRequest(
       identity: authUser.user_id,
       role: effectiveRole,
       expires_at: expiresAt,
-      server_configured: Boolean(
-        process.env["LIVEKIT_API_KEY"] && process.env["LIVEKIT_API_SECRET"],
-      ),
+      server_configured: isLiveKitConfigured,
     });
   }
 
@@ -9830,9 +9988,19 @@ export async function handleApiRequest(
       );
     }
 
+    const apiSecret = readEnv("LIVEKIT_API_SECRET");
+    if (!apiSecret) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "LiveKit webhook service is not configured",
+        },
+        503,
+      );
+    }
+
     const rawBody = await request.text();
     const authHeader = request.headers.get("authorization");
-    const apiSecret = readEnv("LIVEKIT_API_SECRET") || "secret";
 
     const verification = verifyLiveKitWebhook(authHeader, rawBody, apiSecret);
     if (!verification.valid) {
@@ -9849,6 +10017,10 @@ export async function handleApiRequest(
     try {
       eventData = JSON.parse(rawBody);
     } catch {
+      return jsonResponse({ success: false, error: "Invalid JSON payload" }, 400);
+    }
+
+    if (!eventData || typeof eventData !== "object" || Array.isArray(eventData)) {
       return jsonResponse({ success: false, error: "Invalid JSON payload" }, 400);
     }
 

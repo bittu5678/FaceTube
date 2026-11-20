@@ -11,6 +11,7 @@ import {
   resetInMemoryStore,
 } from "./api-handler.ts";
 import { setMysqlPoolForTesting } from "./mysql.ts";
+import nitroServerEntry from "../server.ts";
 
 describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () => {
   let adminToken = "";
@@ -1254,8 +1255,51 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
         ? beforeStore.liveStreams.length
         : 0;
 
+      const mockSessionRows = (tokenParam: unknown) => {
+        if (tokenParam === creatorToken) {
+          return [
+            {
+              id: "a0000000-0000-0000-0000-000000000002",
+              user_id: "FT483921",
+              name: "Alex Rivera",
+              mobile: "+1 555-014-8392",
+              email: "alex@facetube.com",
+              role: "user",
+              referral_code: "CREATOR50",
+              avatar_url: null,
+              channel_logo_url: null,
+              channel_name: "Alex Studio",
+              channel_description: null,
+              created_at: "2026-11-01T00:00:00.000Z",
+            },
+          ];
+        }
+        if (tokenParam === viewerToken) {
+          return [
+            {
+              id: "a0000000-0000-0000-0000-000000000003",
+              user_id: "FT900431",
+              name: "Maya Lin",
+              mobile: "+1 555-019-2831",
+              email: "maya@facetube.com",
+              role: "user",
+              referral_code: "MAYA25",
+              avatar_url: null,
+              channel_logo_url: null,
+              channel_name: "Maya Studio",
+              channel_description: null,
+              created_at: "2026-11-01T00:00:00.000Z",
+            },
+          ];
+        }
+        return [];
+      };
+
       setMysqlPoolForTesting({
-        query: async (sql: string) => {
+        query: async (sql: string, params: any[] = []) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockSessionRows(params[0]), []];
+          }
           if (/INSERT\s+INTO\s+live_streams/i.test(sql)) {
             throw new Error("Simulated MySQL INSERT failure");
           }
@@ -1303,9 +1347,52 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
         livekit_room_name: "room_live_prod_01",
       };
 
+      const mockProdSessionRows = (tokenParam: unknown) => {
+        if (tokenParam === creatorToken) {
+          return [
+            {
+              id: "a0000000-0000-0000-0000-000000000002",
+              user_id: "FT483921",
+              name: "Alex Rivera",
+              mobile: "+1 555-014-8392",
+              email: "alex@facetube.com",
+              role: "user",
+              referral_code: "CREATOR50",
+              avatar_url: null,
+              channel_logo_url: null,
+              channel_name: "Alex Studio",
+              channel_description: null,
+              created_at: "2026-11-01T00:00:00.000Z",
+            },
+          ];
+        }
+        if (tokenParam === viewerToken) {
+          return [
+            {
+              id: "a0000000-0000-0000-0000-000000000003",
+              user_id: "FT900431",
+              name: "Maya Lin",
+              mobile: "+1 555-019-2831",
+              email: "maya@facetube.com",
+              role: "user",
+              referral_code: "MAYA25",
+              avatar_url: null,
+              channel_logo_url: null,
+              channel_name: "Maya Studio",
+              channel_description: null,
+              created_at: "2026-11-01T00:00:00.000Z",
+            },
+          ];
+        }
+        return [];
+      };
+
       // 1. Failing SELECT -> 500 on heartbeat & end-stream (no JSON fallback even when testStreamId exists in store)
       setMysqlPoolForTesting({
-        query: async (sql: string) => {
+        query: async (sql: string, params: any[] = []) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockProdSessionRows(params[0]), []];
+          }
           if (/FROM\s+live_streams/i.test(sql)) {
             throw new Error("Simulated MySQL SELECT error");
           }
@@ -1339,7 +1426,10 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
 
       // 2. Failing UPDATE -> 500 on heartbeat & end-stream, while non-owner still gets 403
       setMysqlPoolForTesting({
-        query: async (sql: string) => {
+        query: async (sql: string, params: any[] = []) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockProdSessionRows(params[0]), []];
+          }
           if (/FROM\s+live_streams/i.test(sql)) {
             return [[prodStreamRow], []];
           }
@@ -1482,6 +1572,872 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
       assert.equal(endRes?.status, 200);
       const endData = (await endRes!.json()) as any;
       assert.equal(endData.stream.status, "ended");
+    });
+  });
+
+  describe("8. Task 5J-Q: LiveKit Token & Webhook Production Security", () => {
+    const envKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "DB_HOST",
+      "DB_NAME",
+      "DB_USER",
+      "MYSQL_HOST",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "LIVEKIT_URL",
+      "LIVEKIT_API_KEY",
+      "LIVEKIT_API_SECRET",
+    ] as const;
+
+    let envSnapshot: Record<string, string | undefined> = {};
+    let suiteStoreSnapshot: string | null = null;
+    let suiteStoreExisted = false;
+
+    function createSignedWebhookJwt(
+      rawBody: string,
+      secret: string,
+      overrides?: { exp?: number; iss?: string; sha256?: string },
+    ) {
+      const header = { alg: "HS256", typ: "JWT" };
+      const bodyHash =
+        overrides?.sha256 ?? crypto.createHash("sha256").update(rawBody).digest("base64");
+      const payload: Record<string, unknown> = {
+        iss: overrides?.iss ?? "prod-livekit-key",
+        sha256: bodyHash,
+        iat: Math.floor(Date.now() / 1000),
+      };
+      if (overrides?.exp !== undefined) {
+        payload["exp"] = overrides.exp;
+      }
+      const b64Url = (obj: unknown) =>
+        Buffer.from(JSON.stringify(obj))
+          .toString("base64")
+          .replace(/=/g, "")
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_");
+      const headerB64 = b64Url(header);
+      const payloadB64 = b64Url(payload);
+      const sigInput = `${headerB64}.${payloadB64}`;
+      const sig = crypto
+        .createHmac("sha256", secret)
+        .update(sigInput)
+        .digest("base64")
+        .replace(/=/g, "")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_");
+      return `${sigInput}.${sig}`;
+    }
+
+    function verifyHs256JwtSignature(jwt: string, secret: string): boolean {
+      const parts = jwt.split(".");
+      if (parts.length !== 3) return false;
+      const [headerB64, payloadB64, sigB64] = parts;
+      if (!headerB64 || !payloadB64 || !sigB64) return false;
+      const expected = crypto
+        .createHmac("sha256", secret)
+        .update(`${headerB64}.${payloadB64}`)
+        .digest();
+      const provided = base64UrlDecode(sigB64);
+      return expected.length === provided.length && crypto.timingSafeEqual(expected, provided);
+    }
+
+    function enableMockDbEnv(mockPool: unknown) {
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+      setMysqlPoolForTesting(mockPool as any);
+    }
+
+    function mockSessionRows(tokenParam: unknown) {
+      if (tokenParam === creatorToken) {
+        return [
+          {
+            id: "a0000000-0000-0000-0000-000000000002",
+            user_id: "FT483921",
+            name: "Alex Rivera",
+            mobile: "+1 555-014-8392",
+            email: "alex@facetube.com",
+            role: "user",
+            referral_code: "CREATOR50",
+            avatar_url: null,
+            channel_logo_url: null,
+            channel_name: "Alex Studio",
+            channel_description: null,
+            created_at: "2026-11-01T00:00:00.000Z",
+          },
+        ];
+      }
+      if (tokenParam === viewerToken) {
+        return [
+          {
+            id: "a0000000-0000-0000-0000-000000000003",
+            user_id: "FT900431",
+            name: "Maya Lin",
+            mobile: "+1 555-019-2831",
+            email: "maya@facetube.com",
+            role: "user",
+            referral_code: "MAYA25",
+            avatar_url: null,
+            channel_logo_url: null,
+            channel_name: "Maya Studio",
+            channel_description: null,
+            created_at: "2026-11-01T00:00:00.000Z",
+          },
+        ];
+      }
+      return [];
+    }
+
+    function seedActiveJsonStream(streamId: string) {
+      const parsed = suiteStoreSnapshot
+        ? JSON.parse(suiteStoreSnapshot)
+        : { users: [], sessions: {}, liveStreams: [] };
+      const existing = Array.isArray(parsed.liveStreams) ? parsed.liveStreams : [];
+      parsed.liveStreams = [
+        ...existing.filter((s: any) => s.id !== streamId),
+        {
+          id: streamId,
+          user_id: "FT483921",
+          title: "Active JSON Store Stream 5JQ",
+          description: "Seeded active stream in local JSON store",
+          category: "Coding",
+          stream_key: "sk_json_5jq",
+          livekit_room_name: `room_${streamId}`,
+          playback_url: "",
+          thumbnail_url: "",
+          status: "live",
+          viewers_count: 3,
+          created_at: new Date().toISOString(),
+        },
+      ];
+      fs.writeFileSync(storePath, JSON.stringify(parsed), "utf-8");
+      resetInMemoryStore();
+    }
+
+    beforeEach(() => {
+      envSnapshot = {};
+      for (const k of envKeys) {
+        envSnapshot[k] = process.env[k];
+      }
+      suiteStoreExisted = fs.existsSync(storePath);
+      suiteStoreSnapshot = suiteStoreExisted ? fs.readFileSync(storePath, "utf-8") : null;
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+    });
+
+    afterEach(() => {
+      setMysqlPoolForTesting(null);
+      for (const k of envKeys) {
+        if (envSnapshot[k] !== undefined) {
+          process.env[k] = envSnapshot[k];
+        } else {
+          delete process.env[k];
+        }
+      }
+      if (suiteStoreExisted && suiteStoreSnapshot !== null) {
+        fs.writeFileSync(storePath, suiteStoreSnapshot, "utf-8");
+      } else if (!suiteStoreExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+      resetInMemoryStore();
+    });
+
+    it("returns HTTP 503 for POST /api/live/token in production when MySQL pool is unavailable", async () => {
+      seedActiveJsonStream("live_json_active_5jq");
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      delete process.env["DB_HOST"];
+      process.env["LIVEKIT_API_KEY"] = "prod-key-503";
+      process.env["LIVEKIT_API_SECRET"] = "prod-secret-503";
+      setMysqlPoolForTesting(null);
+
+      const res = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_json_active_5jq", role: "publisher" }),
+        }),
+      );
+      assert.ok(res);
+      assert.equal(res.status, 503);
+      const data = (await res.json()) as any;
+      assert.equal(data.success, false);
+      assert.equal(data.token, undefined);
+      assert.match(String(data.error || ""), /Database connection unavailable/i);
+    });
+
+    it("returns HTTP 500 for POST /api/live/token in production on MySQL stream lookup failure without falling back to store.liveStreams", async () => {
+      seedActiveJsonStream("live_json_active_5jq");
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      process.env["LIVEKIT_API_KEY"] = "prod-key-500";
+      process.env["LIVEKIT_API_SECRET"] = "prod-secret-500";
+
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[]) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockSessionRows(params[0]), []];
+          }
+          if (sql.includes("FROM live_streams")) {
+            throw new Error("ER_LOCK_WAIT_TIMEOUT: internal live_streams deadlock detail");
+          }
+          return [[], []];
+        },
+      });
+
+      // live_json_active_5jq is active in data/facetube_store.json, but production must NEVER fall back to it
+      const res = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_json_active_5jq", role: "publisher" }),
+        }),
+      );
+      assert.ok(res);
+      assert.equal(res.status, 500);
+      const data = (await res.json()) as any;
+      assert.equal(data.success, false);
+      assert.equal(data.token, undefined);
+      assert.doesNotMatch(String(data.error || ""), /ER_LOCK_WAIT_TIMEOUT|deadlock|SELECT/i);
+    });
+
+    it("never falls back to store.liveStreams when MySQL returns 0 rows in production and preserves 403/400 stream authorization checks", async () => {
+      seedActiveJsonStream("live_json_active_5jq");
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      process.env["LIVEKIT_API_KEY"] = "prod-key-auth";
+      process.env["LIVEKIT_API_SECRET"] = "prod-secret-auth";
+
+      let mode: "missing" | "active" | "ended" = "missing";
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[]) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockSessionRows(params[0]), []];
+          }
+          if (sql.includes("FROM live_streams")) {
+            if (mode === "missing") return [[], []];
+            return [
+              [
+                {
+                  id: "live_prod_auth_01",
+                  user_id: "FT483921",
+                  status: mode === "ended" ? "ended" : "live",
+                  livekit_room_name: "room_prod_auth_01",
+                },
+              ],
+              [],
+            ];
+          }
+          return [[], []];
+        },
+      });
+
+      // 1. Active stream exists in JSON store, missing in MySQL -> must return 404
+      const missingRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_json_active_5jq", role: "publisher" }),
+        }),
+      );
+      assert.equal(missingRes?.status, 404);
+      const missingData = (await missingRes!.json()) as any;
+      assert.equal(missingData.token, undefined);
+
+      // 2. Active stream in MySQL: non-owner requesting publisher -> 403
+      mode = "active";
+      const forbiddenRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${viewerToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_prod_auth_01", role: "publisher" }),
+        }),
+      );
+      assert.equal(forbiddenRes?.status, 403);
+      const forbiddenData = (await forbiddenRes!.json()) as any;
+      assert.equal(forbiddenData.token, undefined);
+
+      // 3. Ended stream in MySQL: owner requesting publisher -> 400
+      mode = "ended";
+      const endedRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_prod_auth_01", role: "publisher" }),
+        }),
+      );
+      assert.equal(endedRes?.status, 400);
+      const endedData = (await endedRes!.json()) as any;
+      assert.equal(endedData.token, undefined);
+    });
+
+    it("fails closed with HTTP 503 for POST /api/live/token in production when LiveKit credentials are missing or blank and never uses devkey/secret", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[]) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockSessionRows(params[0]), []];
+          }
+          if (sql.includes("FROM live_streams")) {
+            return [
+              [
+                {
+                  id: "live_prod_creds_01",
+                  user_id: "FT483921",
+                  status: "live",
+                  livekit_room_name: "room_prod_creds_01",
+                },
+              ],
+              [],
+            ];
+          }
+          return [[], []];
+        },
+      });
+
+      const credentialCases: Array<{
+        label: string;
+        key: string | undefined;
+        secret: string | undefined;
+      }> = [
+        { label: "both unset", key: undefined, secret: undefined },
+        { label: "missing secret", key: "prod-api-key", secret: undefined },
+        { label: "blank secret", key: "prod-api-key", secret: "   " },
+        { label: "missing key", key: undefined, secret: "prod-api-secret" },
+        { label: "blank key", key: "   ", secret: "prod-api-secret" },
+      ];
+
+      for (const tc of credentialCases) {
+        if (tc.key !== undefined) process.env["LIVEKIT_API_KEY"] = tc.key;
+        else delete process.env["LIVEKIT_API_KEY"];
+        if (tc.secret !== undefined) process.env["LIVEKIT_API_SECRET"] = tc.secret;
+        else delete process.env["LIVEKIT_API_SECRET"];
+
+        const res = await handleApiRequest(
+          new Request("http://localhost:3000/api/live/token", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${creatorToken}`,
+            },
+            body: JSON.stringify({ streamId: "live_prod_creds_01", role: "publisher" }),
+          }),
+        );
+        assert.ok(res, `Expected response for case: ${tc.label}`);
+        assert.equal(res.status, 503, `Expected 503 for case: ${tc.label}`);
+        const data = (await res.json()) as any;
+        assert.equal(data.success, false);
+        assert.equal(data.token, undefined);
+        assert.match(String(data.error || ""), /LiveKit streaming service is not configured/i);
+        assert.doesNotMatch(String(data.error || ""), /devkey|prod-api-secret/i);
+      }
+
+      // Unset APP_ENV and NODE_ENV also fail closed (production default) without issuing devkey/secret tokens
+      delete process.env["APP_ENV"];
+      delete process.env["NODE_ENV"];
+      delete process.env["LIVEKIT_API_KEY"];
+      delete process.env["LIVEKIT_API_SECRET"];
+
+      const unsetEnvRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_prod_creds_01", role: "publisher" }),
+        }),
+      );
+      assert.equal(unsetEnvRes?.status, 503);
+      const unsetEnvData = (await unsetEnvRes!.json()) as any;
+      assert.equal(unsetEnvData.token, undefined);
+
+      // Defensive helper check
+      assert.throws(() =>
+        generateLiveKitAccessToken({
+          apiKey: "",
+          apiSecret: "valid-secret",
+          roomName: "room_1",
+          identity: "FT483921",
+          role: "publisher",
+        }),
+      );
+      assert.throws(() =>
+        generateLiveKitAccessToken({
+          apiKey: "valid-key",
+          apiSecret: "   ",
+          roomName: "room_1",
+          identity: "FT483921",
+          role: "publisher",
+        }),
+      );
+    });
+
+    it("issues a valid HS256 token in production signed exclusively with configured credentials and honors runtime handler env without mutating process.env", async () => {
+      process.env["NODE_ENV"] = "development";
+      delete process.env["APP_ENV"];
+      delete process.env["LIVEKIT_URL"];
+      delete process.env["LIVEKIT_API_KEY"];
+      delete process.env["LIVEKIT_API_SECRET"];
+
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[]) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockSessionRows(params[0]), []];
+          }
+          if (sql.includes("FROM live_streams")) {
+            return [
+              [
+                {
+                  id: "live_prod_valid_01",
+                  user_id: "FT483921",
+                  status: "live",
+                  livekit_room_name: "room_prod_valid_01",
+                },
+              ],
+              [],
+            ];
+          }
+          return [[], []];
+        },
+      });
+
+      const runtimeEnv = {
+        APP_ENV: "production",
+        LIVEKIT_URL: "wss://prod-livekit.example.com",
+        LIVEKIT_API_KEY: "prod-lk-key-999",
+        LIVEKIT_API_SECRET: "prod-lk-secret-xyz-999",
+      };
+
+      const pubRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_prod_valid_01", role: "publisher" }),
+        }),
+        runtimeEnv,
+      );
+      assert.ok(pubRes);
+      assert.equal(pubRes.status, 200);
+      const pubData = (await pubRes.json()) as any;
+      assert.equal(pubData.success, true);
+      assert.equal(pubData.url, "wss://prod-livekit.example.com");
+      assert.equal(pubData.room, "room_prod_valid_01");
+      assert.equal(pubData.identity, "FT483921");
+      assert.equal(pubData.role, "publisher");
+      assert.equal(pubData.server_configured, true);
+      assert.equal(typeof pubData.expires_at, "number");
+      assert.ok(pubData.expires_at > Math.floor(Date.now() / 1000));
+
+      // Verify JWT signed with configured secret/key and NOT default "devkey"/"secret"
+      assert.equal(verifyHs256JwtSignature(pubData.token, "prod-lk-secret-xyz-999"), true);
+      assert.equal(verifyHs256JwtSignature(pubData.token, "secret"), false);
+      const pubPayload = JSON.parse(
+        base64UrlDecode(String(pubData.token).split(".")[1]!).toString("utf8"),
+      );
+      assert.equal(pubPayload.iss, "prod-lk-key-999");
+      assert.notEqual(pubPayload.iss, "devkey");
+      assert.equal(pubPayload.video.room, "room_prod_valid_01");
+      assert.equal(pubPayload.video.roomJoin, true);
+      assert.equal(pubPayload.video.canPublish, true);
+
+      // Verify viewer subscriber token succeeds with publish disabled
+      const subRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${viewerToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_prod_valid_01", role: "subscriber" }),
+        }),
+        runtimeEnv,
+      );
+      assert.equal(subRes?.status, 200);
+      const subData = (await subRes!.json()) as any;
+      assert.equal(subData.role, "subscriber");
+      assert.equal(verifyHs256JwtSignature(subData.token, "prod-lk-secret-xyz-999"), true);
+      const subPayload = JSON.parse(
+        base64UrlDecode(String(subData.token).split(".")[1]!).toString("utf8"),
+      );
+      assert.equal(subPayload.video.canPublish, false);
+      assert.equal(subPayload.video.canSubscribe, true);
+
+      // Verify process.env was not mutated by handler env
+      assert.equal(process.env["APP_ENV"], undefined);
+      assert.equal(process.env["LIVEKIT_API_KEY"], undefined);
+      assert.equal(process.env["LIVEKIT_API_SECRET"], undefined);
+      assert.equal(process.env["NODE_ENV"], "development");
+    });
+
+    it("preserves explicit development/test JSON fallback for POST /api/live/token without weakening authorization", async () => {
+      seedActiveJsonStream("live_json_active_5jq");
+      process.env["NODE_ENV"] = "test";
+      delete process.env["APP_ENV"];
+      delete process.env["DB_HOST"];
+      setMysqlPoolForTesting(null);
+
+      const okRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_json_active_5jq", role: "publisher" }),
+        }),
+      );
+      assert.equal(okRes?.status, 200);
+
+      const forbiddenRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${viewerToken}`,
+          },
+          body: JSON.stringify({ streamId: "live_json_active_5jq", role: "publisher" }),
+        }),
+      );
+      assert.equal(forbiddenRes?.status, 403);
+    });
+
+    it("rejects POST /api/live/webhook with HTTP 503 when LIVEKIT_API_SECRET is missing or blank (even if signed with default 'secret') without touching DB or JSON store", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+
+      let queryCount = 0;
+      enableMockDbEnv({
+        query: async () => {
+          queryCount += 1;
+          return [[], []];
+        },
+      });
+
+      const payload = JSON.stringify({
+        id: "EV_5JQ_NO_SECRET",
+        event: "participant_joined",
+        room: { name: `room_${testStreamId}`, numParticipants: 9 },
+      });
+      const forgedWithDefaultSecret = createSignedWebhookJwt(payload, "secret");
+
+      // 1. Production + LIVEKIT_API_SECRET unset
+      delete process.env["LIVEKIT_API_SECRET"];
+      const resUnset = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${forgedWithDefaultSecret}`,
+          },
+          body: payload,
+        }),
+      );
+      assert.equal(resUnset?.status, 503);
+      const dataUnset = (await resUnset!.json()) as any;
+      assert.equal(dataUnset.success, false);
+      assert.match(String(dataUnset.error || ""), /LiveKit webhook service is not configured/i);
+      assert.equal(queryCount, 0);
+
+      // 2. Production + LIVEKIT_API_SECRET whitespace-only
+      process.env["LIVEKIT_API_SECRET"] = "    ";
+      const resBlank = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${forgedWithDefaultSecret}`,
+          },
+          body: payload,
+        }),
+      );
+      assert.equal(resBlank?.status, 503);
+      assert.equal(queryCount, 0);
+
+      // 3. Runtime handler env explicitly overriding LIVEKIT_API_SECRET to empty string
+      process.env["LIVEKIT_API_SECRET"] = "process-secret-should-be-overridden";
+      const resRuntimeBlank = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${forgedWithDefaultSecret}`,
+          },
+          body: payload,
+        }),
+        { APP_ENV: "production", LIVEKIT_API_SECRET: "" },
+      );
+      assert.equal(resRuntimeBlank?.status, 503);
+      assert.equal(queryCount, 0);
+      assert.equal(process.env["LIVEKIT_API_SECRET"], "process-secret-should-be-overridden");
+
+      // 4. Non-production (test) + LIVEKIT_API_SECRET unset must ALSO reject forged "secret" token
+      process.env["NODE_ENV"] = "test";
+      delete process.env["APP_ENV"];
+      delete process.env["LIVEKIT_API_SECRET"];
+      setMysqlPoolForTesting(null);
+
+      const resNonProdUnset = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${forgedWithDefaultSecret}`,
+          },
+          body: payload,
+        }),
+      );
+      assert.equal(resNonProdUnset?.status, 503);
+
+      // Store must have zero recorded events for EV_5JQ_NO_SECRET
+      const persisted = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      assert.equal(Boolean(persisted.livekitWebhookEvents?.["EV_5JQ_NO_SECRET"]), false);
+
+      // Direct helper rejects blank secret
+      const directCheck = verifyLiveKitWebhook(`Bearer ${forgedWithDefaultSecret}`, payload, "  ");
+      assert.equal(directCheck.valid, false);
+    });
+
+    it("rejects POST /api/live/webhook with HTTP 401 on invalid signature, body hash mismatch, or expired JWT before any DB query or store mutation", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      const configuredSecret = "super-strong-prod-webhook-secret-888";
+      process.env["LIVEKIT_API_SECRET"] = configuredSecret;
+
+      let queryCount = 0;
+      enableMockDbEnv({
+        query: async () => {
+          queryCount += 1;
+          return [[], []];
+        },
+      });
+
+      const payload = JSON.stringify({
+        id: "EV_5JQ_INVALID_SIG",
+        event: "room_finished",
+        room: { name: "room_prod_wh_01" },
+      });
+
+      // 1. Signed with wrong/default "secret"
+      const badSigRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${createSignedWebhookJwt(payload, "secret")}`,
+          },
+          body: payload,
+        }),
+      );
+      assert.equal(badSigRes?.status, 401);
+      const badSigData = (await badSigRes!.json()) as any;
+      assert.equal(badSigData.success, false);
+      assert.doesNotMatch(String(badSigData.error || ""), /super-strong-prod-webhook-secret-888/);
+
+      // 2. Tampered body (SHA-256 mismatch)
+      const validJwtForOrig = createSignedWebhookJwt(payload, configuredSecret);
+      const hashMismatchRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${validJwtForOrig}`,
+          },
+          body: `${payload} `,
+        }),
+      );
+      assert.equal(hashMismatchRes?.status, 401);
+
+      // 3. Expired JWT
+      const expiredJwt = createSignedWebhookJwt(payload, configuredSecret, {
+        exp: Math.floor(Date.now() / 1000) - 60,
+      });
+      const expiredRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${expiredJwt}`,
+          },
+          body: payload,
+        }),
+      );
+      assert.equal(expiredRes?.status, 401);
+
+      // Zero DB queries executed across all rejected webhook requests
+      assert.equal(queryCount, 0);
+    });
+
+    it("processes valid POST /api/live/webhook events in production via handler env without mutating process.env and handles unknown streams cleanly", async () => {
+      process.env["NODE_ENV"] = "development";
+      delete process.env["APP_ENV"];
+      delete process.env["LIVEKIT_API_SECRET"];
+
+      const executedQueries: Array<{ sql: string; params: unknown[] }> = [];
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[] = []) => {
+          executedQueries.push({ sql, params });
+          if (sql.includes("SELECT id FROM livekit_webhook_events")) {
+            return [[], []];
+          }
+          if (sql.includes("INSERT INTO livekit_webhook_events")) {
+            return [{ affectedRows: 1 }, []];
+          }
+          if (sql.includes("SELECT * FROM live_streams")) {
+            if (params[0] === "room_prod_wh_01" || params[1] === "prod_wh_01") {
+              return [
+                [
+                  {
+                    id: "prod_wh_01",
+                    user_id: "FT483921",
+                    status: "live",
+                    viewers_count: 2,
+                    livekit_room_name: "room_prod_wh_01",
+                  },
+                ],
+                [],
+              ];
+            }
+            return [[], []];
+          }
+          if (sql.includes("UPDATE live_streams")) {
+            return [{ affectedRows: 1 }, []];
+          }
+          return [[], []];
+        },
+      });
+
+      const runtimeSecret = "runtime-handler-webhook-secret-777";
+      const runtimeEnv = {
+        APP_ENV: "production",
+        LIVEKIT_API_SECRET: runtimeSecret,
+      };
+
+      // 1. Valid participant_joined for known MySQL stream
+      const joinPayload = JSON.stringify({
+        id: "EV_5JQ_VALID_JOIN",
+        event: "participant_joined",
+        room: { name: "room_prod_wh_01", numParticipants: 6 },
+      });
+      const joinRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${createSignedWebhookJwt(joinPayload, runtimeSecret)}`,
+          },
+          body: joinPayload,
+        }),
+        runtimeEnv,
+      );
+      assert.equal(joinRes?.status, 200);
+      const joinData = (await joinRes!.json()) as any;
+      assert.equal(joinData.success, true);
+      assert.equal(joinData.processed, true);
+      assert.equal(joinData.event, "participant_joined");
+      assert.ok(
+        executedQueries.some(
+          (q) => q.sql.includes("UPDATE live_streams SET viewers_count = ?") && q.params[0] === 5,
+        ),
+      );
+
+      // 2. Valid room_finished for unknown/nonexistent stream (even if testStreamId exists in JSON store)
+      const beforeUnknownCount = executedQueries.length;
+      const unknownPayload = JSON.stringify({
+        id: "EV_5JQ_UNKNOWN_STREAM",
+        event: "room_finished",
+        room: { name: `room_${testStreamId}` },
+      });
+      const unknownRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${createSignedWebhookJwt(unknownPayload, runtimeSecret)}`,
+          },
+          body: unknownPayload,
+        }),
+        runtimeEnv,
+      );
+      assert.equal(unknownRes?.status, 200);
+      const unknownData = (await unknownRes!.json()) as any;
+      assert.equal(unknownData.success, true);
+      assert.equal(unknownData.processed, true);
+
+      // Must NOT issue UPDATE live_streams for unknown stream and must NOT mutate JSON store
+      const unknownQueries = executedQueries.slice(beforeUnknownCount);
+      assert.equal(
+        unknownQueries.some((q) => q.sql.includes("UPDATE live_streams")),
+        false,
+      );
+      const persisted = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      assert.equal(Boolean(persisted.livekitWebhookEvents?.["EV_5JQ_VALID_JOIN"]), false);
+      assert.equal(Boolean(persisted.livekitWebhookEvents?.["EV_5JQ_UNKNOWN_STREAM"]), false);
+
+      // process.env must remain untouched
+      assert.equal(process.env["APP_ENV"], undefined);
+      assert.equal(process.env["LIVEKIT_API_SECRET"], undefined);
+      assert.equal(process.env["NODE_ENV"], "development");
+    });
+
+    it("enforces fail-closed 503 through Nitro server entry on localhost when production env is active (Task 5J-O + 5J-Q)", async () => {
+      process.env["NODE_ENV"] = "production";
+      delete process.env["APP_ENV"];
+      delete process.env["DB_HOST"];
+      delete process.env["LIVEKIT_API_KEY"];
+      delete process.env["LIVEKIT_API_SECRET"];
+      setMysqlPoolForTesting(null);
+
+      const tokenRes = await nitroServerEntry.fetch(
+        new Request("http://localhost:3000/api/live/token", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ streamId: testStreamId, role: "publisher" }),
+        }),
+        undefined,
+        undefined,
+      );
+      assert.equal(tokenRes.status, 503);
+
+      const whBody = JSON.stringify({ id: "EV_NITRO_503", event: "participant_joined" });
+      const whRes = await nitroServerEntry.fetch(
+        new Request("http://localhost:3000/api/live/webhook", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${createSignedWebhookJwt(whBody, "secret")}`,
+          },
+          body: whBody,
+        }),
+        undefined,
+        undefined,
+      );
+      assert.equal(whRes.status, 503);
+      assert.equal(process.env["NODE_ENV"], "production");
     });
   });
 });

@@ -2,7 +2,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { handleApiRequest, resetStoreForTests } from "./api-handler.ts";
+import { handleApiRequest, resetInMemoryStore, resetStoreForTests } from "./api-handler.ts";
 import { setMysqlPoolForTesting } from "./mysql.ts";
 import { calculateSquareCrop, calculate9to16Crop } from "../lib/image-effects.ts";
 import { resolveMediaUrl, PRODUCTION_API_DOMAIN } from "../lib/media-url.ts";
@@ -1399,7 +1399,7 @@ describe("FaceTube Task 5B: Channel Logo End-to-End Tests", () => {
         assert.equal(getListData.success, false);
         assert.equal(getListData.users, undefined);
 
-        // Admin-only & auth protections remain intact even with APP_ENV=production and !pool
+        // Unauthenticated request without token still returns 401; Bearer token without MySQL pool fails closed with 503 (no JSON session fallback)
         const unauthListRes = await handleApiRequest(
           new Request("http://localhost:3000/api/users/list", { method: "GET" }),
         );
@@ -1413,7 +1413,7 @@ describe("FaceTube Task 5B: Channel Logo End-to-End Tests", () => {
           }),
         );
         assert.ok(nonAdminListRes);
-        assert.equal(nonAdminListRes.status, 403);
+        assert.equal(nonAdminListRes.status, 503);
 
         // Confirm JSON store was never mutated
         const afterStore = fs.readFileSync(storePath, "utf-8");

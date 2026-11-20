@@ -57,17 +57,14 @@ export default {
       if (url.pathname.startsWith("/api")) {
         const { isRemotePhpApiEnabled, proxyHostingerApiRequest } =
           await import("./server/hostinger-proxy.ts");
-        const useRemote = isRemotePhpApiEnabled(
-          env && typeof env === "object" ? (env as Record<string, string | undefined>) : undefined,
-        );
+        const envRecord =
+          env && typeof env === "object" ? (env as Record<string, string | undefined>) : undefined;
+        const useRemote = isRemotePhpApiEnabled(envRecord);
         if (useRemote) {
           return await proxyHostingerApiRequest(request);
         }
         const { handleApiRequest } = await import("./server/api-handler.ts");
-        const apiResponse = await handleApiRequest(
-          request,
-          env && typeof env === "object" ? (env as Record<string, string | undefined>) : undefined,
-        );
+        const apiResponse = await handleApiRequest(request, envRecord);
         if (apiResponse) return apiResponse;
       }
 

@@ -672,7 +672,7 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
       delete process.env["DB_HOST"];
       setMysqlPoolForTesting(null);
 
-      // Auth & cross-user ownership checks still enforce 401 / 403
+      // Unauthenticated request without Bearer token still returns 401; Bearer token without MySQL pool fails closed with 503 (never falls back to JSON session)
       const unauthDash = await handleApiRequest(
         new Request("http://localhost:3000/api/referrals/dashboard", { method: "GET" }),
       );
@@ -684,7 +684,7 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
           headers: { Authorization: `Bearer ${token}` },
         }),
       );
-      assert.equal(crossTeam?.status, 403);
+      assert.equal(crossTeam?.status, 503);
 
       // Authenticated production requests without pool fail closed with 503
       const dashRes = await handleApiRequest(
@@ -707,22 +707,33 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
     });
 
     it("returns HTTP 500 in production on MySQL errors for referrals/dashboard and referrals/team without falling back to JSON store", async () => {
-      process.env["NODE_ENV"] = "test";
-      const loginRes = await handleApiRequest(
-        new Request("http://localhost:3000/api/auth/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ identifier: "FT483921", password: "password" }),
-        }),
-      );
-      const { token } = (await loginRes!.json()) as any;
-
+      const mysqlProdToken = "tok_mysql_prod_alex_referral_500";
       process.env["APP_ENV"] = "production";
       delete process.env["NODE_ENV"];
 
       enableMockDbEnv({
-        query: async (sql: string) => {
-          if (/FROM\s+sessions/i.test(sql)) return [[], []];
+        query: async (sql: string, params: any[] = []) => {
+          if (/FROM\s+sessions/i.test(sql) && params[0] === mysqlProdToken) {
+            return [
+              [
+                {
+                  id: "a0000000-0000-0000-0000-000000000002",
+                  user_id: "FT483921",
+                  name: "Alex Rivera",
+                  mobile: "+1 555-014-8392",
+                  email: "alex@facetube.com",
+                  role: "user",
+                  referral_code: "CREATOR50",
+                  avatar_url: null,
+                  channel_logo_url: null,
+                  channel_name: "Alex Studio",
+                  channel_description: null,
+                  created_at: "2026-11-01T00:00:00.000Z",
+                },
+              ],
+              [],
+            ];
+          }
           throw new Error("Simulated MySQL referral failure");
         },
       });
@@ -730,7 +741,7 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
       const dashRes = await handleApiRequest(
         new Request("http://localhost:3000/api/referrals/dashboard", {
           method: "GET",
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${mysqlProdToken}` },
         }),
       );
       assert.ok(dashRes);
@@ -742,7 +753,7 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
       const teamRes = await handleApiRequest(
         new Request("http://localhost:3000/api/referrals/team", {
           method: "GET",
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${mysqlProdToken}` },
         }),
       );
       assert.ok(teamRes);
@@ -753,27 +764,41 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
     });
 
     it("does not fall back to JSON store when MySQL returns empty user rows for referrals/dashboard and referrals/team", async () => {
-      process.env["NODE_ENV"] = "test";
-      const loginRes = await handleApiRequest(
-        new Request("http://localhost:3000/api/auth/login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ identifier: "FT102857", password: "password" }),
-        }),
-      );
-      const { token } = (await loginRes!.json()) as any;
-
+      const mysqlAdminToken = "tok_mysql_prod_admin_referral_empty";
       process.env["APP_ENV"] = "production";
       delete process.env["NODE_ENV"];
 
       enableMockDbEnv({
-        query: async () => [[], []],
+        query: async (sql: string, params: any[] = []) => {
+          if (/FROM\s+sessions/i.test(sql) && params[0] === mysqlAdminToken) {
+            return [
+              [
+                {
+                  id: "a0000000-0000-0000-0000-000000000001",
+                  user_id: "FT102857",
+                  name: "FaceTube Administrator",
+                  mobile: "+1 555-000-0000",
+                  email: "admin@facetube.com",
+                  role: "admin",
+                  referral_code: "FTVIP",
+                  avatar_url: null,
+                  channel_logo_url: null,
+                  channel_name: "FaceTube Official",
+                  channel_description: null,
+                  created_at: "2026-11-01T00:00:00.000Z",
+                },
+              ],
+              [],
+            ];
+          }
+          return [[], []];
+        },
       });
 
       const dashRes = await handleApiRequest(
         new Request("http://localhost:3000/api/referrals/dashboard", {
           method: "GET",
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${mysqlAdminToken}` },
         }),
       );
       assert.ok(dashRes);
@@ -787,7 +812,7 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
       const teamRes = await handleApiRequest(
         new Request("http://localhost:3000/api/referrals/team", {
           method: "GET",
-          headers: { Authorization: `Bearer ${token}` },
+          headers: { Authorization: `Bearer ${mysqlAdminToken}` },
         }),
       );
       assert.ok(teamRes);
