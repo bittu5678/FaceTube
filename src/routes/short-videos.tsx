@@ -11,6 +11,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
 import { fetchUploadedVideos, isShortVideo } from "@/lib/video-service";
 
@@ -36,22 +37,27 @@ function ShortVideosPage() {
       .then((videos) => {
         const mapped = videos
           .filter((v) => isShortVideo({ contentType: v.contentType, duration: v.duration }))
-          .map((v): ShortItem => ({
-            id: v.id,
-            title: v.title,
-            creator: v.creatorName || "FaceTube Creator",
-            creatorHandle: `@${(v.creatorName || "creator").toLowerCase().replace(/\s+/g, "")}`,
-            initials: (v.creatorName || "FC").slice(0, 2).toUpperCase(),
-            views: `${(v.views || 0).toLocaleString()} views`,
-            likes: (v.likes || 0).toLocaleString(),
-            comments: "0",
-            shares: "0",
-            soundTrack: `${v.creatorName || "FaceTube"} · Original Audio`,
-            tags: [v.category?.toLowerCase() || "shorts", "facetube"],
-            thumb: v.thumbnailUrl,
-            aspectColor: "from-purple-900/60 to-brand/80",
-            videoUrl: v.videoUrl,
-          }));
+          .map((v): ShortItem => {
+            const channel = v.channelName || v.creatorName || "FaceTube Creator";
+            return {
+              id: v.id,
+              title: v.title,
+              creator: channel,
+              creatorHandle: `@${channel.toLowerCase().replace(/\s+/g, "")}`,
+              initials: (channel.slice(0, 2) || "FC").toUpperCase(),
+              views: `${(v.views || 0).toLocaleString()} views`,
+              likes: (v.likes || 0).toLocaleString(),
+              comments: "0",
+              shares: "0",
+              soundTrack: `${channel} · Original Audio`,
+              tags: [v.category?.toLowerCase() || "shorts", "facetube"],
+              thumb: v.thumbnailUrl,
+              aspectColor: "from-purple-900/60 to-brand/80",
+              videoUrl: v.videoUrl,
+              userId: v.userId,
+              channelLogoUrl: v.channelLogoUrl || (v as any).channel_logo_url,
+            };
+          });
         if (mapped.length > 0) {
           setUploadedShorts(mapped);
         }
@@ -139,26 +145,44 @@ function ShortVideosPage() {
 
         {/* Shorts Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
-          {SHORTS_LIST.map((short) => (
-            <div
-              key={short.id}
-              className="group relative flex flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-card transition-all duration-200 hover:-translate-y-1 hover:border-brand/40"
-            >
-              <div className="relative aspect-[9/16] w-full overflow-hidden bg-secondary">
-                <img
-                  src={short.thumb}
-                  alt={short.title}
-                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                  referrerPolicy="no-referrer"
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20" />
-                <div className="absolute bottom-2 left-2 right-2 space-y-1 text-white">
-                  <p className="line-clamp-2 text-xs font-bold leading-tight">{short.title}</p>
-                  <p className="text-[10px] text-white/80 font-medium">{short.views}</p>
+          {allShorts.map((short) => {
+            const creatorName =
+              (short as any).channelName || (short as any).channel_name || short.creator;
+            return (
+              <div
+                key={short.id}
+                data-creator-id={short.userId}
+                className="group relative flex flex-col overflow-hidden rounded-2xl border border-border bg-card shadow-card transition-all duration-200 hover:-translate-y-1 hover:border-brand/40"
+              >
+                <div className="relative aspect-[9/16] w-full overflow-hidden bg-secondary">
+                  <img
+                    src={short.thumb}
+                    alt={short.title}
+                    className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                    referrerPolicy="no-referrer"
+                  />
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/20" />
+                  <div className="absolute bottom-2 left-2 right-2 space-y-1 text-white">
+                    <div className="flex items-center gap-1.5">
+                      <ChannelAvatar
+                        src={short.channelLogoUrl || (short as any).channel_logo_url}
+                        name={creatorName}
+                        initials={short.initials}
+                        sizeClassName="h-5 w-5"
+                        imageRingClassName="ring-1 ring-white/50"
+                        fallbackClassName="bg-brand text-white text-[9px] font-bold ring-1 ring-white/50"
+                      />
+                      <span className="truncate text-[10px] font-semibold text-white/95">
+                        {creatorName}
+                      </span>
+                    </div>
+                    <p className="line-clamp-2 text-xs font-bold leading-tight">{short.title}</p>
+                    <p className="text-[10px] text-white/80 font-medium">{short.views}</p>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </VideoHubLayout>

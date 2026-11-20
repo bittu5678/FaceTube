@@ -12,6 +12,7 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { fetchUploadedImages, type UploadedImage } from "@/lib/image-service";
 import { SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
@@ -119,47 +120,65 @@ export function ImagesUploadedPage() {
 
         {/* Gallery Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-          {images.map((img, idx) => (
-            <div
-              key={`${img.id}-${idx}`}
-              className="group overflow-hidden rounded-2xl border border-border bg-card shadow-card transition duration-200 hover:-translate-y-1 hover:shadow-lift flex flex-col justify-between"
-            >
-              <div className="relative aspect-[9/16] w-full overflow-hidden bg-secondary">
-                <img
-                  src={img.imageUrl}
-                  alt={img.title}
-                  onError={(e) => {
-                    const target = e.currentTarget;
-                    if (target.src !== SVG_FALLBACK_THUMBNAIL) {
-                      target.src = SVG_FALLBACK_THUMBNAIL;
-                    }
-                  }}
-                  className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                  referrerPolicy="no-referrer"
-                />
-                <span className="absolute bottom-1.5 right-1.5 rounded bg-black/80 px-1.5 py-0.5 text-[9px] font-mono text-white">
-                  {img.fileSize}
-                </span>
-                <span className="absolute top-1.5 left-1.5 rounded bg-teal-600/90 px-1.5 py-0.5 text-[9px] font-bold text-white uppercase">
-                  {img.format}
-                </span>
-              </div>
-              <div className="p-3.5 space-y-1">
-                <h4 className="truncate text-xs font-bold text-foreground leading-snug group-hover:text-teal-400 transition-colors">
-                  {img.title}
-                </h4>
-                {img.description && (
-                  <p className="text-[11px] text-muted-foreground line-clamp-1">
-                    {img.description}
-                  </p>
-                )}
-                <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1 border-t border-border/50">
-                  <span className="font-semibold text-teal-400">{img.category || "Community"}</span>
-                  <span>{new Date(img.createdAt).toLocaleDateString()}</span>
+          {images.map((img, idx) => {
+            const displayChannelName = img.channelName || img.creatorName || "FaceTube Creator";
+
+            return (
+              <div
+                key={`${img.id}-${idx}`}
+                className="group overflow-hidden rounded-2xl border border-border bg-card shadow-card transition duration-200 hover:-translate-y-1 hover:shadow-lift flex flex-col justify-between"
+              >
+                <div className="relative aspect-[9/16] w-full overflow-hidden bg-secondary">
+                  <img
+                    src={img.imageUrl}
+                    alt={img.title}
+                    onError={(e) => {
+                      const target = e.currentTarget;
+                      if (target.src !== SVG_FALLBACK_THUMBNAIL) {
+                        target.src = SVG_FALLBACK_THUMBNAIL;
+                      }
+                    }}
+                    className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                    referrerPolicy="no-referrer"
+                  />
+                  <span className="absolute bottom-1.5 right-1.5 rounded bg-black/80 px-1.5 py-0.5 text-[9px] font-mono text-white">
+                    {img.fileSize}
+                  </span>
+                  <span className="absolute top-1.5 left-1.5 rounded bg-teal-600/90 px-1.5 py-0.5 text-[9px] font-bold text-white uppercase">
+                    {img.format}
+                  </span>
+                </div>
+                <div className="p-3.5 space-y-1.5">
+                  <h4 className="truncate text-xs font-bold text-foreground leading-snug group-hover:text-teal-400 transition-colors">
+                    {img.title}
+                  </h4>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <ChannelAvatar
+                      src={img.channelLogoUrl}
+                      name={displayChannelName}
+                      sizeClassName="h-6 w-6"
+                      imageRingClassName="ring-1 ring-border shadow-xs"
+                      fallbackClassName="bg-gradient-to-br from-teal-500 to-emerald-600 text-[10px] font-bold text-white shadow-xs"
+                    />
+                    <span className="truncate text-[11px] font-medium text-muted-foreground">
+                      {displayChannelName}
+                    </span>
+                  </div>
+                  {img.description && (
+                    <p className="text-[11px] text-muted-foreground line-clamp-1">
+                      {img.description}
+                    </p>
+                  )}
+                  <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1 border-t border-border/50">
+                    <span className="font-semibold text-teal-400">
+                      {img.category || "Community"}
+                    </span>
+                    <span>{new Date(img.createdAt).toLocaleDateString()}</span>
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </VideoHubLayout>

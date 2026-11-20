@@ -23,6 +23,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { DashboardSummaryCards } from "@/components/videohub/DashboardSummaryCards";
 import {
@@ -50,7 +51,23 @@ export const Route = createFileRoute("/your-videos")({
 function YourVideosPage() {
   const { user, profile, dbUser } = useAuth();
   const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
-  const channelName = profile?.name || dbUser?.name || "Creator";
+  const metadataChannelName =
+    typeof user?.user_metadata?.["channel_name"] === "string"
+      ? user.user_metadata["channel_name"].trim()
+      : "";
+  const metadataChannelLogo =
+    typeof user?.user_metadata?.["channel_logo_url"] === "string"
+      ? user.user_metadata["channel_logo_url"]
+      : undefined;
+  const channelName =
+    profile?.channel_name ||
+    dbUser?.channel_name ||
+    metadataChannelName ||
+    profile?.name ||
+    dbUser?.name ||
+    "Creator";
+  const channelLogoUrl =
+    profile?.channel_logo_url || dbUser?.channel_logo_url || metadataChannelLogo;
 
   const [videos, setVideos] = useState<UploadedVideo[]>([]);
   const [videoFilter, setVideoFilter] = useState<
@@ -91,9 +108,13 @@ function YourVideosPage() {
         {/* Header & Quick Create */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-4">
           <div className="flex items-center gap-3">
-            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-brand/10 text-brand">
-              <Video className="h-6 w-6" />
-            </div>
+            <ChannelAvatar
+              src={channelLogoUrl}
+              name={channelName}
+              sizeClassName="h-12 w-12"
+              imageRingClassName="ring-2 ring-brand/30 shadow-sm"
+              fallbackClassName="bg-brand/15 text-brand font-bold text-sm ring-1 ring-brand/30"
+            />
             <div>
               <h1 className="text-2xl font-extrabold tracking-tight text-foreground sm:text-3xl">
                 Your Videos

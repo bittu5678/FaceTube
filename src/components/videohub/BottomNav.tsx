@@ -3,12 +3,13 @@ import { Home, Radio, Plus, User } from "lucide-react";
 import { useState } from "react";
 import { ShortsIcon } from "./ShortsIcon";
 import { UploadOptionsModal } from "./UploadOptionsModal";
+import { ChannelAvatar } from "./ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 
 export function BottomNav() {
   const routerState = useRouterState();
   const currentPath = routerState.location.pathname;
-  const { user, profile } = useAuth();
+  const { user, profile, dbUser } = useAuth();
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
 
   const isHomeActive = currentPath === "/";
@@ -111,15 +112,36 @@ export function BottomNav() {
             >
               <div className="relative">
                 {user ? (
-                  <div
-                    className={`grid h-5 w-5 place-items-center rounded-full text-[10px] font-bold text-white transition ${
-                      isYouActive
-                        ? "ring-2 ring-brand bg-gradient-to-br from-brand to-brand-dark"
-                        : "bg-gradient-to-br from-brand to-brand-dark"
+                  <ChannelAvatar
+                    src={
+                      profile?.channel_logo_url || dbUser?.channel_logo_url || profile?.avatar_url
+                    }
+                    name={
+                      profile?.channel_name ||
+                      dbUser?.channel_name ||
+                      profile?.full_name ||
+                      profile?.username ||
+                      user.email ||
+                      "FaceTube User"
+                    }
+                    initials={
+                      (
+                        profile?.channel_name ||
+                        dbUser?.channel_name ||
+                        profile?.username ||
+                        user.email ||
+                        "U"
+                      )
+                        .trim()
+                        .charAt(0)
+                        .toUpperCase() || "U"
+                    }
+                    sizeClassName="h-5 w-5"
+                    imageRingClassName={isYouActive ? "ring-2 ring-brand transition" : ""}
+                    fallbackClassName={`text-[10px] font-bold text-white transition bg-gradient-to-br from-brand to-brand-dark ${
+                      isYouActive ? "ring-2 ring-brand" : ""
                     }`}
-                  >
-                    {(profile?.username || user.email || "U").charAt(0).toUpperCase()}
-                  </div>
+                  />
                 ) : (
                   <User className={`h-5 w-5 ${isYouActive ? "stroke-[2.4]" : "stroke-[1.8]"}`} />
                 )}

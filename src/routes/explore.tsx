@@ -12,6 +12,7 @@ import {
   GraduationCap,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { VideoCard } from "@/components/videohub/VideoCard";
 import { AdMobBanner } from "@/components/admob/AdMobBanner";
 import { trending, recommended, creators, allVideos } from "@/data/videos";
@@ -155,21 +156,39 @@ function ExplorePage() {
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            {creators.map((c) => (
-              <div
-                key={c.name}
-                className="flex flex-col items-center justify-center p-3 rounded-2xl border border-border bg-background text-center transition hover:border-brand/40"
-              >
-                <div className="grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-brand to-brand-dark text-sm font-bold text-white shadow-sm mb-2">
-                  {c.initials}
+            {creators.map((c) => {
+              const creatorMeta = c as typeof c & {
+                channelLogoUrl?: string | undefined;
+                channel_logo_url?: string | undefined;
+                channelName?: string | undefined;
+                channel_name?: string | undefined;
+              };
+              const creatorName = creatorMeta.channelName || creatorMeta.channel_name || c.name;
+              return (
+                <div
+                  key={c.name}
+                  className="flex flex-col items-center justify-center p-3 rounded-2xl border border-border bg-background text-center transition hover:border-brand/40"
+                >
+                  <div className="mb-2">
+                    <ChannelAvatar
+                      src={creatorMeta.channelLogoUrl || creatorMeta.channel_logo_url}
+                      name={creatorName}
+                      initials={c.initials}
+                      sizeClassName="h-12 w-12"
+                      imageRingClassName="ring-1 ring-border shadow-sm"
+                      fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-sm font-bold text-white shadow-sm"
+                    />
+                  </div>
+                  <p className="text-xs font-bold text-foreground truncate w-full">{creatorName}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5 truncate w-full">
+                    {c.subs}
+                  </p>
+                  <span className="mt-2 rounded-full bg-secondary px-2 py-0.5 text-[9px] font-semibold text-muted-foreground">
+                    {c.tag}
+                  </span>
                 </div>
-                <p className="text-xs font-bold text-foreground truncate w-full">{c.name}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5 truncate w-full">{c.subs}</p>
-                <span className="mt-2 rounded-full bg-secondary px-2 py-0.5 text-[9px] font-semibold text-muted-foreground">
-                  {c.tag}
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
 

@@ -71,12 +71,27 @@ if (!function_exists('calculateDownlineLevels')) {
         }
         $rootSponsorCodes = array_values(array_unique($rootSponsorCodes));
 
+        $formatBranding = function ($row) {
+            $rawLogo = isset($row['channel_logo_url']) ? trim((string)$row['channel_logo_url']) : '';
+            if ($rawLogo === '' || strtolower($rawLogo) === 'null' || strtolower($rawLogo) === 'undefined') {
+                $channelLogoUrl = null;
+            } else {
+                $resolved = function_exists('toAbsoluteMediaUrl') ? toAbsoluteMediaUrl($rawLogo, 'logos') : $rawLogo;
+                $channelLogoUrl = ($resolved !== '' && strtolower($resolved) !== 'null' && strtolower($resolved) !== 'undefined')
+                    ? $resolved
+                    : null;
+            }
+            $rawChannelName = isset($row['channel_name']) ? trim((string)$row['channel_name']) : '';
+            $channelName = $rawChannelName !== '' ? $rawChannelName : ($row['name'] ?? 'FaceTube Creator');
+            return [$channelName, $channelLogoUrl];
+        };
+
         // -------------------------------------------------------------
         // Level 1: Direct referrals of root user
         // -------------------------------------------------------------
         $l1Placeholders = implode(',', array_fill(0, count($rootSponsorCodes), '?'));
         $stmtLevel1 = $pdo->prepare("
-            SELECT id, user_id, name, email, mobile, created_at, role, referral_code
+            SELECT id, user_id, name, email, mobile, created_at, role, referral_code, channel_logo_url, channel_name
             FROM users
             WHERE UPPER(referral_code) IN ($l1Placeholders)
               AND UPPER(user_id) != ?
@@ -92,11 +107,16 @@ if (!function_exists('calculateDownlineLevels')) {
                 continue;
             }
             $visitedUserIds[$uId] = true;
+            list($channelName, $channelLogoUrl) = $formatBranding($row);
 
             $memberData = [
                 'id' => $row['id'] ?? ('mem_' . $uId),
                 'userId' => $row['user_id'],
                 'name' => $row['name'],
+                'channelName' => $channelName,
+                'channel_name' => $channelName,
+                'channelLogoUrl' => $channelLogoUrl,
+                'channel_logo_url' => $channelLogoUrl,
                 'email' => $row['email'],
                 'mobile' => $row['mobile'],
                 'joinedAt' => $row['created_at'],
@@ -167,7 +187,7 @@ if (!function_exists('calculateDownlineLevels')) {
             foreach ($chunks as $chunk) {
                 $inPlaceholders = implode(',', array_fill(0, count($chunk), '?'));
                 $stmt = $pdo->prepare("
-                    SELECT id, user_id, name, email, mobile, created_at, role, referral_code
+                    SELECT id, user_id, name, email, mobile, created_at, role, referral_code, channel_logo_url, channel_name
                     FROM users
                     WHERE UPPER(referral_code) IN ($inPlaceholders)
                     ORDER BY created_at DESC
@@ -187,11 +207,16 @@ if (!function_exists('calculateDownlineLevels')) {
                     $sponsorInfo = $parentCodeToSponsor[$refCodeUpper] ?? null;
                     $sponsorName = $sponsorInfo ? ($sponsorInfo['name'] . ' (' . $sponsorInfo['userId'] . ')') : 'Downline Sponsor';
                     $sponsorUserId = $sponsorInfo ? $sponsorInfo['userId'] : '';
+                    list($channelName, $channelLogoUrl) = $formatBranding($row);
 
                     $memberData = [
                         'id' => $row['id'] ?? ('mem_' . $uId),
                         'userId' => $row['user_id'],
                         'name' => $row['name'],
+                        'channelName' => $channelName,
+                        'channel_name' => $channelName,
+                        'channelLogoUrl' => $channelLogoUrl,
+                        'channel_logo_url' => $channelLogoUrl,
                         'email' => $row['email'],
                         'mobile' => $row['mobile'],
                         'joinedAt' => $row['created_at'],
@@ -225,10 +250,20 @@ if (!function_exists('calculateDownlineLevels')) {
         $sanitizedMembers = [];
         foreach ($allMembers as $m) {
             $mNorm = strtoupper(trim((string)$m['userId']));
+            $rawChannelName = isset($m['channelName']) ? trim((string)$m['channelName']) : '';
+            $channelName = $rawChannelName !== '' ? $rawChannelName : ($m['name'] ?? 'FaceTube Creator');
+            $rawLogo = isset($m['channelLogoUrl']) ? trim((string)$m['channelLogoUrl']) : '';
+            $channelLogoUrl = ($rawLogo !== '' && strtolower($rawLogo) !== 'null' && strtolower($rawLogo) !== 'undefined')
+                ? $rawLogo
+                : null;
             $sanitizedMembers[] = [
                 'id' => $m['id'],
                 'userId' => $m['userId'],
                 'name' => $m['name'],
+                'channelName' => $channelName,
+                'channel_name' => $channelName,
+                'channelLogoUrl' => $channelLogoUrl,
+                'channel_logo_url' => $channelLogoUrl,
                 'level' => $m['level'],
                 'sponsor' => $m['sponsor'],
                 'sponsorUserId' => $m['sponsorUserId'],

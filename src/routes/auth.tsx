@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Logo } from "@/components/videohub/Logo";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { ThemeToggle } from "@/components/videohub/ThemeToggle";
 import { FacetubeLogoIcon } from "@/components/videohub/FacetubeLogoIcon";
 import { useAuth } from "@/lib/auth-context";
@@ -85,7 +86,7 @@ function Field({
 function AuthPage() {
   const navigate = useNavigate();
   const searchParams = Route.useSearch();
-  const { user, profile, role, isAdmin, signIn, signUp, signOut } = useAuth();
+  const { user, profile, dbUser, role, isAdmin, signIn, signUp, signOut } = useAuth();
 
   // Backward compatibility: If redirected with mode=reset and token, navigate to /reset-password
   useEffect(() => {
@@ -429,17 +430,33 @@ function AuthPage() {
           {user ? (
             <div className="rounded-2xl border border-border bg-secondary/40 p-6 shadow-sm">
               <div className="flex items-center gap-3">
-                <span className="grid h-12 w-12 place-items-center rounded-full bg-brand text-base font-bold text-brand-foreground shadow-sm">
-                  {profile?.name
-                    ? profile.name.substring(0, 2).toUpperCase()
-                    : profile?.user_id
-                      ? profile.user_id.substring(0, 2)
-                      : "FT"}
-                </span>
+                <ChannelAvatar
+                  src={profile?.channel_logo_url || dbUser?.channel_logo_url || profile?.avatar_url}
+                  name={
+                    profile?.channel_name ||
+                    dbUser?.channel_name ||
+                    profile?.name ||
+                    user.email?.split("@")[0] ||
+                    "FaceTube User"
+                  }
+                  initials={
+                    profile?.name
+                      ? profile.name.substring(0, 2).toUpperCase()
+                      : profile?.user_id
+                        ? profile.user_id.substring(0, 2).toUpperCase()
+                        : "FT"
+                  }
+                  sizeClassName="h-12 w-12"
+                  imageRingClassName="shadow-sm"
+                  fallbackClassName="bg-brand text-base font-bold text-brand-foreground shadow-sm"
+                />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <h2 className="text-lg font-bold truncate">
-                      {profile?.name || user.email?.split("@")[0]}
+                      {profile?.channel_name ||
+                        dbUser?.channel_name ||
+                        profile?.name ||
+                        user.email?.split("@")[0]}
                     </h2>
                     <span
                       className={`rounded-md px-2 py-0.5 text-xs font-semibold uppercase tracking-wider ${

@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
 import { Radio, Plus, Play, Calendar, Users, MessageSquare, DollarSign, Tv } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { LiveKitBroadcasterStudio } from "@/components/live/LiveKitBroadcasterStudio";
@@ -51,19 +52,44 @@ function LiveVideosPage() {
           .filter(
             (s: any) => s && s.id !== undefined && s.id !== null && !isMockStreamId(String(s.id)),
           )
-          .map((s: any) => ({
-            id: String(s.id),
-            userId: s.user_id,
-            title: s.title,
-            status: s.status === "live" ? "Live Now" : "Upcoming",
-            scheduledFor: s.status === "live" ? "Broadcasting live" : "Scheduled",
-            duration: "Live",
-            views: `${s.viewers_count || 1} viewers`,
-            superchats: "₹655.00",
-            thumbnail:
-              s.thumbnail_url ||
-              "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=600",
-          }));
+          .map((s: any) => {
+            const channelName =
+              s.channel_name ||
+              s.channelName ||
+              s.streamer_name ||
+              s.creator_name ||
+              s.streamer ||
+              "FaceTube Creator";
+            const channelLogoUrl =
+              s.channel_logo_url || s.channelLogoUrl || s.avatar_url || undefined;
+            const initials =
+              channelName
+                .trim()
+                .split(/\s+/)
+                .map((part: string) => part[0])
+                .join("")
+                .slice(0, 2)
+                .toUpperCase() || "FT";
+
+            return {
+              id: String(s.id),
+              userId: s.user_id,
+              title: s.title,
+              channelName,
+              channel_name: channelName,
+              channelLogoUrl,
+              channel_logo_url: channelLogoUrl,
+              initials,
+              status: s.status === "live" ? "Live Now" : "Upcoming",
+              scheduledFor: s.status === "live" ? "Broadcasting live" : "Scheduled",
+              duration: "Live",
+              views: `${s.viewers_count || 1} viewers`,
+              superchats: "₹655.00",
+              thumbnail:
+                s.thumbnail_url ||
+                "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=600",
+            };
+          });
         setStreamList(mapped);
       })
       .catch(() => {
@@ -168,9 +194,24 @@ function LiveVideosPage() {
                 </div>
 
                 <div className="p-4 space-y-2">
-                  <h3 className="line-clamp-2 text-xs font-bold text-foreground leading-snug group-hover:text-brand transition-colors">
-                    {stream.title}
-                  </h3>
+                  <div className="flex items-start gap-2.5">
+                    <ChannelAvatar
+                      src={stream.channelLogoUrl || stream.channel_logo_url}
+                      name={stream.channelName || stream.channel_name || "FaceTube Creator"}
+                      initials={stream.initials}
+                      sizeClassName="h-8 w-8"
+                      imageRingClassName="ring-1 ring-border"
+                      fallbackClassName="bg-brand text-white font-bold text-xs"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <h3 className="line-clamp-2 text-xs font-bold text-foreground leading-snug group-hover:text-brand transition-colors">
+                        {stream.title}
+                      </h3>
+                      <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                        {stream.channelName || stream.channel_name}
+                      </p>
+                    </div>
+                  </div>
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-2 border-t border-border/60">
                     <span>{stream.scheduledFor}</span>
                     {stream.superchats && (

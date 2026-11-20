@@ -1389,6 +1389,10 @@ export interface DownlineMemberItem {
   id: string;
   userId: string;
   name: string;
+  channelName?: string | null;
+  channel_name?: string | null;
+  channelLogoUrl?: string | null;
+  channel_logo_url?: string | null;
   email?: string;
   mobile?: string;
   joinedAt: string;
@@ -1428,6 +1432,8 @@ export function calculateDownlineLevelsTs(
     mobile?: string;
     role?: string;
     referral_code?: string | null;
+    channel_logo_url?: string | null;
+    channel_name?: string | null;
     created_at?: string;
   }> = [];
   let maxLevels = 10;
@@ -1482,15 +1488,35 @@ export function calculateDownlineLevelsTs(
     return Boolean(ref && rootSponsorCodes.has(ref));
   });
 
+  const formatMemberBranding = (u: {
+    name: string;
+    channel_logo_url?: string | null;
+    channel_name?: string | null;
+  }) => {
+    const rawChannelName = typeof u.channel_name === "string" ? u.channel_name.trim() : "";
+    const channelName = rawChannelName || u.name || "FaceTube Creator";
+    const rawLogo = typeof u.channel_logo_url === "string" ? u.channel_logo_url.trim() : "";
+    const channelLogoUrl =
+      !rawLogo || rawLogo.toLowerCase() === "null" || rawLogo.toLowerCase() === "undefined"
+        ? null
+        : rawLogo;
+    return { channelName, channelLogoUrl };
+  };
+
   for (const u of l1Users) {
     const uId = u.user_id.trim().toUpperCase();
     if (visited.has(uId)) continue;
     visited.add(uId);
+    const { channelName, channelLogoUrl } = formatMemberBranding(u);
 
     const item: DownlineMemberItem = {
       id: u.id || `mem_${u.user_id}`,
       userId: u.user_id,
       name: u.name,
+      channelName,
+      channel_name: channelName,
+      channelLogoUrl,
+      channel_logo_url: channelLogoUrl,
       email: u.email || "",
       mobile: u.mobile || "",
       joinedAt: u.created_at || new Date().toISOString(),
@@ -1542,11 +1568,16 @@ export function calculateDownlineLevelsTs(
         ? `${sponsorInfo.name} (${sponsorInfo.userId})`
         : "Downline Sponsor";
       const sponsorUserId = sponsorInfo ? sponsorInfo.userId : "";
+      const { channelName, channelLogoUrl } = formatMemberBranding(u);
 
       const item: DownlineMemberItem = {
         id: u.id || `mem_${u.user_id}`,
         userId: u.user_id,
         name: u.name,
+        channelName,
+        channel_name: channelName,
+        channelLogoUrl,
+        channel_logo_url: channelLogoUrl,
         email: u.email || "",
         mobile: u.mobile || "",
         joinedAt: u.created_at || new Date().toISOString(),
@@ -1575,10 +1606,21 @@ export function calculateDownlineLevelsTs(
 
   const sanitizedMembers: DownlineMemberItem[] = allMembers.map((m) => {
     const mNorm = m.userId.trim().toUpperCase();
+    const rawChannelName = typeof m.channelName === "string" ? m.channelName.trim() : "";
+    const channelName = rawChannelName || m.name || "FaceTube Creator";
+    const rawLogo = typeof m.channelLogoUrl === "string" ? m.channelLogoUrl.trim() : "";
+    const channelLogoUrl =
+      !rawLogo || rawLogo.toLowerCase() === "null" || rawLogo.toLowerCase() === "undefined"
+        ? null
+        : rawLogo;
     return {
       id: m.id,
       userId: m.userId,
       name: m.name,
+      channelName,
+      channel_name: channelName,
+      channelLogoUrl,
+      channel_logo_url: channelLogoUrl,
       level: m.level,
       sponsor: m.sponsor,
       sponsorUserId: m.sponsorUserId,
@@ -5456,35 +5498,68 @@ export async function handleApiRequest(
   if (route === "images/list") {
     if (method === "GET") {
       const userId = url.searchParams.get("userId");
+      const normalizeLogo = (rawLogo: unknown): string | null => {
+        if (typeof rawLogo !== "string") return null;
+        const cleaned = rawLogo.trim();
+        if (!cleaned || cleaned.toLowerCase() === "null" || cleaned.toLowerCase() === "undefined") {
+          return null;
+        }
+        return cleaned;
+      };
+
       const pool = getMysqlPool();
       if (pool) {
         try {
           const sql = userId
-            ? "SELECT * FROM uploaded_images WHERE UPPER(user_id) = UPPER(?) ORDER BY created_at DESC"
-            : "SELECT * FROM uploaded_images ORDER BY created_at DESC";
+            ? `SELECT i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.format, i.file_size, i.category, i.views, i.likes, i.created_at,
+                      u.channel_logo_url AS creator_channel_logo_url,
+                      u.channel_name AS creator_channel_name
+               FROM uploaded_images i
+               LEFT JOIN users u ON UPPER(u.user_id) = UPPER(i.user_id)
+               WHERE UPPER(i.user_id) = UPPER(?)
+               ORDER BY i.created_at DESC`
+            : `SELECT i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.format, i.file_size, i.category, i.views, i.likes, i.created_at,
+                      u.channel_logo_url AS creator_channel_logo_url,
+                      u.channel_name AS creator_channel_name
+               FROM uploaded_images i
+               LEFT JOIN users u ON UPPER(u.user_id) = UPPER(i.user_id)
+               ORDER BY i.created_at DESC`;
           const [rows] = (await pool.query(sql, userId ? [userId.trim()] : [])) as any;
           if (Array.isArray(rows) && rows.length > 0) {
-            const mapped = rows.map((r: any) => ({
-              id: String(r.id),
-              userId: r.user_id,
-              user_id: r.user_id,
-              creatorName: r.creator_name,
-              creator_name: r.creator_name,
-              title: r.title,
-              description: r.description || "",
-              imageUrl: r.image_url,
-              image_url: r.image_url,
-              thumbnailUrl: r.thumbnail_url || r.image_url,
-              thumbnail_url: r.thumbnail_url || r.image_url,
-              format: r.format || "jpg",
-              fileSize: r.file_size || "1.0 MB",
-              file_size: r.file_size || "1.0 MB",
-              category: r.category || "General",
-              views: Number(r.views) || 0,
-              likes: Number(r.likes) || 0,
-              createdAt: r.created_at,
-              created_at: r.created_at,
-            }));
+            const mapped = rows.map((r: any) => {
+              const rawChannelName =
+                typeof r.creator_channel_name === "string" ? r.creator_channel_name.trim() : "";
+              const rawCreatorName =
+                typeof r.creator_name === "string" ? r.creator_name.trim() : "";
+              const channelName = rawChannelName || rawCreatorName || "FaceTube Creator";
+              const creatorName = rawCreatorName || channelName;
+              const channelLogoUrl = normalizeLogo(r.creator_channel_logo_url);
+              return {
+                id: String(r.id),
+                userId: r.user_id,
+                user_id: r.user_id,
+                creatorName,
+                creator_name: creatorName,
+                channelName,
+                channel_name: channelName,
+                channelLogoUrl,
+                channel_logo_url: channelLogoUrl,
+                title: r.title,
+                description: r.description || "",
+                imageUrl: r.image_url,
+                image_url: r.image_url,
+                thumbnailUrl: r.thumbnail_url || r.image_url,
+                thumbnail_url: r.thumbnail_url || r.image_url,
+                format: r.format || "jpg",
+                fileSize: r.file_size || "1.0 MB",
+                file_size: r.file_size || "1.0 MB",
+                category: r.category || "General",
+                views: Number(r.views) || 0,
+                likes: Number(r.likes) || 0,
+                createdAt: r.created_at,
+                created_at: r.created_at,
+              };
+            });
             return jsonResponse({ success: true, images: mapped, total: mapped.length });
           }
         } catch (_dbErr) {
@@ -5497,15 +5572,31 @@ export async function handleApiRequest(
         : store.images;
       return jsonResponse({
         success: true,
-        images: imgs.map((i) => ({
-          ...i,
-          userId: i.user_id,
-          creatorName: i.creator_name,
-          imageUrl: i.image_url,
-          thumbnailUrl: i.thumbnail_url || i.image_url,
-          fileSize: i.file_size || "1.0 MB",
-          createdAt: i.created_at,
-        })),
+        images: imgs.map((i) => {
+          const owner = store.users.find(
+            (u) => (u.user_id || "").toUpperCase() === (i.user_id || "").toUpperCase(),
+          );
+          const rawChannelName =
+            typeof owner?.channel_name === "string" ? owner.channel_name.trim() : "";
+          const rawCreatorName = typeof i.creator_name === "string" ? i.creator_name.trim() : "";
+          const channelName = rawChannelName || rawCreatorName || "FaceTube Creator";
+          const creatorName = rawCreatorName || channelName;
+          const channelLogoUrl = normalizeLogo(owner?.channel_logo_url);
+          return {
+            ...i,
+            userId: i.user_id,
+            creatorName,
+            creator_name: creatorName,
+            channelName,
+            channel_name: channelName,
+            channelLogoUrl,
+            channel_logo_url: channelLogoUrl,
+            imageUrl: i.image_url,
+            thumbnailUrl: i.thumbnail_url || i.image_url,
+            fileSize: i.file_size || "1.0 MB",
+            createdAt: i.created_at,
+          };
+        }),
         total: imgs.length,
       });
     }
@@ -6426,7 +6517,7 @@ export async function handleApiRequest(
 
             // Fetch all users to compute cycle-safe 10-level downline
             const [allDbUsers] = await pool.query<any[]>(
-              `SELECT id, user_id, name, email, mobile, created_at, role, referral_code FROM users`,
+              `SELECT id, user_id, name, email, mobile, created_at, role, referral_code, channel_logo_url, channel_name FROM users`,
             );
             const downline = calculateDownlineLevelsTs(userId, allDbUsers || [], 10);
 
@@ -6459,10 +6550,16 @@ export async function handleApiRequest(
                   }
                 }
                 const comm = premCount * 1.0;
+                const channelName = r.channelName || r.name || "FaceTube Creator";
+                const channelLogoUrl = r.channelLogoUrl ?? null;
                 return {
                   id: r.id,
                   userId: r.userId,
                   name: r.name,
+                  channelName,
+                  channel_name: channelName,
+                  channelLogoUrl,
+                  channel_logo_url: channelLogoUrl,
                   email: r.email || "",
                   mobile: r.mobile || "",
                   joinedAt: r.joinedAt,
@@ -6521,10 +6618,16 @@ export async function handleApiRequest(
             (v.payment_status === "paid" || v.payment_status === "not_required"),
         ).length;
         const comm = premCount * 1.0;
+        const channelName = r.channelName || r.name || "FaceTube Creator";
+        const channelLogoUrl = r.channelLogoUrl ?? null;
         return {
           id: r.id,
           userId: r.userId,
           name: r.name,
+          channelName,
+          channel_name: channelName,
+          channelLogoUrl,
+          channel_logo_url: channelLogoUrl,
           email: r.email || "",
           mobile: r.mobile || "",
           joinedAt: r.joinedAt,
@@ -6581,7 +6684,7 @@ export async function handleApiRequest(
           );
           if (uRows && uRows.length > 0) {
             const [allDbUsers] = await pool.query<any[]>(
-              `SELECT id, user_id, name, email, mobile, created_at, role, referral_code FROM users`,
+              `SELECT id, user_id, name, email, mobile, created_at, role, referral_code, channel_logo_url, channel_name FROM users`,
             );
             downline = calculateDownlineLevelsTs(userId, allDbUsers || [], 10);
           } else {

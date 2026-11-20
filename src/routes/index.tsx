@@ -6,6 +6,7 @@ import { Navbar } from "@/components/videohub/Navbar";
 import { Sidebar } from "@/components/videohub/Sidebar";
 import { Hero } from "@/components/videohub/Hero";
 import { VideoCard } from "@/components/videohub/VideoCard";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { ImageCard } from "@/components/videohub/ImageCard";
 import { ShortsShelf } from "@/components/videohub/ShortsShelf";
 import { BottomNav } from "@/components/videohub/BottomNav";
@@ -393,23 +394,40 @@ function Index() {
                     subtitle="Channels growing fast on FaceTube"
                   />
                   <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-                    {creators.map((c) => (
-                      <article
-                        key={c.name}
-                        className="group rounded-2xl border border-border p-5 text-center shadow-card transition-all hover:-translate-y-1 hover:border-brand/30 hover:shadow-lift"
-                      >
-                        <span className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-gradient-to-br from-brand to-brand-dark text-sm font-bold text-brand-foreground transition-transform group-hover:scale-105">
-                          {c.initials}
-                        </span>
-                        <h3 className="mt-3 truncate text-sm font-semibold text-foreground">
-                          {c.name}
-                        </h3>
-                        <p className="truncate text-xs text-muted-foreground">{c.subs}</p>
-                        <button className="mt-3 w-full rounded-full bg-secondary px-3 py-1.5 text-xs font-semibold text-foreground transition hover:bg-brand hover:text-brand-foreground">
-                          Subscribe
-                        </button>
-                      </article>
-                    ))}
+                    {creators.map((c) => {
+                      const creatorMeta = c as typeof c & {
+                        channelLogoUrl?: string | undefined;
+                        channel_logo_url?: string | undefined;
+                        channelName?: string | undefined;
+                        channel_name?: string | undefined;
+                      };
+                      const creatorName =
+                        creatorMeta.channelName || creatorMeta.channel_name || c.name;
+                      return (
+                        <article
+                          key={c.name}
+                          className="group rounded-2xl border border-border p-5 text-center shadow-card transition-all hover:-translate-y-1 hover:border-brand/30 hover:shadow-lift"
+                        >
+                          <div className="mx-auto w-fit transition-transform group-hover:scale-105">
+                            <ChannelAvatar
+                              src={creatorMeta.channelLogoUrl || creatorMeta.channel_logo_url}
+                              name={creatorName}
+                              initials={c.initials}
+                              sizeClassName="h-14 w-14"
+                              imageRingClassName="ring-1 ring-border shadow-sm"
+                              fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-sm font-bold text-brand-foreground"
+                            />
+                          </div>
+                          <h3 className="mt-3 truncate text-sm font-semibold text-foreground">
+                            {creatorName}
+                          </h3>
+                          <p className="truncate text-xs text-muted-foreground">{c.subs}</p>
+                          <button className="mt-3 w-full rounded-full bg-secondary px-3 py-1.5 text-xs font-semibold text-foreground transition hover:bg-brand hover:text-brand-foreground">
+                            Subscribe
+                          </button>
+                        </article>
+                      );
+                    })}
                   </div>
                 </section>
 

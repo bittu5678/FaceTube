@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -102,13 +103,16 @@ function ReferralMembersPage() {
     }));
   };
 
-  const filteredMembers = data.members.filter(
-    (m) =>
-      m.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      m.userId.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      m.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      m.mobile.toLowerCase().includes(searchTerm.toLowerCase()),
-  );
+  const filteredMembers = data.members.filter((m) => {
+    const q = searchTerm.toLowerCase();
+    return (
+      m.name.toLowerCase().includes(q) ||
+      (m.channelName || "").toLowerCase().includes(q) ||
+      m.userId.toLowerCase().includes(q) ||
+      m.email.toLowerCase().includes(q) ||
+      m.mobile.toLowerCase().includes(q)
+    );
+  });
 
   return (
     <VideoHubLayout>
@@ -323,15 +327,31 @@ function ReferralMembersPage() {
 
                     {/* Member Name & Email */}
                     <td className="px-4 py-3.5">
-                      <div className="flex items-center gap-3">
-                        <div className="grid h-8 w-8 place-items-center rounded-full bg-brand/10 font-bold text-brand shrink-0">
-                          {member.name.charAt(0)}
-                        </div>
-                        <div>
-                          <div className="font-bold text-foreground">{member.name}</div>
-                          <div className="text-[11px] text-muted-foreground">{member.email}</div>
-                        </div>
-                      </div>
+                      {(() => {
+                        const displayName = member.channelName || member.name;
+                        const initial =
+                          displayName.trim().charAt(0).toUpperCase() ||
+                          member.name.trim().charAt(0).toUpperCase() ||
+                          "U";
+                        return (
+                          <div className="flex items-center gap-3">
+                            <ChannelAvatar
+                              src={member.channelLogoUrl}
+                              name={displayName}
+                              initials={initial}
+                              sizeClassName="h-8 w-8"
+                              imageRingClassName="ring-1 ring-border"
+                              fallbackClassName="bg-brand/10 font-bold text-brand"
+                            />
+                            <div>
+                              <div className="font-bold text-foreground">{displayName}</div>
+                              <div className="text-[11px] text-muted-foreground">
+                                {member.email}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </td>
 
                     {/* User ID */}

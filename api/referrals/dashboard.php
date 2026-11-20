@@ -97,11 +97,26 @@ try {
 
         // Each eligible paid premium video uploaded by direct referral earns ₹1.00
         $memberComm = floatval($premiumPaidCount * 1.00);
+        $channelName = !empty($r['channelName'])
+            ? $r['channelName']
+            : (!empty($r['channel_name']) ? $r['channel_name'] : ($r['name'] ?? 'FaceTube Creator'));
+        $rawLogo = $r['channelLogoUrl'] ?? ($r['channel_logo_url'] ?? null);
+        $channelLogoUrl = null;
+        if (is_string($rawLogo)) {
+            $trimmedLogo = trim($rawLogo);
+            if ($trimmedLogo !== '' && strtolower($trimmedLogo) !== 'null' && strtolower($trimmedLogo) !== 'undefined') {
+                $channelLogoUrl = $trimmedLogo;
+            }
+        }
 
         $members[] = [
             'id' => $r['id'] ?? ('mem_' . $mUserId),
             'userId' => $mUserId,
             'name' => $r['name'],
+            'channelName' => $channelName,
+            'channel_name' => $channelName,
+            'channelLogoUrl' => $channelLogoUrl,
+            'channel_logo_url' => $channelLogoUrl,
             'email' => $r['email'] ?? '',
             'mobile' => $r['mobile'] ?? '',
             'joinedAt' => $r['created_at'] ?? ($r['joinedAt'] ?? 'Recent'),

@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { VideoCard } from "@/components/videohub/VideoCard";
 import { creators, allVideos } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
@@ -1342,6 +1343,13 @@ function SubscriptionsPage() {
                 {creators.map((c, i) => {
                   const isSelected = selectedCreator === c.name;
                   const isLive = i === 1; // demo live badge for 1 channel
+                  const creatorMeta = c as typeof c & {
+                    channelLogoUrl?: string | undefined;
+                    channel_logo_url?: string | undefined;
+                    channelName?: string | undefined;
+                    channel_name?: string | undefined;
+                  };
+                  const creatorName = creatorMeta.channelName || creatorMeta.channel_name || c.name;
                   return (
                     <button
                       key={c.name}
@@ -1360,7 +1368,14 @@ function SubscriptionsPage() {
                               : "ring-2 ring-border bg-gradient-to-br from-neutral-800 to-neutral-700 group-hover:ring-brand/50"
                         }`}
                       >
-                        {c.initials}
+                        <ChannelAvatar
+                          src={creatorMeta.channelLogoUrl || creatorMeta.channel_logo_url}
+                          name={creatorName}
+                          initials={c.initials}
+                          sizeClassName="h-14 w-14"
+                          imageRingClassName=""
+                          fallbackClassName="bg-transparent text-sm font-bold text-white"
+                        />
                         {isLive && (
                           <span className="absolute -bottom-1 rounded-full bg-red-600 px-1.5 py-0.2 text-[8px] font-black uppercase text-white tracking-widest ring-2 ring-background">
                             LIVE
@@ -1371,7 +1386,7 @@ function SubscriptionsPage() {
                         )}
                       </div>
                       <span className="text-[11px] font-medium text-foreground max-w-[64px] truncate">
-                        {c.name}
+                        {creatorName}
                       </span>
                     </button>
                   );

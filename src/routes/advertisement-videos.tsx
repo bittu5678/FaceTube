@@ -21,6 +21,7 @@ import {
   Calendar,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -45,6 +46,8 @@ export interface AdVideoItem {
   id: string;
   userId: string;
   creatorName: string;
+  channelName?: string | undefined;
+  channelLogoUrl?: string | undefined;
   title: string;
   description: string;
   videoUrl: string;
@@ -168,10 +171,19 @@ function AdvertisementVideosPage() {
         const expiryTime = expiryRaw ? new Date(expiryRaw).getTime() : NaN;
         const isActive = isMarked && !Number.isNaN(expiryTime) && expiryTime > Date.now();
 
+        const resolvedChannelName =
+          v.channelName || v.channel_name || v.creatorName || v.creator_name || "Creator";
+        const rawChannelLogo = v.channelLogoUrl || v.channel_logo_url || "";
+        const resolvedChannelLogo = rawChannelLogo
+          ? resolveMediaUrl(rawChannelLogo) || undefined
+          : undefined;
+
         return {
           id: String(v.id),
           userId: v.userId || v.user_id || "",
-          creatorName: v.creatorName || v.creator_name || "Creator",
+          creatorName: resolvedChannelName,
+          channelName: resolvedChannelName,
+          channelLogoUrl: resolvedChannelLogo,
           title: v.title || "Untitled Video",
           description: v.description || "",
           videoUrl: resolveMediaUrl(v.videoUrl || v.video_url || ""),
@@ -263,6 +275,7 @@ function AdvertisementVideosPage() {
         v.title.toLowerCase().includes(q) ||
         v.category.toLowerCase().includes(q) ||
         v.creatorName.toLowerCase().includes(q) ||
+        (v.channelName && v.channelName.toLowerCase().includes(q)) ||
         (v.promotionPlan && v.promotionPlan.toLowerCase().includes(q)),
     );
   }, [filterTab, activePromotedList, allPromotedList, completedList, videos, searchQuery]);
@@ -672,15 +685,24 @@ function AdvertisementVideosPage() {
                           </span>
                         </div>
 
-                        {/* Admin Scope Creator attribution */}
-                        {isAdmin && adminScope === "all" && (
-                          <p className="text-[10px] text-muted-foreground truncate border-t border-border/40 pt-1">
-                            Creator:{" "}
-                            <span className="font-semibold text-foreground">
-                              {ad.creatorName} ({ad.userId})
+                        {/* Creator Attribution with ChannelAvatar */}
+                        <div className="flex items-center gap-2 text-[11px] text-muted-foreground pt-1 border-t border-border/40">
+                          <ChannelAvatar
+                            src={ad.channelLogoUrl}
+                            name={ad.channelName || ad.creatorName}
+                            sizeClassName="h-5 w-5"
+                            imageRingClassName="ring-1 ring-border"
+                            fallbackClassName="bg-brand text-white text-[9px] font-bold"
+                          />
+                          <span className="truncate font-semibold text-foreground">
+                            {ad.channelName || ad.creatorName}
+                          </span>
+                          {isAdmin && adminScope === "all" && ad.userId && (
+                            <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                              ({ad.userId})
                             </span>
-                          </p>
-                        )}
+                          )}
+                        </div>
 
                         {/* Metrics Row */}
                         <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-2 border-t border-border/60">

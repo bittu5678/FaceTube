@@ -18,9 +18,11 @@ import {
   UserPlus,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { Switch } from "@/components/ui/switch";
 import { useAuth } from "@/lib/auth-context";
-import { api, getStoredAuthToken } from "@/lib/api";
+import { getStoredAuthToken } from "@/lib/api";
+import { getTeamMembers } from "@/lib/referral-service";
 
 export const Route = createFileRoute("/team-members")({
   head: () => ({
@@ -40,6 +42,8 @@ export interface TeamMember {
   id: string;
   userId: string;
   name: string;
+  channelName?: string | null;
+  channelLogoUrl?: string | null;
   level: number;
   sponsor: string;
   sponsorUserId: string;
@@ -88,8 +92,8 @@ function TeamMembersPage() {
     setIsSessionExpired(false);
 
     try {
-      // Calling getTeam without userId lets the backend resolve the caller's authoritative user_id from the session token
-      const res = await api.referrals.getTeam(undefined);
+      // Calling getTeamMembers without userId lets the backend resolve the caller's authoritative user_id from the session token
+      const res = await getTeamMembers(undefined);
       if (res && res.success) {
         setTeamMembers(res.members || []);
         setTotalTeamCount(Number(res.totalTeamCount) || 0);
@@ -154,6 +158,7 @@ function TeamMembersPage() {
     const matchesSearch =
       !q ||
       m.name.toLowerCase().includes(q) ||
+      (m.channelName || "").toLowerCase().includes(q) ||
       m.userId.toLowerCase().includes(q) ||
       m.sponsor.toLowerCase().includes(q);
     return matchesLevel && matchesSearch;
@@ -404,12 +409,26 @@ function TeamMembersPage() {
 
                         {/* Member */}
                         <td className="px-4 py-3.5 font-bold text-foreground">
-                          <div className="flex items-center gap-2.5">
-                            <div className="grid h-7 w-7 place-items-center rounded-full bg-secondary text-[11px] font-bold text-foreground">
-                              {m.name.charAt(0).toUpperCase()}
-                            </div>
-                            <span>{m.name}</span>
-                          </div>
+                          {(() => {
+                            const displayName = m.channelName || m.name;
+                            const initial =
+                              displayName.trim().charAt(0).toUpperCase() ||
+                              m.name.trim().charAt(0).toUpperCase() ||
+                              "U";
+                            return (
+                              <div className="flex items-center gap-2.5">
+                                <ChannelAvatar
+                                  src={m.channelLogoUrl}
+                                  name={displayName}
+                                  initials={initial}
+                                  sizeClassName="h-7 w-7"
+                                  imageRingClassName="ring-1 ring-border"
+                                  fallbackClassName="bg-secondary text-[11px] font-bold text-foreground"
+                                />
+                                <span>{displayName}</span>
+                              </div>
+                            );
+                          })()}
                         </td>
 
                         {/* User ID */}

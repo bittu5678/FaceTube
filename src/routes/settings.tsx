@@ -13,6 +13,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { ThemeToggle } from "@/components/videohub/ThemeToggle";
 import { useAuth } from "@/lib/auth-context";
 
@@ -31,11 +32,31 @@ export const Route = createFileRoute("/settings")({
 });
 
 function SettingsPage() {
-  const { user, profile, isAdmin, signOut } = useAuth();
+  const { user, profile, dbUser, isAdmin, signOut } = useAuth();
   const [autoplay, setAutoplay] = useState(true);
   const [highQuality, setHighQuality] = useState(true);
   const [notifications, setNotifications] = useState(true);
   const [captions, setCaptions] = useState(false);
+
+  const accountName =
+    profile?.channel_name ||
+    dbUser?.channel_name ||
+    profile?.full_name ||
+    profile?.username ||
+    user?.email ||
+    "FaceTube User";
+  const accountInitial =
+    (
+      profile?.channel_name ||
+      dbUser?.channel_name ||
+      profile?.full_name ||
+      profile?.username ||
+      user?.email ||
+      "U"
+    )
+      .trim()
+      .charAt(0)
+      .toUpperCase() || "U";
 
   return (
     <VideoHubLayout>
@@ -59,15 +80,16 @@ function SettingsPage() {
         <section className="rounded-3xl border border-border bg-card p-5 sm:p-6 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <div className="grid h-10 w-10 place-items-center rounded-full bg-brand text-white font-bold">
-                {profile?.username?.charAt(0).toUpperCase() ||
-                  user?.email?.charAt(0).toUpperCase() ||
-                  "U"}
-              </div>
+              <ChannelAvatar
+                src={profile?.channel_logo_url || dbUser?.channel_logo_url || profile?.avatar_url}
+                name={accountName}
+                initials={accountInitial}
+                sizeClassName="h-10 w-10"
+                imageRingClassName=""
+                fallbackClassName="bg-brand text-white font-bold"
+              />
               <div>
-                <h2 className="text-base font-bold text-foreground">
-                  {profile?.username || user?.email || "FaceTube User"}
-                </h2>
+                <h2 className="text-base font-bold text-foreground">{accountName}</h2>
                 <p className="text-xs text-muted-foreground">
                   {user ? user.email : "Signed in with local profile"}
                   {isAdmin && " · Administrator"}

@@ -2,6 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { ThumbsUp, Play, Shuffle, Trash2, Heart, Lock } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { allVideos, type Video } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
 
@@ -138,9 +139,20 @@ function LikedVideosPage() {
                         {video.title}
                       </h3>
                     </Link>
-                    <p className="text-[11px] text-muted-foreground mt-1 truncate">
-                      {video.channel} · {video.views}
-                    </p>
+                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mt-1.5 min-w-0">
+                      <ChannelAvatar
+                        src={video.channelLogoUrl || video.channel_logo_url}
+                        name={video.channelName || video.channel}
+                        initials={video.initials}
+                        tint={video.tint}
+                        sizeClassName="h-5 w-5"
+                        imageRingClassName="ring-1 ring-border"
+                        fallbackClassName="text-[9px] font-bold text-white"
+                      />
+                      <span className="truncate">
+                        {video.channelName || video.channel} · {video.views}
+                      </span>
+                    </div>
                   </div>
 
                   <button

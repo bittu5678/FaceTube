@@ -7,6 +7,8 @@ export interface UploadedImage {
   id: string;
   userId: string;
   creatorName: string;
+  channelName?: string | null;
+  channelLogoUrl?: string | null;
   title: string;
   description?: string | undefined;
   imageUrl: string;
@@ -127,20 +129,40 @@ export async function fetchUploadedImages(userId?: string): Promise<UploadedImag
   try {
     const res = await api.images.list(userId ? { userId } : undefined);
     if (res && res.images && Array.isArray(res.images)) {
-      const serverImages: UploadedImage[] = res.images.map((item: any) => ({
-        id: String(item.id),
-        userId: item.user_id || item.userId || "FT102857",
-        creatorName: item.creator_name || item.creatorName || "FaceTube Creator",
-        title: item.title || "Uploaded Image",
-        description: item.description || "",
-        imageUrl: resolveMediaUrl(item.image_url || item.imageUrl),
-        format: (item.format || "jpg") as "jpg" | "jpeg" | "png" | "webp",
-        fileSize: item.file_size || item.fileSize || "1.0 MB",
-        category: item.category || "Entertainment",
-        views: Number(item.views) || 0,
-        likes: Number(item.likes) || 0,
-        createdAt: item.created_at || item.createdAt || new Date().toISOString(),
-      }));
+      const serverImages: UploadedImage[] = res.images.map((item: any) => {
+        const rawCreatorName =
+          typeof (item.creator_name ?? item.creatorName) === "string"
+            ? String(item.creator_name ?? item.creatorName).trim()
+            : "";
+        const rawChannelName =
+          typeof (item.channel_name ?? item.channelName) === "string"
+            ? String(item.channel_name ?? item.channelName).trim()
+            : "";
+        const channelName = rawChannelName || rawCreatorName || "FaceTube Creator";
+        const creatorName = rawCreatorName || channelName;
+        const rawLogo = item.channel_logo_url ?? item.channelLogoUrl;
+        const channelLogoUrl =
+          typeof rawLogo === "string" && rawLogo.trim() !== ""
+            ? resolveMediaUrl(rawLogo) || null
+            : null;
+
+        return {
+          id: String(item.id),
+          userId: item.user_id || item.userId || "FT102857",
+          creatorName,
+          channelName,
+          channelLogoUrl,
+          title: item.title || "Uploaded Image",
+          description: item.description || "",
+          imageUrl: resolveMediaUrl(item.image_url || item.imageUrl),
+          format: (item.format || "jpg") as "jpg" | "jpeg" | "png" | "webp",
+          fileSize: item.file_size || item.fileSize || "1.0 MB",
+          category: item.category || "Entertainment",
+          views: Number(item.views) || 0,
+          likes: Number(item.likes) || 0,
+          createdAt: item.created_at || item.createdAt || new Date().toISOString(),
+        };
+      });
 
       // Merge with stored local images so newly uploaded images never disappear
       const stored = getStoredImages();

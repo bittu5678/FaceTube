@@ -2,16 +2,18 @@ import { Image as ImageIcon, Eye, Heart, MoreVertical } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import type { UploadedImage } from "@/lib/image-service";
 import { SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
+import { ChannelAvatar } from "./ChannelAvatar";
 
 export function ImageCard({ image }: { image: UploadedImage }) {
-  const initials = image.creatorName
-    ? image.creatorName
-        .split(" ")
-        .map((n) => n[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase()
-    : "FT";
+  const displayCreatorName = image.channelName || image.creatorName || "FaceTube Creator";
+  const initials =
+    displayCreatorName
+      .trim()
+      .split(/\s+/)
+      .map((n) => n[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase() || "FT";
 
   return (
     <article className="group cursor-pointer transition-transform duration-300 hover:-translate-y-0.5">
@@ -54,16 +56,21 @@ export function ImageCard({ image }: { image: UploadedImage }) {
       </Link>
 
       <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)_auto] gap-3">
-        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-gradient-to-br from-teal-500 to-emerald-600 text-xs font-bold text-white shadow-xs">
-          {initials}
-        </span>
+        <ChannelAvatar
+          src={image.channelLogoUrl}
+          name={displayCreatorName}
+          initials={initials}
+          sizeClassName="h-9 w-9"
+          imageRingClassName="ring-1 ring-border shadow-xs"
+          fallbackClassName="bg-gradient-to-br from-teal-500 to-emerald-600 text-xs font-bold text-white shadow-xs"
+        />
         <div className="min-w-0">
           <Link to="/images-uploaded">
             <h3 className="line-clamp-2 text-[0.95rem] font-semibold leading-snug text-foreground transition-colors group-hover:text-teal-400">
               {image.title}
             </h3>
           </Link>
-          <p className="mt-1 truncate text-sm text-muted-foreground">{image.creatorName}</p>
+          <p className="mt-1 truncate text-sm text-muted-foreground">{displayCreatorName}</p>
           <p className="truncate text-sm text-muted-foreground flex items-center gap-1.5">
             <span>{image.fileSize || "1.2 MB"}</span>
             <span>•</span>

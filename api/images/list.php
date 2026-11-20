@@ -16,12 +16,12 @@ $where = [];
 $params = [];
 
 if (!empty($userId)) {
-    $where[] = 'UPPER(user_id) = UPPER(?)';
+    $where[] = 'UPPER(i.user_id) = UPPER(?)';
     $params[] = $userId;
 }
 
 if (!empty($category) && $category !== 'All') {
-    $where[] = 'category = ?';
+    $where[] = 'i.category = ?';
     $params[] = $category;
 }
 
@@ -29,16 +29,44 @@ $whereSql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
 
 try {
     $sql = "
-        SELECT id, user_id, creator_name, title, description, image_url, thumbnail_url, category, views, likes, created_at
-        FROM uploaded_images
+        SELECT
+            i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.thumbnail_url, i.category, i.views, i.likes, i.created_at,
+            u.channel_logo_url AS creator_channel_logo_url,
+            u.channel_name AS creator_channel_name
+        FROM uploaded_images i
+        LEFT JOIN users u ON UPPER(u.user_id) = UPPER(i.user_id)
         {$whereSql}
-        ORDER BY created_at DESC
+        ORDER BY i.created_at DESC
         LIMIT {$limit}
     ";
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
     $rawImages = $stmt->fetchAll();
     $images = array_map(function ($img) {
+        $rawLogo = isset($img['creator_channel_logo_url']) ? trim((string)$img['creator_channel_logo_url']) : '';
+        $channelLogoUrl = ($rawLogo !== '' && strtolower($rawLogo) !== 'null' && strtolower($rawLogo) !== 'undefined')
+            ? toAbsoluteMediaUrl($rawLogo, 'logos')
+            : null;
+        if ($channelLogoUrl === '') {
+            $channelLogoUrl = null;
+        }
+
+        $rawChannelName = isset($img['creator_channel_name']) ? trim((string)$img['creator_channel_name']) : '';
+        $rawCreatorName = isset($img['creator_name']) ? trim((string)$img['creator_name']) : '';
+        $channelName = $rawChannelName !== ''
+            ? $rawChannelName
+            : ($rawCreatorName !== '' ? $rawCreatorName : 'FaceTube Creator');
+        $creatorName = $rawCreatorName !== '' ? $rawCreatorName : $channelName;
+
+        unset($img['creator_channel_logo_url'], $img['creator_channel_name']);
+
+        $img['userId'] = $img['user_id'] ?? '';
+        $img['creatorName'] = $creatorName;
+        $img['creator_name'] = $creatorName;
+        $img['channelName'] = $channelName;
+        $img['channel_name'] = $channelName;
+        $img['channelLogoUrl'] = $channelLogoUrl;
+        $img['channel_logo_url'] = $channelLogoUrl;
         $img['image_url'] = toAbsoluteMediaUrl($img['image_url'] ?? '', 'images');
         $img['imageUrl'] = $img['image_url'];
         $img['thumbnail_url'] = toAbsoluteMediaUrl($img['thumbnail_url'] ?? '', 'images');

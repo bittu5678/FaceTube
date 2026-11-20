@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, Play } from "lucide-react";
 import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
+import { ChannelAvatar } from "./ChannelAvatar";
 import { ShortsIcon } from "./ShortsIcon";
 
 interface ShortsShelfProps {
@@ -178,51 +179,69 @@ export function ShortsShelf({
           WebkitOverflowScrolling: "touch",
         }}
       >
-        {items.map((short) => (
-          <article
-            key={short.id}
-            onClick={(e) => handleCardClick(e, short.id)}
-            style={{ scrollSnapAlign: "start" }}
-            className="group relative w-[160px] sm:w-[185px] md:w-[210px] shrink-0 aspect-[9/16] rounded-2xl overflow-hidden bg-muted border border-border/80 shadow-card transition-all duration-300 hover:-translate-y-1 hover:shadow-lift hover:border-brand/40 cursor-pointer"
-          >
-            {/* Short Thumbnail image */}
-            <img
-              src={short.thumb}
-              alt={short.title}
-              draggable={false}
-              loading="lazy"
-              className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105 select-none"
-            />
+        {items.map((short) => {
+          const creatorName =
+            (short as any).channelName || (short as any).channel_name || short.creator;
+          return (
+            <article
+              key={short.id}
+              onClick={(e) => handleCardClick(e, short.id)}
+              style={{ scrollSnapAlign: "start" }}
+              className="group relative w-[160px] sm:w-[185px] md:w-[210px] shrink-0 aspect-[9/16] rounded-2xl overflow-hidden bg-muted border border-border/80 shadow-card transition-all duration-300 hover:-translate-y-1 hover:shadow-lift hover:border-brand/40 cursor-pointer"
+            >
+              {/* Short Thumbnail image */}
+              <img
+                src={short.thumb}
+                alt={short.title}
+                draggable={false}
+                loading="lazy"
+                className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105 select-none"
+              />
 
-            {/* Gradient Overlay for high text contrast */}
-            <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/40 to-transparent pointer-events-none" />
+              {/* Gradient Overlay for high text contrast */}
+              <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-black/40 to-transparent pointer-events-none" />
 
-            {/* Top Shorts Indicator Badge */}
-            <div className="absolute top-2.5 right-2.5 flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-md opacity-90 group-hover:opacity-100 transition-opacity">
-              <ShortsIcon className="h-3 w-3 text-red-500 fill-red-500" active />
-              <span>Shorts</span>
-            </div>
-
-            {/* Hover Play Button Overlay */}
-            <div className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
-              <div className="grid h-12 w-12 place-items-center rounded-full bg-red-600/90 text-white shadow-xl backdrop-blur-sm transform scale-90 group-hover:scale-100 transition-transform duration-200">
-                <Play className="h-5 w-5 fill-white translate-x-0.5" />
+              {/* Top Shorts Indicator Badge */}
+              <div className="absolute top-2.5 right-2.5 flex items-center gap-1 rounded-full bg-black/60 px-2 py-0.5 text-[10px] font-bold text-white backdrop-blur-md opacity-90 group-hover:opacity-100 transition-opacity">
+                <ShortsIcon className="h-3 w-3 text-red-500 fill-red-500" active />
+                <span>Shorts</span>
               </div>
-            </div>
 
-            {/* Bottom Content: Title & Views */}
-            <div className="absolute inset-x-0 bottom-0 p-3.5 flex flex-col justify-end pointer-events-none">
-              <h3 className="text-xs sm:text-sm font-bold text-white line-clamp-2 leading-snug drop-shadow-md group-hover:text-red-300 transition-colors">
-                {short.title}
-              </h3>
-
-              <div className="mt-1.5 flex items-center justify-between text-[11px] sm:text-xs text-white/80 font-medium">
-                <span className="drop-shadow-sm font-semibold text-white/90">{short.views}</span>
-                <span className="text-[10px] text-white/60">{short.creator}</span>
+              {/* Hover Play Button Overlay */}
+              <div className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
+                <div className="grid h-12 w-12 place-items-center rounded-full bg-red-600/90 text-white shadow-xl backdrop-blur-sm transform scale-90 group-hover:scale-100 transition-transform duration-200">
+                  <Play className="h-5 w-5 fill-white translate-x-0.5" />
+                </div>
               </div>
-            </div>
-          </article>
-        ))}
+
+              {/* Bottom Content: Title, Creator Branding & Views */}
+              <div className="absolute inset-x-0 bottom-0 p-3.5 flex flex-col justify-end pointer-events-none">
+                <h3 className="text-xs sm:text-sm font-bold text-white line-clamp-2 leading-snug drop-shadow-md group-hover:text-red-300 transition-colors">
+                  {short.title}
+                </h3>
+
+                <div className="mt-2 flex items-center justify-between gap-2 text-[11px] sm:text-xs text-white/80 font-medium">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <ChannelAvatar
+                      src={short.channelLogoUrl || (short as any).channel_logo_url}
+                      name={creatorName}
+                      initials={short.initials}
+                      sizeClassName="h-5 w-5"
+                      imageRingClassName="ring-1 ring-white/50"
+                      fallbackClassName="bg-brand text-white text-[9px] font-bold ring-1 ring-white/50"
+                    />
+                    <span className="truncate text-[10px] sm:text-[11px] text-white/85 drop-shadow-sm">
+                      {creatorName}
+                    </span>
+                  </div>
+                  <span className="shrink-0 drop-shadow-sm font-semibold text-white/90">
+                    {short.views}
+                  </span>
+                </div>
+              </div>
+            </article>
+          );
+        })}
       </div>
     </section>
   );

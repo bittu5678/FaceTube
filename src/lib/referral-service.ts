@@ -1,4 +1,5 @@
 import { api } from "./api";
+import { resolveMediaUrl } from "./media-url";
 import { getLocalDbUsers } from "./user-service";
 import { getStoredVideos } from "./video-service";
 import { getUserLedger } from "./ledger-service";
@@ -7,6 +8,8 @@ export interface ReferralMemberSummary {
   id: string;
   userId: string;
   name: string;
+  channelName?: string | null;
+  channelLogoUrl?: string | null;
   email: string;
   mobile: string;
   joinedAt: string;
@@ -49,21 +52,37 @@ export async function getReferralDashboardData(
         referralCode: d.referralCode || normId,
         referralNumber: d.referralNumber || normId,
         referralLink: d.referralLink || `https://facetube.online/register?ref=${normId}`,
-        members: (d.members || []).map((m: any) => ({
-          id: m.id,
-          userId: m.userId || m.user_id,
-          name: m.name,
-          email: m.email,
-          mobile: m.mobile,
-          joinedAt: m.joinedAt || m.created_at || "Recent",
-          status: m.status || "Active",
-          tier: m.tier || "Creator Pro",
-          freeVideosCount: Number(m.freeVideosCount) || 0,
-          premiumVideosCount: Number(m.premiumVideosCount) || 0,
-          totalVideosCount: Number(m.totalVideosCount) || 0,
-          directCommissionEarned: Number(m.directCommissionEarned) || 0,
-          access: m.access || "Granted",
-        })),
+        members: (d.members || []).map((m: any) => {
+          const rawChannelName =
+            typeof (m.channelName ?? m.channel_name) === "string"
+              ? String(m.channelName ?? m.channel_name).trim()
+              : "";
+          const rawName = typeof m.name === "string" ? m.name.trim() : "";
+          const channelName = rawChannelName || rawName || "FaceTube Creator";
+          const rawLogo = m.channelLogoUrl ?? m.channel_logo_url;
+          const channelLogoUrl =
+            typeof rawLogo === "string" && rawLogo.trim() !== ""
+              ? resolveMediaUrl(rawLogo) || null
+              : null;
+
+          return {
+            id: m.id,
+            userId: m.userId || m.user_id,
+            name: m.name,
+            channelName,
+            channelLogoUrl,
+            email: m.email,
+            mobile: m.mobile,
+            joinedAt: m.joinedAt || m.created_at || "Recent",
+            status: m.status || "Active",
+            tier: m.tier || "Creator Pro",
+            freeVideosCount: Number(m.freeVideosCount) || 0,
+            premiumVideosCount: Number(m.premiumVideosCount) || 0,
+            totalVideosCount: Number(m.totalVideosCount) || 0,
+            directCommissionEarned: Number(m.directCommissionEarned) || 0,
+            access: m.access || "Granted",
+          };
+        }),
         isStale: false,
       };
     }
@@ -170,11 +189,20 @@ export async function getReferralDashboardData(
     ).length;
 
     const directComm = premiumCount * 1.0;
+    const rawChannelName = typeof m.channel_name === "string" ? m.channel_name.trim() : "";
+    const channelName = rawChannelName || m.name || "FaceTube Creator";
+    const rawLogo = typeof m.channel_logo_url === "string" ? m.channel_logo_url.trim() : "";
+    const channelLogoUrl =
+      rawLogo !== "" && rawLogo.toLowerCase() !== "null" && rawLogo.toLowerCase() !== "undefined"
+        ? resolveMediaUrl(rawLogo) || null
+        : null;
 
     return {
       id: m.id || `mem_${m.user_id}`,
       userId: m.user_id,
       name: m.name,
+      channelName,
+      channelLogoUrl,
       email: m.email,
       mobile: m.mobile || "",
       joinedAt: m.created_at || "Recent",
@@ -205,11 +233,67 @@ export async function getReferralDashboardData(
   };
 }
 
+export interface TeamMemberSummary {
+  id: string;
+  userId: string;
+  name: string;
+  channelName?: string | null;
+  channelLogoUrl?: string | null;
+  level: number;
+  sponsor: string;
+  sponsorUserId: string;
+  joinedAt: string;
+  role: string;
+  rank: string;
+  teamSize: number;
+  status: "Active" | "Inactive";
+  access: "Granted" | "Restricted";
+}
+
 /**
  * Retrieves multi-level team members (Levels 1–10) from the authenticated API.
  */
 export async function getTeamMembers(userId?: string, level?: number | "all") {
-  return api.referrals.getTeam(userId, level);
+  const res = await api.referrals.getTeam(userId, level);
+  const normalizedMembers: TeamMemberSummary[] = (res.members || []).map((m) => {
+    const rawChannelName =
+      typeof (m.channelName ?? m.channel_name) === "string"
+        ? String(m.channelName ?? m.channel_name).trim()
+        : "";
+    const rawName = typeof m.name === "string" ? m.name.trim() : "";
+    const channelName = rawChannelName || rawName || "FaceTube Creator";
+
+    const rawLogo = m.channelLogoUrl ?? m.channel_logo_url;
+    const trimmedLogo = typeof rawLogo === "string" ? rawLogo.trim() : "";
+    const channelLogoUrl =
+      trimmedLogo !== "" &&
+      trimmedLogo.toLowerCase() !== "null" &&
+      trimmedLogo.toLowerCase() !== "undefined"
+        ? resolveMediaUrl(trimmedLogo) || null
+        : null;
+
+    return {
+      id: m.id,
+      userId: m.userId,
+      name: m.name,
+      channelName,
+      channelLogoUrl,
+      level: m.level,
+      sponsor: m.sponsor,
+      sponsorUserId: m.sponsorUserId,
+      joinedAt: m.joinedAt,
+      role: m.role,
+      rank: m.rank,
+      teamSize: m.teamSize,
+      status: m.status,
+      access: m.access,
+    };
+  });
+
+  return {
+    ...res,
+    members: normalizedMembers,
+  };
 }
 
 const PENDING_REFERRAL_KEY = "facetube_pending_ref";

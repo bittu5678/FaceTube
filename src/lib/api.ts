@@ -661,6 +661,10 @@ export const api = {
           id: string;
           userId: string;
           name: string;
+          channelName?: string | null;
+          channel_name?: string | null;
+          channelLogoUrl?: string | null;
+          channel_logo_url?: string | null;
           level: number;
           sponsor: string;
           sponsorUserId: string;
