@@ -1,5 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { handleApiRequest } from "./api-handler";
 
 describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests", () => {
@@ -90,7 +92,6 @@ describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests
 
   it("3. Correctly categorizes transactions into 5 streams and excludes withdrawals", async () => {
     const activeUserId = "FT_MULTI_STREAM_USER";
-    const today = new Date().toISOString().split("T")[0];
 
     // Seed mock transactions into the store via payment API or by verifying store behavior
     const testReq = new Request(
@@ -106,5 +107,483 @@ describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests
     assert.ok("adsense" in testData.summary);
     assert.ok("affiliate" in testData.summary);
     assert.ok("ad_boost" in testData.summary);
+  });
+});
+
+describe("Task 5J-V4-O: PHP Wallet Earnings History Authentication, Ownership & Fail-Closed Tests", () => {
+  const historyPhpPath = path.resolve(process.cwd(), "api/wallet/earnings-history.php");
+  const responsePhpPath = path.resolve(process.cwd(), "api/response.php");
+
+  function loadHistoryPhpSources() {
+    return {
+      historyPhp: fs.readFileSync(historyPhpPath, "utf-8"),
+      responsePhp: fs.readFileSync(responsePhpPath, "utf-8"),
+    };
+  }
+
+  function createEarningsHistoryHarness(options: {
+    method?: string;
+    bearerToken: string | null;
+    queryUserId?: string;
+    period?: string;
+    days?: number;
+    authBehavior:
+      | { kind: "none" }
+      | { kind: "invalid" }
+      | { kind: "user"; id: string; user_id: string; role: string }
+      | {
+          kind: "db_error";
+          sqlState: string;
+          driverCode: number;
+          message: string;
+          isRuntime?: boolean;
+        };
+    dbBehavior?:
+      | {
+          kind: "rows";
+          rows: Array<{
+            period_key: string;
+            income_type: string;
+            total_amount: number;
+            tx_count: number;
+          }>;
+        }
+      | {
+          kind: "db_error";
+          sqlState: string;
+          driverCode: number;
+          message: string;
+          isRuntime?: boolean;
+        };
+    inTransaction?: boolean;
+    rollbackThrows?: boolean;
+  }) {
+    const { responsePhp } = loadHistoryPhpSources();
+    const fnStart = responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+    const fnBlock = responsePhp.slice(fnStart, fnStart + 900);
+    const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+    const driverCodes = (codeMatch?.[1] || "")
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => !Number.isNaN(n));
+    const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+    const msgRegex = new RegExp(regexMatch?.[1] || "", "i");
+
+    const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
+      sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+    let inTx = Boolean(options.inTransaction);
+    let rollbackAttempts = 0;
+    let dbQueryExecuted = false;
+    let resolvedTargetUserId: string | null = null;
+    const serverLogs: string[] = [];
+
+    const safeRollback = () => {
+      try {
+        if (inTx) {
+          rollbackAttempts++;
+          if (options.rollbackThrows) {
+            throw new Error("MySQL server has gone away during ROLLBACK");
+          }
+          inTx = false;
+        }
+      } catch (rbErr: any) {
+        serverLogs.push(
+          `[wallet/earnings-history.php][ROLLBACK] Rollback failed: ${rbErr.message}`,
+        );
+      }
+    };
+
+    const method = options.method || "GET";
+    if (method !== "GET") {
+      return {
+        status: 405,
+        body: { success: false, error: "Method Not Allowed" },
+        dbQueryExecuted,
+        resolvedTargetUserId,
+        rollbackAttempts,
+        serverLogs,
+      };
+    }
+
+    let authUser: { id: string; user_id: string; role: string } | null = null;
+    try {
+      if (options.bearerToken !== null) {
+        if (options.authBehavior.kind === "user") {
+          authUser = {
+            id: options.authBehavior.id,
+            user_id: options.authBehavior.user_id,
+            role: options.authBehavior.role,
+          };
+        } else if (options.authBehavior.kind === "invalid") {
+          authUser = null;
+        } else if (options.authBehavior.kind === "db_error") {
+          throw options.authBehavior;
+        }
+      }
+    } catch (e: any) {
+      safeRollback();
+      serverLogs.push(`[wallet/earnings-history.php][AUTH] Database error: ${e.message}`);
+      if (!e.isRuntime && isConnUnavailable(e.sqlState || "", e.driverCode || 0, e.message || "")) {
+        return {
+          status: 503,
+          body: {
+            success: false,
+            error: "Database connection unavailable during authentication check.",
+          },
+          dbQueryExecuted,
+          resolvedTargetUserId,
+          rollbackAttempts,
+          serverLogs,
+        };
+      }
+      return {
+        status: 500,
+        body: { success: false, error: "Database error during authentication check." },
+        dbQueryExecuted,
+        resolvedTargetUserId,
+        rollbackAttempts,
+        serverLogs,
+      };
+    }
+
+    if (!authUser || !authUser.user_id) {
+      return {
+        status: 401,
+        body: {
+          success: false,
+          error: "Authentication required. Please provide a valid Bearer session token.",
+        },
+        dbQueryExecuted,
+        resolvedTargetUserId,
+        rollbackAttempts,
+        serverLogs,
+      };
+    }
+
+    const rawReqId = (options.queryUserId || "").trim();
+    if (rawReqId === "") {
+      resolvedTargetUserId = authUser.user_id;
+    } else if (
+      rawReqId.toUpperCase() === authUser.user_id.toUpperCase() ||
+      (authUser.id && rawReqId.toUpperCase() === authUser.id.toUpperCase())
+    ) {
+      resolvedTargetUserId = authUser.user_id;
+    } else if (authUser.role.toLowerCase() === "admin") {
+      resolvedTargetUserId = rawReqId;
+    } else {
+      return {
+        status: 403,
+        body: {
+          success: false,
+          error:
+            "Unauthorized: Cross-user earnings history access is restricted to verified administrators.",
+        },
+        dbQueryExecuted,
+        resolvedTargetUserId,
+        rollbackAttempts,
+        serverLogs,
+      };
+    }
+
+    const rawPeriod = (options.period || "").trim().toUpperCase();
+    const rawDays = options.days || 0;
+    let period: "7D" | "30D" | "90D" | "12M" = "30D";
+    let days = 30;
+    if (rawPeriod === "7D" || rawDays === 7) {
+      period = "7D";
+      days = 7;
+    } else if (rawPeriod === "30D" || rawDays === 30) {
+      period = "30D";
+      days = 30;
+    } else if (rawPeriod === "90D" || rawDays === 90) {
+      period = "90D";
+      days = 90;
+    } else if (rawPeriod === "12M" || rawDays >= 365) {
+      period = "12M";
+      days = 365;
+    } else if (rawDays > 0) {
+      days = Math.max(7, Math.min(365, rawDays));
+      period = days <= 7 ? "7D" : days <= 30 ? "30D" : days <= 90 ? "90D" : "12M";
+    }
+
+    try {
+      dbQueryExecuted = true;
+      const db = options.dbBehavior || { kind: "rows", rows: [] };
+      if (db.kind === "db_error") {
+        throw db;
+      }
+
+      const timeline: Record<string, any> = {};
+      const summary = {
+        total_revenue: 0.0,
+        referral: 0.0,
+        global: 0.0,
+        adsense: 0.0,
+        affiliate: 0.0,
+        ad_boost: 0.0,
+      };
+
+      const now = new Date();
+      if (period === "12M") {
+        for (let i = 11; i >= 0; i--) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+          timeline[key] = {
+            date: key,
+            day: key,
+            revenue: 0,
+            referral: 0,
+            global: 0,
+            adsense: 0,
+            affiliate: 0,
+            ad_boost: 0,
+            referral_income: 0,
+            global_income: 0,
+            adsense_income: 0,
+            affiliate_income: 0,
+            ad_boost_income: 0,
+            tx_count: 0,
+          };
+        }
+      } else {
+        for (let i = days - 1; i >= 0; i--) {
+          const d = new Date(Date.now() - i * 86400_000);
+          const key = d.toISOString().split("T")[0]!;
+          timeline[key] = {
+            date: key,
+            day: key,
+            revenue: 0,
+            referral: 0,
+            global: 0,
+            adsense: 0,
+            affiliate: 0,
+            ad_boost: 0,
+            referral_income: 0,
+            global_income: 0,
+            adsense_income: 0,
+            affiliate_income: 0,
+            ad_boost_income: 0,
+            tx_count: 0,
+          };
+        }
+      }
+
+      for (const r of db.rows) {
+        const pt = timeline[r.period_key];
+        if (!pt) continue;
+        const amt = Math.round(Number(r.total_amount) * 100) / 100;
+        const cnt = Number(r.tx_count);
+        let category: "referral" | "global" | "adsense" | "affiliate" | "ad_boost" = "referral";
+        if (r.income_type === "global_income") category = "global";
+        else if (r.income_type === "adsense_income") category = "adsense";
+        else if (r.income_type === "affiliate_income" || r.income_type === "marketing_income")
+          category = "affiliate";
+        else if (r.income_type === "ad_boost_income" || r.income_type === "marketing_ads")
+          category = "ad_boost";
+
+        pt[category] = Math.round((pt[category] + amt) * 100) / 100;
+        pt[`${category}_income`] = pt[category];
+        pt.revenue = Math.round((pt.revenue + amt) * 100) / 100;
+        pt.tx_count += cnt;
+        summary[category] = Math.round((summary[category] + amt) * 100) / 100;
+        summary.total_revenue = Math.round((summary.total_revenue + amt) * 100) / 100;
+      }
+
+      return {
+        status: 200,
+        body: {
+          success: true,
+          user_id: resolvedTargetUserId,
+          period,
+          days,
+          summary,
+          history: Object.values(timeline),
+        },
+        dbQueryExecuted,
+        resolvedTargetUserId,
+        rollbackAttempts,
+        serverLogs,
+      };
+    } catch (e: any) {
+      safeRollback();
+      serverLogs.push(`[wallet/earnings-history.php] Database error: ${e.message}`);
+      if (!e.isRuntime && isConnUnavailable(e.sqlState || "", e.driverCode || 0, e.message || "")) {
+        return {
+          status: 503,
+          body: {
+            success: false,
+            error: "Database connection unavailable while loading earnings history.",
+          },
+          dbQueryExecuted,
+          resolvedTargetUserId,
+          rollbackAttempts,
+          serverLogs,
+        };
+      }
+      return {
+        status: 500,
+        body: {
+          success: false,
+          error: "Failed to load earnings history due to a server error.",
+        },
+        dbQueryExecuted,
+        resolvedTargetUserId,
+        rollbackAttempts,
+        serverLogs,
+      };
+    }
+  }
+
+  it("1. Rejects unauthenticated and invalid-token requests with HTTP 401 (with or without user_id)", () => {
+    const { historyPhp } = loadHistoryPhpSources();
+    assert.match(historyPhp, /\$authUser\s*=\s*getAuthUser\(\$pdo,\s*true\);/);
+    assert.match(
+      historyPhp,
+      /if\s*\(\s*!\$authUser\s*\|\|\s*empty\(\$authUser\['user_id'\]\)\s*\)/,
+    );
+    assert.match(historyPhp, /jsonResponse\([\s\S]*?401\s*\);/);
+
+    const authPos = historyPhp.indexOf("getAuthUser($pdo, true)");
+    const queryPos = historyPhp.indexOf("$_GET['user_id']");
+    assert.ok(authPos > 0 && authPos < queryPos, "Auth must run before parsing $_GET['user_id']");
+
+    const unauthNoUser = createEarningsHistoryHarness({
+      bearerToken: null,
+      authBehavior: { kind: "none" },
+    });
+    assert.equal(unauthNoUser.status, 401);
+    assert.equal(unauthNoUser.dbQueryExecuted, false);
+
+    const unauthWithUser = createEarningsHistoryHarness({
+      bearerToken: null,
+      queryUserId: "FT483921",
+      authBehavior: { kind: "none" },
+    });
+    assert.equal(unauthWithUser.status, 401);
+    assert.equal(unauthWithUser.dbQueryExecuted, false);
+
+    const invalidSession = createEarningsHistoryHarness({
+      bearerToken: "expired_session_tok",
+      queryUserId: "FT483921",
+      authBehavior: { kind: "invalid" },
+    });
+    assert.equal(invalidSession.status, 401);
+    assert.equal(invalidSession.dbQueryExecuted, false);
+  });
+
+  it("2. Allows authenticated user own history, blocks non-admin cross-user lookup with 403, and permits verified admin access", () => {
+    const { historyPhp } = loadHistoryPhpSources();
+    assert.match(
+      historyPhp,
+      /\$isAdmin\s*=\s*isset\(\$authUser\['role'\]\)\s*&&\s*strtolower\(trim\(\(string\)\$authUser\['role'\]\)\)\s*===\s*'admin'/,
+    );
+    assert.match(historyPhp, /jsonResponse\([\s\S]*?403\s*\);/);
+
+    const todayKey = new Date().toISOString().split("T")[0]!;
+    const selfOmitted = createEarningsHistoryHarness({
+      bearerToken: "valid_user_tok",
+      period: "7D",
+      authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+      dbBehavior: {
+        kind: "rows",
+        rows: [
+          { period_key: todayKey, income_type: "referral_income", total_amount: 12.5, tx_count: 3 },
+          { period_key: todayKey, income_type: "adsense_income", total_amount: 40, tx_count: 1 },
+        ],
+      },
+    });
+    assert.equal(selfOmitted.status, 200);
+    assert.equal(selfOmitted.resolvedTargetUserId, "FT483921");
+    assert.equal((selfOmitted.body as any).user_id, "FT483921");
+    assert.equal((selfOmitted.body as any).period, "7D");
+    assert.equal((selfOmitted.body as any).days, 7);
+    assert.equal((selfOmitted.body as any).history.length, 7);
+    assert.equal((selfOmitted.body as any).summary.referral, 12.5);
+    assert.equal((selfOmitted.body as any).summary.adsense, 40);
+    assert.equal((selfOmitted.body as any).summary.total_revenue, 52.5);
+
+    const crossUserDenied = createEarningsHistoryHarness({
+      bearerToken: "valid_user_tok",
+      queryUserId: "FT900431",
+      authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+    });
+    assert.equal(crossUserDenied.status, 403);
+    assert.equal(crossUserDenied.dbQueryExecuted, false);
+
+    const adminCross = createEarningsHistoryHarness({
+      bearerToken: "valid_admin_tok",
+      queryUserId: "FT900431",
+      period: "12M",
+      authBehavior: { kind: "user", id: "uuid-102857", user_id: "FT102857", role: "admin" },
+    });
+    assert.equal(adminCross.status, 200);
+    assert.equal(adminCross.resolvedTargetUserId, "FT900431");
+    assert.equal((adminCross.body as any).period, "12M");
+    assert.equal((adminCross.body as any).history.length, 12);
+  });
+
+  it("3. Returns HTTP 503 on DB connection error and sanitized HTTP 500 on unexpected errors; preserves SQL filtering and response shape", () => {
+    const { historyPhp } = loadHistoryPhpSources();
+    assert.match(historyPhp, /\}\s*catch\s*\(\s*Throwable\s+\$e\s*\)\s*\{/);
+    assert.match(historyPhp, /isDatabaseConnectionUnavailableError\(\$e\)/);
+    assert.match(historyPhp, /\$safeRollback\(\$pdo\);/);
+    assert.match(historyPhp, /error_log\(/);
+    assert.doesNotMatch(historyPhp, /jsonResponse\([^\n]*\$e->getMessage\(\)/);
+    assert.match(historyPhp, /AND income_type != "withdrawal"/);
+    assert.match(historyPhp, /ORDER BY period_key ASC/);
+
+    const auth1203 = createEarningsHistoryHarness({
+      bearerToken: "valid_user_tok",
+      authBehavior: {
+        kind: "db_error",
+        sqlState: "42000",
+        driverCode: 1203,
+        message: "User already has more than 'max_user_connections' active connections",
+      },
+      inTransaction: true,
+      rollbackThrows: true,
+    });
+    assert.equal(auth1203.status, 503);
+    assert.equal(auth1203.body.success, false);
+    assert.equal(auth1203.rollbackAttempts, 1);
+    assert.ok(auth1203.serverLogs.some((l) => l.includes("[ROLLBACK]")));
+    assert.equal(String(auth1203.body.error).includes("max_user_connections"), false);
+
+    const query2002 = createEarningsHistoryHarness({
+      bearerToken: "valid_user_tok",
+      authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+      dbBehavior: {
+        kind: "db_error",
+        sqlState: "HY000",
+        driverCode: 2002,
+        message: "Connection refused",
+      },
+    });
+    assert.equal(query2002.status, 503);
+    assert.equal(query2002.body.success, false);
+    assert.equal("history" in query2002.body, false);
+
+    const query1146 = createEarningsHistoryHarness({
+      bearerToken: "valid_user_tok",
+      authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+      dbBehavior: {
+        kind: "db_error",
+        sqlState: "42S02",
+        driverCode: 1146,
+        message: "Table 'prod_db.income_ledger' doesn't exist",
+      },
+    });
+    assert.equal(query1146.status, 500);
+    assert.equal(query1146.body.success, false);
+    assert.equal("history" in query1146.body, false);
+    assert.equal(String(query1146.body.error).includes("income_ledger"), false);
+
+    const res405 = createEarningsHistoryHarness({
+      method: "POST",
+      bearerToken: null,
+      authBehavior: { kind: "none" },
+    });
+    assert.equal(res405.status, 405);
   });
 });

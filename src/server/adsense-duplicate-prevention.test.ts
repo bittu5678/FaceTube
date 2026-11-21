@@ -1945,5 +1945,99 @@ describe("AdSense Monthly Statement Idempotency & Duplicate Prevention Tests", (
         "Existing V4-D deterministic TX ID and V4-E precision/rowCount validations must remain intact",
       );
     });
+
+    it("enforces Task 5J-V4-J PHP connection-unavailable classification (1203, 1042, 1053, 1129, 1927, 2026) and AdSense rollback failure logging", () => {
+      const responsePhp = fs.readFileSync(path.resolve(process.cwd(), "api/response.php"), "utf-8");
+      const adsensePhp = fs.readFileSync(
+        path.resolve(process.cwd(), "api/admin/record-adsense-earning.php"),
+        "utf-8",
+      );
+
+      // Extract driver codes and regex from api/response.php isDatabaseConnectionUnavailableError()
+      const fnStart = responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+      assert.notEqual(fnStart, -1);
+      const fnBlock = responsePhp.slice(fnStart, fnStart + 900);
+      const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+      assert.ok(codeMatch?.[1], "Must define explicit driverCode list");
+      const driverCodes = codeMatch[1]
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => !Number.isNaN(n));
+
+      const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+      assert.ok(regexMatch?.[1], "Must define message regex");
+      const msgRegex = new RegExp(regexMatch[1], "i");
+
+      const classifyPhp = (sqlState: string, driverCode: number, msg: string) =>
+        sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+      // 1. Errno 1203 & new well-established connection errors classify as 503-unavailable
+      assert.equal(
+        classifyPhp(
+          "42000",
+          1203,
+          "User u123 already has more than 'max_user_connections' active connections",
+        ),
+        true,
+        "Errno 1203 (ER_TOO_MANY_USER_CONNECTIONS) must classify as connection unavailable",
+      );
+      assert.equal(classifyPhp("HY000", 1042, "Can't get hostname for your address"), true);
+      assert.equal(classifyPhp("08S01", 1053, "Server shutdown in progress"), true);
+      assert.equal(
+        classifyPhp("HY000", 1129, "Host '10.0.0.1' is blocked because of many connection errors"),
+        true,
+      );
+      assert.equal(classifyPhp("70100", 1927, "Connection was killed"), true);
+      assert.equal(classifyPhp("HY000", 2026, "SSL connection error"), true);
+
+      // 2. Existing SQLSTATE 08*, errnos, and message patterns remain intact
+      for (const existingCode of [1040, 2002, 2003, 2005, 2006, 2013]) {
+        assert.equal(
+          classifyPhp("HY000", existingCode, "MySQL transport error"),
+          true,
+          `Existing errno ${existingCode} must remain classified as connection unavailable`,
+        );
+      }
+      assert.equal(classifyPhp("08006", 0, "Connection failure"), true);
+      assert.equal(classifyPhp("HY000", 0, "MySQL server has gone away"), true);
+      assert.equal(classifyPhp("HY000", 0, "Lost connection to MySQL server during query"), true);
+
+      // 3. Generic SQL, schema, deadlock, and permission errors must NOT classify as 503
+      for (const nonConn of [
+        { state: "42000", code: 1044, msg: "Access denied for user to database" },
+        { state: "28000", code: 1045, msg: "Access denied for user (using password: YES)" },
+        { state: "42000", code: 1049, msg: "Unknown database 'prod_db'" },
+        { state: "42S22", code: 1054, msg: "Unknown column 'bad_col' in 'field list'" },
+        { state: "23000", code: 1062, msg: "Duplicate entry 'TX_1' for key 'PRIMARY'" },
+        { state: "42000", code: 1064, msg: "You have an error in your SQL syntax" },
+        { state: "42000", code: 1142, msg: "INSERT command denied to user for table" },
+        { state: "42S02", code: 1146, msg: "Table 'prod_db.missing' doesn't exist" },
+        { state: "HY000", code: 1205, msg: "Lock wait timeout exceeded" },
+        { state: "40001", code: 1213, msg: "Deadlock found when trying to get lock" },
+      ]) {
+        assert.equal(
+          classifyPhp(nonConn.state, nonConn.code, nonConn.msg),
+          false,
+          `Non-connection SQL/permission error ${nonConn.code} must NOT be classified as 503`,
+        );
+      }
+
+      // 4. Fallback classifier in record-adsense-earning.php stays synced and safeRollback logs server-side only
+      assert.ok(
+        adsensePhp.includes("1203") && adsensePhp.includes("max_user_connections"),
+        "AdSense fallback classifier must match shared classifier",
+      );
+      const rollbackStart = adsensePhp.indexOf("$safeRollback = static function");
+      const rollbackEnd = adsensePhp.indexOf("};", rollbackStart);
+      assert.ok(rollbackStart !== -1 && rollbackEnd > rollbackStart);
+      const rollbackBlock = adsensePhp.slice(rollbackStart, rollbackEnd + 2);
+      assert.ok(
+        rollbackBlock.includes("error_log('[record-adsense-earning.php][ROLLBACK]") &&
+          rollbackBlock.includes("$_rollbackErr->getMessage()") &&
+          !rollbackBlock.includes("jsonResponse") &&
+          !rollbackBlock.includes("throw "),
+        "AdSense safeRollback must log failures server-side without throwing or emitting rollback JSON",
+      );
+    });
   });
 });

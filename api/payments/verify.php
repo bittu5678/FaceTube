@@ -181,6 +181,29 @@ try {
     // Keep safe false defaults if metadata query fails
 }
 
+$isConnectionUnavailable = static function (Throwable $e): bool {
+    if (function_exists('isDatabaseConnectionUnavailableError')) {
+        return isDatabaseConnectionUnavailableError($e);
+    }
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 1042, 1053, 1129, 1203, 1927, 2002, 2003, 2005, 2006, 2013, 2026], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+};
+
+$safeRollback = static function (PDO $conn): void {
+    try {
+        if ($conn->inTransaction()) {
+            $conn->rollBack();
+        }
+    } catch (Throwable $_rollbackErr) {
+        // Log rollback failure server-side without masking the original exception
+        error_log('[verify.php][ROLLBACK] Rollback failed: ' . $_rollbackErr->getMessage());
+    }
+};
+
 try {
     $pdo->beginTransaction();
 
@@ -189,14 +212,26 @@ try {
     $stmtOrder->execute([$orderId]);
     $orderRecord = $stmtOrder->fetch();
 
+    // Resolve optional Bearer authentication fail-closed before order ownership checks
+    $suppliedBearerToken = function_exists('getBearerToken') ? getBearerToken() : null;
+    $authUser = getAuthUser($pdo, true);
+    if ($suppliedBearerToken !== null && !$authUser) {
+        $safeRollback($pdo);
+        jsonResponse([
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'error' => 'Invalid or expired authentication session. Please log in again.'
+        ], 401);
+    }
+
     if ($orderRecord) {
         // Authenticated user ownership verification
-        $authUser = getAuthUser($pdo);
         if ($authUser) {
             $isOrderOwner = strcasecmp($orderRecord['user_id'], $authUser['user_id']) === 0;
             $isAdmin = isset($authUser['role']) && strtolower($authUser['role']) === 'admin';
             if (!$isOrderOwner && !$isAdmin) {
-                $pdo->rollBack();
+                $safeRollback($pdo);
                 jsonResponse(['verified' => false, 'error' => 'Unauthorized: Payment order does not belong to the authenticated user.'], 403);
             }
         }
@@ -205,7 +240,7 @@ try {
         if (!empty($requestedUserId) && strcasecmp($orderRecord['user_id'], $requestedUserId) !== 0) {
             $isAdmin = $authUser && isset($authUser['role']) && strtolower($authUser['role']) === 'admin';
             if (!$isAdmin) {
-                $pdo->rollBack();
+                $safeRollback($pdo);
                 jsonResponse(['verified' => false, 'error' => 'Unauthorized: Payment order does not belong to the requested user.'], 403);
             }
         }
@@ -236,7 +271,7 @@ try {
                     // ignore
                 }
             }
-            $pdo->rollBack();
+            $safeRollback($pdo);
             $duplicateResp = [
                 'verified' => true,
                 'paymentId' => $paymentId,
@@ -300,7 +335,7 @@ try {
     // Verify gateway amount matches server authoritative amount (in paise)
     $expectedSubunits = (int)round($amount * 100);
     if ((int)($pData['amount'] ?? 0) !== $expectedSubunits) {
-        $pdo->rollBack();
+        $safeRollback($pdo);
         jsonResponse([
             'verified' => false,
             'error' => "Payment amount mismatch: expected ₹{$amount}, received " . (($pData['amount'] ?? 0) / 100)
@@ -336,7 +371,7 @@ try {
                 // ignore
             }
         }
-        $pdo->rollBack();
+        $safeRollback($pdo);
         $duplicateResp = [
             'verified' => true,
             'paymentId' => $existingTx['payment_id'],
@@ -1139,63 +1174,78 @@ try {
             'missingLevels' => $missingLevels,
         ]
     ]);
-} catch (PDOException $e) {
-    if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-    }
+} catch (Throwable $e) {
+    $safeRollback($pdo);
+
+    $isConnUnavailable = $isConnectionUnavailable($e);
 
     // Check for duplicate key conflict (error code 23000 / 1062)
-    if ($e->getCode() === '23000' || str_contains($e->getMessage(), '1062') || str_contains($e->getMessage(), 'Duplicate entry')) {
-        $stmtExisting = $pdo->prepare('SELECT * FROM payment_transactions WHERE payment_id = ? LIMIT 1');
-        $stmtExisting->execute([$paymentId]);
-        $existingTx = $stmtExisting->fetch();
-        if ($existingTx) {
-            $existingSub = null;
-            if ($existingTx['purpose'] === 'paid_subscription') {
-                try {
-                    $stmtSub = $pdo->prepare('SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1');
-                    $stmtSub->execute([$paymentId, $orderId]);
-                    $subRow = $stmtSub->fetch();
-                    if ($subRow) {
-                        $existingSub = [
-                            'subscriptionId' => $subRow['subscription_id'],
-                            'userId' => $subRow['user_id'],
-                            'planId' => $subRow['plan_id'],
-                            'orderId' => $subRow['order_id'],
-                            'paymentId' => $subRow['payment_id'],
-                            'amount' => floatval($subRow['amount']),
-                            'currency' => $subRow['currency'],
-                            'status' => $subRow['status'],
-                            'startsAt' => $subRow['starts_at'],
-                            'expiresAt' => $subRow['expires_at'],
-                        ];
+    if (
+        !$isConnUnavailable &&
+        ((string)$e->getCode() === '23000' || str_contains($e->getMessage(), '1062') || str_contains($e->getMessage(), 'Duplicate entry'))
+    ) {
+        try {
+            $stmtExisting = $pdo->prepare('SELECT * FROM payment_transactions WHERE payment_id = ? LIMIT 1');
+            $stmtExisting->execute([$paymentId]);
+            $existingTx = $stmtExisting->fetch();
+            if ($existingTx) {
+                $existingSub = null;
+                if ($existingTx['purpose'] === 'paid_subscription') {
+                    try {
+                        $stmtSub = $pdo->prepare('SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1');
+                        $stmtSub->execute([$paymentId, $orderId]);
+                        $subRow = $stmtSub->fetch();
+                        if ($subRow) {
+                            $existingSub = [
+                                'subscriptionId' => $subRow['subscription_id'],
+                                'userId' => $subRow['user_id'],
+                                'planId' => $subRow['plan_id'],
+                                'orderId' => $subRow['order_id'],
+                                'paymentId' => $subRow['payment_id'],
+                                'amount' => floatval($subRow['amount']),
+                                'currency' => $subRow['currency'],
+                                'status' => $subRow['status'],
+                                'startsAt' => $subRow['starts_at'],
+                                'expiresAt' => $subRow['expires_at'],
+                            ];
+                        }
+                    } catch (Exception $eSub) {
+                        // ignore
                     }
-                } catch (Exception $eSub) {
-                    // ignore
                 }
+                $duplicateResp = [
+                    'verified' => true,
+                    'paymentId' => $existingTx['payment_id'],
+                    'orderId' => $existingTx['order_id'],
+                    'amount' => floatval($existingTx['amount']),
+                    'purpose' => $existingTx['purpose'],
+                    'txNumber' => intval($existingTx['tx_number']),
+                    'isSpecialTransaction' => (bool)$existingTx['is_special'],
+                    'specialTag' => $existingTx['special_tag'],
+                    'duplicate' => true,
+                    'message' => 'Concurrent duplicate detected and resolved safely without double crediting.'
+                ];
+                if ($existingSub) {
+                    $duplicateResp['subscription'] = $existingSub;
+                }
+                jsonResponse($duplicateResp);
+                exit;
             }
-            $duplicateResp = [
-                'verified' => true,
-                'paymentId' => $existingTx['payment_id'],
-                'orderId' => $existingTx['order_id'],
-                'amount' => floatval($existingTx['amount']),
-                'purpose' => $existingTx['purpose'],
-                'txNumber' => intval($existingTx['tx_number']),
-                'isSpecialTransaction' => (bool)$existingTx['is_special'],
-                'specialTag' => $existingTx['special_tag'],
-                'duplicate' => true,
-                'message' => 'Concurrent duplicate detected and resolved safely without double crediting.'
-            ];
-            if ($existingSub) {
-                $duplicateResp['subscription'] = $existingSub;
-            }
-            jsonResponse($duplicateResp);
-            exit;
+        } catch (Throwable $_dupLookupErr) {
+            error_log('[verify.php] Duplicate lookup fallback failed: ' . $_dupLookupErr->getMessage());
         }
     }
 
     // Safe error message without exposing database tables or SQL traces
     error_log('[verify.php] Database Exception: ' . $e->getMessage());
+    if ($isConnUnavailable) {
+        jsonResponse([
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'error' => 'Database connection unavailable during payment verification. Transaction was safely rolled back.'
+        ], 503);
+    }
     jsonResponse([
         'verified' => false,
         'paymentId' => $paymentId,

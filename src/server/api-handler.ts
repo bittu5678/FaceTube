@@ -57,9 +57,10 @@ export function isAdPromotionActive(video: {
 }
 
 export function isFailClosedProductionEnv(appEnvRaw?: string, nodeEnvRaw?: string): boolean {
-  const appEnv = String(appEnvRaw ?? "")
+  const rawAppEnv = String(appEnvRaw ?? "")
     .trim()
     .toLowerCase();
+  const appEnv = /^v?\d+(?:\.\d+)+$/i.test(rawAppEnv) ? "" : rawAppEnv;
   const nodeEnv = String(nodeEnvRaw ?? "")
     .trim()
     .toLowerCase();

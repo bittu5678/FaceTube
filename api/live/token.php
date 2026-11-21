@@ -14,9 +14,30 @@
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../response.php';
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed. POST is required.'], 405);
 }
+
+$isConnectionUnavailable = static function (Throwable $e): bool {
+    if (function_exists('isDatabaseConnectionUnavailableError')) {
+        return isDatabaseConnectionUnavailableError($e);
+    }
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 1042, 1053, 1129, 1203, 1927, 2002, 2003, 2005, 2006, 2013, 2026], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+};
+
+$isMissingColumnError = static function (Throwable $e): bool {
+    if (!($e instanceof PDOException)) {
+        return false;
+    }
+    $sqlState = (string)$e->getCode();
+    $driverCode = isset($e->errorInfo[1]) ? (int)$e->errorInfo[1] : 0;
+    return $sqlState === '42S22' || $driverCode === 1054;
+};
 
 $pdo = getDatabaseConnection();
 
@@ -162,20 +183,42 @@ try {
         WHERE id = ?
         LIMIT 1
     ');
-    $stmt->execute([$streamId]);
-    $stream = $stmt->fetch();
-} catch (Exception $e) {
-    // If livekit_room_name column not migrated yet, query without it
-    try {
-        $stmt = $pdo->prepare('
-            SELECT id, user_id, title, status, stream_key, CONCAT("room_", id) as room_name
-            FROM live_streams
-            WHERE id = ?
-            LIMIT 1
-        ');
-        $stmt->execute([$streamId]);
-        $stream = $stmt->fetch();
-    } catch (Exception $fallbackErr) {
+    if ($stmt === false) {
+        throw new RuntimeException('Failed to prepare live stream lookup query.');
+    }
+    if ($stmt->execute([$streamId]) === false) {
+        throw new RuntimeException('Failed to execute live stream lookup query.');
+    }
+    $stream = $stmt->fetch(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    if ($isMissingColumnError($e)) {
+        // If livekit_room_name column not migrated yet, query without it
+        try {
+            $stmt = $pdo->prepare('
+                SELECT id, user_id, title, status, stream_key, CONCAT("room_", id) as room_name
+                FROM live_streams
+                WHERE id = ?
+                LIMIT 1
+            ');
+            if ($stmt === false) {
+                throw new RuntimeException('Failed to prepare fallback live stream lookup query.');
+            }
+            if ($stmt->execute([$streamId]) === false) {
+                throw new RuntimeException('Failed to execute fallback live stream lookup query.');
+            }
+            $stream = $stmt->fetch(PDO::FETCH_ASSOC);
+        } catch (Throwable $fallbackErr) {
+            error_log('[live/token.php][STREAM] Fallback database error: ' . $fallbackErr->getMessage());
+            if ($isConnectionUnavailable($fallbackErr)) {
+                jsonResponse(['success' => false, 'error' => 'Database connection unavailable while loading stream.'], 503);
+            }
+            jsonResponse(['success' => false, 'error' => 'Database error loading stream.'], 500);
+        }
+    } else {
+        error_log('[live/token.php][STREAM] Database error: ' . $e->getMessage());
+        if ($isConnectionUnavailable($e)) {
+            jsonResponse(['success' => false, 'error' => 'Database connection unavailable while loading stream.'], 503);
+        }
         jsonResponse(['success' => false, 'error' => 'Database error loading stream.'], 500);
     }
 }
@@ -188,9 +231,33 @@ if ($stream['status'] === 'ended') {
     jsonResponse(['success' => false, 'error' => 'This live broadcast has ended.'], 410);
 }
 
-// 4. Role validation and permission check
-$authUser = getAuthUser($pdo);
-$roomName = $stream['room_name'] ?: ("room_" . $stream['id']);
+// 4. Role validation and fail-closed authentication check
+$suppliedBearerToken = getBearerToken();
+try {
+    $authUser = getAuthUser($pdo, true);
+} catch (Throwable $e) {
+    error_log('[live/token.php][AUTH] Database error: ' . $e->getMessage());
+    if ($isConnectionUnavailable($e)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database connection unavailable during authentication check.'
+        ], 503);
+    }
+    jsonResponse([
+        'success' => false,
+        'error' => 'Database error during authentication check.'
+    ], 500);
+}
+
+// Never silently downgrade an invalid/expired supplied Bearer token to a guest session
+if ($suppliedBearerToken !== null && (!$authUser || empty($authUser['user_id']))) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Invalid or expired authentication session. Please log in again.'
+    ], 401);
+}
+
+$roomName = !empty($stream['room_name']) ? (string)$stream['room_name'] : ('room_' . (string)$stream['id']);
 
 $isBroadcaster = false;
 $participantIdentity = '';
@@ -198,7 +265,7 @@ $participantName = '';
 
 if ($requestedRole === 'publisher' || $requestedRole === 'broadcaster') {
     // Broadcaster MUST be authenticated
-    if (!$authUser) {
+    if (!$authUser || empty($authUser['user_id'])) {
         jsonResponse([
             'success' => false,
             'error' => 'Authentication required to obtain broadcaster publishing permissions.'
@@ -218,15 +285,15 @@ if ($requestedRole === 'publisher' || $requestedRole === 'broadcaster') {
     }
 
     $isBroadcaster = true;
-    $participantIdentity = $authUser['user_id'];
-    $participantName = $authUser['name'] ?: 'Broadcaster';
+    $participantIdentity = (string)$authUser['user_id'];
+    $participantName = !empty($authUser['name']) ? (string)$authUser['name'] : 'Broadcaster';
 } else {
     // Subscriber / Viewer role
-    if ($authUser) {
-        $participantIdentity = $authUser['user_id'];
-        $participantName = $authUser['name'] ?: 'Viewer';
+    if ($authUser && !empty($authUser['user_id'])) {
+        $participantIdentity = (string)$authUser['user_id'];
+        $participantName = !empty($authUser['name']) ? (string)$authUser['name'] : 'Viewer';
     } else {
-        // Safe, deterministic guest identity
+        // Legitimate unauthenticated guest live viewing (only when no Bearer token was supplied)
         $ip = $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1';
         $ua = $_SERVER['HTTP_USER_AGENT'] ?? 'browser';
         $guestHash = substr(hash('sha256', $ip . '|' . $ua . '|' . session_id()), 0, 12);
@@ -273,8 +340,10 @@ $jwtPayload = [
 ];
 
 // 6. Base64URL-encode and sign JWT
-function base64UrlEncode($data) {
-    return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+if (!function_exists('base64UrlEncode')) {
+    function base64UrlEncode($data) {
+        return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+    }
 }
 
 $encodedHeader = base64UrlEncode(json_encode($jwtHeader, JSON_UNESCAPED_SLASHES));

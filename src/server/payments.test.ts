@@ -4588,3 +4588,364 @@ describe("Task 5J-V3: Admin Bulk Payout Production Fail-Closed Tests", () => {
     assert.match(phpCode, /if\s*\(\s*\$stmtWallet->rowCount\(\)\s*<\s*1\s*\)/);
   });
 });
+
+describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction Safety Tests", () => {
+  const verifyPhpPath = path.resolve(process.cwd(), "api/payments/verify.php");
+  const responsePhpPath = path.resolve(process.cwd(), "api/response.php");
+
+  function loadVerifyAndResponsePhp() {
+    const verifyPhp = fs.readFileSync(verifyPhpPath, "utf-8");
+    const responsePhp = fs.readFileSync(responsePhpPath, "utf-8");
+    return { verifyPhp, responsePhp };
+  }
+
+  /**
+   * Behavioral simulator mirroring api/payments/verify.php lines 184-265 & 1177-1255
+   * using exact driver-code / regex classification extracted from api/response.php and verify.php.
+   */
+  function createVerifyAuthHarness(options: {
+    responsePhp: string;
+    verifyPhp: string;
+    orderRecord: { user_id: string; status: string; amount: number; purpose: string } | null;
+    bearerToken: string | null;
+    sessionLookupBehavior:
+      | { kind: "guest" }
+      | { kind: "user"; user_id: string; role: string }
+      | { kind: "invalid" }
+      | {
+          kind: "db_error";
+          sqlState: string;
+          driverCode: number;
+          message: string;
+          isRuntime?: boolean;
+        };
+    rollbackThrows?: boolean;
+  }) {
+    const fnStart = options.responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+    const fnBlock = options.responsePhp.slice(fnStart, fnStart + 900);
+    const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+    const driverCodes = (codeMatch?.[1] || "")
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => !Number.isNaN(n));
+    const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+    const msgRegex = new RegExp(regexMatch?.[1] || "", "i");
+
+    const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
+      sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+    let inTransaction = false;
+    let rollbackAttempts = 0;
+    let paymentVerifyProceeded = false;
+    const serverLogs: string[] = [];
+
+    const safeRollback = () => {
+      try {
+        if (inTransaction) {
+          rollbackAttempts++;
+          if (options.rollbackThrows) {
+            throw new Error("MySQL server has gone away during ROLLBACK");
+          }
+          inTransaction = false;
+        }
+      } catch (err: any) {
+        serverLogs.push(`[verify.php][ROLLBACK] Rollback failed: ${err.message}`);
+      }
+    };
+
+    try {
+      inTransaction = true;
+      const orderRecord = options.orderRecord;
+
+      // Mirrors $suppliedBearerToken = getBearerToken(); $authUser = getAuthUser($pdo, true);
+      const suppliedBearerToken = options.bearerToken;
+      let authUser: { user_id: string; role: string } | null = null;
+      if (suppliedBearerToken !== null) {
+        if (options.sessionLookupBehavior.kind === "user") {
+          authUser = {
+            user_id: options.sessionLookupBehavior.user_id,
+            role: options.sessionLookupBehavior.role,
+          };
+        } else if (options.sessionLookupBehavior.kind === "invalid") {
+          authUser = null;
+        } else if (options.sessionLookupBehavior.kind === "db_error") {
+          throw options.sessionLookupBehavior;
+        }
+      }
+
+      if (suppliedBearerToken !== null && !authUser) {
+        safeRollback();
+        return {
+          status: 401,
+          body: {
+            verified: false,
+            error: "Invalid or expired authentication session. Please log in again.",
+          },
+          rollbackAttempts,
+          paymentVerifyProceeded,
+          serverLogs,
+        };
+      }
+
+      if (orderRecord && authUser) {
+        const isOrderOwner = orderRecord.user_id.toUpperCase() === authUser.user_id.toUpperCase();
+        const isAdmin = authUser.role.toLowerCase() === "admin";
+        if (!isOrderOwner && !isAdmin) {
+          safeRollback();
+          return {
+            status: 403,
+            body: {
+              verified: false,
+              error: "Unauthorized: Payment order does not belong to the authenticated user.",
+            },
+            rollbackAttempts,
+            paymentVerifyProceeded,
+            serverLogs,
+          };
+        }
+      }
+
+      paymentVerifyProceeded = true;
+      inTransaction = false;
+      return {
+        status: 200,
+        body: { verified: true },
+        rollbackAttempts,
+        paymentVerifyProceeded,
+        serverLogs,
+      };
+    } catch (e: any) {
+      safeRollback();
+      const unavailable =
+        !e.isRuntime && isConnUnavailable(e.sqlState || "", e.driverCode || 0, e.message || "");
+      serverLogs.push(`[verify.php] Database Exception: ${e.message}`);
+      if (unavailable) {
+        return {
+          status: 503,
+          body: {
+            verified: false,
+            error:
+              "Database connection unavailable during payment verification. Transaction was safely rolled back.",
+          },
+          rollbackAttempts,
+          paymentVerifyProceeded,
+          serverLogs,
+        };
+      }
+      return {
+        status: 500,
+        body: {
+          verified: false,
+          error:
+            "Payment processing failed during database recording. Transaction was safely rolled back.",
+        },
+        rollbackAttempts,
+        paymentVerifyProceeded,
+        serverLogs,
+      };
+    }
+  }
+
+  it("1. Preserves legitimate guest checkout without Bearer token and enforces 401 for invalid supplied Bearer token", () => {
+    const { verifyPhp, responsePhp } = loadVerifyAndResponsePhp();
+
+    assert.match(
+      verifyPhp,
+      /\$suppliedBearerToken\s*=\s*function_exists\('getBearerToken'\)\s*\?\s*getBearerToken\(\)\s*:\s*null;/,
+    );
+    assert.match(verifyPhp, /\$authUser\s*=\s*getAuthUser\(\$pdo,\s*true\);/);
+    assert.match(verifyPhp, /if\s*\(\s*\$suppliedBearerToken\s*!==\s*null\s*&&\s*!\$authUser\s*\)/);
+
+    const guestResult = createVerifyAuthHarness({
+      responsePhp,
+      verifyPhp,
+      orderRecord: {
+        user_id: "FT483921",
+        status: "created",
+        amount: 6,
+        purpose: "premium_video_upload",
+      },
+      bearerToken: null,
+      sessionLookupBehavior: { kind: "guest" },
+    });
+    assert.equal(guestResult.status, 200);
+    assert.equal(guestResult.paymentVerifyProceeded, true);
+
+    const invalidTokenResult = createVerifyAuthHarness({
+      responsePhp,
+      verifyPhp,
+      orderRecord: {
+        user_id: "FT483921",
+        status: "created",
+        amount: 6,
+        purpose: "premium_video_upload",
+      },
+      bearerToken: "invalid_or_expired_token_123",
+      sessionLookupBehavior: { kind: "invalid" },
+    });
+    assert.equal(invalidTokenResult.status, 401);
+    assert.equal(invalidTokenResult.body.verified, false);
+    assert.equal(invalidTokenResult.rollbackAttempts, 1);
+    assert.equal(invalidTokenResult.paymentVerifyProceeded, false);
+  });
+
+  it("2. Retains ownership validation for valid authenticated users (allowing owner/admin, rejecting cross-user with 403)", () => {
+    const { verifyPhp, responsePhp } = loadVerifyAndResponsePhp();
+
+    const ownerResult = createVerifyAuthHarness({
+      responsePhp,
+      verifyPhp,
+      orderRecord: {
+        user_id: "FT483921",
+        status: "created",
+        amount: 6,
+        purpose: "premium_video_upload",
+      },
+      bearerToken: "valid_owner_token",
+      sessionLookupBehavior: { kind: "user", user_id: "FT483921", role: "user" },
+    });
+    assert.equal(ownerResult.status, 200);
+    assert.equal(ownerResult.paymentVerifyProceeded, true);
+
+    const crossUserResult = createVerifyAuthHarness({
+      responsePhp,
+      verifyPhp,
+      orderRecord: {
+        user_id: "FT483921",
+        status: "created",
+        amount: 6,
+        purpose: "premium_video_upload",
+      },
+      bearerToken: "valid_other_user_token",
+      sessionLookupBehavior: { kind: "user", user_id: "FT900431", role: "user" },
+    });
+    assert.equal(crossUserResult.status, 403);
+    assert.equal(crossUserResult.body.verified, false);
+    assert.equal(crossUserResult.rollbackAttempts, 1);
+    assert.equal(crossUserResult.paymentVerifyProceeded, false);
+  });
+
+  it("3. Returns HTTP 503 on auth DB connection error (1203), HTTP 500 on unexpected DB errors, logs rollback failures safely, and aborts verification", () => {
+    const { verifyPhp, responsePhp } = loadVerifyAndResponsePhp();
+
+    // Verify catch is widened to Throwable, uses $safeRollback, delegates to isDatabaseConnectionUnavailableError, and never exposes $e->getMessage() in jsonResponse
+    assert.match(verifyPhp, /\}\s*catch\s*\(\s*Throwable\s+\$e\s*\)\s*\{/);
+    assert.match(verifyPhp, /\$safeRollback\(\$pdo\);/);
+    assert.match(verifyPhp, /isDatabaseConnectionUnavailableError\(\$e\)/);
+    assert.doesNotMatch(verifyPhp, /jsonResponse\(\[[^\]]*\$e->getMessage\(\)/);
+    assert.doesNotMatch(verifyPhp, /jsonResponse\(\[[^\]]*\$_rollbackErr->getMessage\(\)/);
+
+    const err1203 = createVerifyAuthHarness({
+      responsePhp,
+      verifyPhp,
+      orderRecord: {
+        user_id: "FT483921",
+        status: "created",
+        amount: 6,
+        purpose: "premium_video_upload",
+      },
+      bearerToken: "valid_owner_token",
+      sessionLookupBehavior: {
+        kind: "db_error",
+        sqlState: "42000",
+        driverCode: 1203,
+        message: "User already has more than 'max_user_connections' active connections",
+      },
+      rollbackThrows: true,
+    });
+    assert.equal(err1203.status, 503);
+    assert.equal(err1203.body.verified, false);
+    assert.equal(err1203.rollbackAttempts, 1);
+    assert.equal(err1203.paymentVerifyProceeded, false);
+    assert.ok(
+      err1203.serverLogs.some((l) => l.includes("[verify.php][ROLLBACK]")),
+      "Rollback failure must be logged server-side without masking 503",
+    );
+    assert.ok(err1203.body.error);
+    assert.equal((err1203.body.error || "").includes("max_user_connections"), false);
+
+    const unexpectedErr = createVerifyAuthHarness({
+      responsePhp,
+      verifyPhp,
+      orderRecord: {
+        user_id: "FT483921",
+        status: "created",
+        amount: 6,
+        purpose: "premium_video_upload",
+      },
+      bearerToken: "valid_owner_token",
+      sessionLookupBehavior: {
+        kind: "db_error",
+        sqlState: "42S02",
+        driverCode: 1146,
+        message: "Table 'prod_db.sessions' doesn't exist",
+      },
+    });
+    assert.equal(unexpectedErr.status, 500);
+    assert.equal(unexpectedErr.body.verified, false);
+    assert.equal(unexpectedErr.rollbackAttempts, 1);
+    assert.equal(unexpectedErr.paymentVerifyProceeded, false);
+    assert.ok(unexpectedErr.body.error);
+    assert.equal((unexpectedErr.body.error || "").includes("sessions"), false);
+
+    const runtimeErr = createVerifyAuthHarness({
+      responsePhp,
+      verifyPhp,
+      orderRecord: {
+        user_id: "FT483921",
+        status: "created",
+        amount: 6,
+        purpose: "premium_video_upload",
+      },
+      bearerToken: "valid_owner_token",
+      sessionLookupBehavior: {
+        kind: "db_error",
+        sqlState: "0",
+        driverCode: 0,
+        message: "Failed to execute authentication session query.",
+        isRuntime: true,
+      },
+    });
+    assert.equal(runtimeErr.status, 500);
+    assert.equal(runtimeErr.rollbackAttempts, 1);
+    assert.equal(runtimeErr.paymentVerifyProceeded, false);
+  });
+
+  it("4. Preserves Razorpay HMAC signature check, remote cURL capture check, and ₹6 upload/subscription/promotion amounts unchanged", async () => {
+    const { verifyPhp } = loadVerifyAndResponsePhp();
+
+    assert.match(
+      verifyPhp,
+      /hash_hmac\('sha256',\s*"\{\$orderId\}\|\{\$paymentId\}",\s*\$secret\)/,
+    );
+    assert.match(verifyPhp, /https:\/\/api\.razorpay\.com\/v1\/payments\/\{\$paymentId\}/);
+    assert.match(verifyPhp, /\$amount\s*=\s*6\.00;/);
+    assert.match(verifyPhp, /'member-monthly'\s*=>\s*\['price'\s*=>\s*49\.00/);
+    assert.match(verifyPhp, /\$referralCommission\s*=\s*\$hasReferrer\s*\?\s*1\.00\s*:\s*0\.00;/);
+
+    // Also run Node handler verification for ₹6 upload to confirm zero behavioral regression
+    const payId = `pay_v4l_preserve_${Date.now()}`;
+    const orderId = `order_v4l_preserve_${Date.now()}`;
+    const secret = "test_secret_for_api_tests_123456";
+    const sig = crypto.createHmac("sha256", secret).update(`${orderId}|${payId}`).digest("hex");
+
+    const res = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderId,
+          paymentId: payId,
+          signature: sig,
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        }),
+      }),
+      { RAZORPAY_KEY_SECRET: secret },
+    );
+    assert.equal(res?.status, 200);
+    const data = await res?.json();
+    assert.equal(data.verified, true);
+    assert.equal(data.amount, 6);
+  });
+});

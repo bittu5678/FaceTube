@@ -2445,4 +2445,767 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       }
     });
   });
+
+  describe("8. Task 5J-V4-N: PHP Certificate Get API Authentication, Privacy & Fail-Closed Tests", () => {
+    const certGetPhpPath = path.resolve(process.cwd(), "api/certificates/get.php");
+    const responsePhpPath = path.resolve(process.cwd(), "api/response.php");
+
+    function loadCertPhpSources() {
+      return {
+        certGetPhp: fs.readFileSync(certGetPhpPath, "utf-8"),
+        responsePhp: fs.readFileSync(responsePhpPath, "utf-8"),
+      };
+    }
+
+    function createCertGetHarness(options: {
+      method?: string;
+      bearerToken: string | null;
+      queryUserId?: string;
+      authBehavior:
+        | { kind: "none" }
+        | { kind: "invalid" }
+        | { kind: "user"; id: string; user_id: string; role: string }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+      dbBehavior?:
+        | {
+            kind: "cert";
+            row: {
+              certificate_id: string;
+              user_id: string;
+              name: string;
+              issue_date: string;
+              verified: boolean | number;
+              pdf_url: string;
+            };
+          }
+        | { kind: "user_only"; name: string }
+        | { kind: "no_user" }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+      inTransaction?: boolean;
+      rollbackThrows?: boolean;
+    }) {
+      const { responsePhp } = loadCertPhpSources();
+      const fnStart = responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+      const fnBlock = responsePhp.slice(fnStart, fnStart + 900);
+      const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+      const driverCodes = (codeMatch?.[1] || "")
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => !Number.isNaN(n));
+      const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+      const msgRegex = new RegExp(regexMatch?.[1] || "", "i");
+
+      const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
+        sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+      let inTx = Boolean(options.inTransaction);
+      let rollbackAttempts = 0;
+      let dbQueryExecuted = false;
+      let resolvedTargetUserId: string | null = null;
+      const serverLogs: string[] = [];
+
+      const safeRollback = () => {
+        try {
+          if (inTx) {
+            rollbackAttempts++;
+            if (options.rollbackThrows) {
+              throw new Error("MySQL server has gone away during ROLLBACK");
+            }
+            inTx = false;
+          }
+        } catch (rbErr: any) {
+          serverLogs.push(`[certificates/get.php][ROLLBACK] Rollback failed: ${rbErr.message}`);
+        }
+      };
+
+      const method = options.method || "GET";
+      if (method !== "GET") {
+        return {
+          status: 405,
+          body: { success: false, error: "Method Not Allowed" },
+          dbQueryExecuted,
+          resolvedTargetUserId,
+          rollbackAttempts,
+          serverLogs,
+        };
+      }
+
+      let authUser: { id: string; user_id: string; role: string } | null = null;
+      try {
+        if (options.bearerToken !== null) {
+          if (options.authBehavior.kind === "user") {
+            authUser = {
+              id: options.authBehavior.id,
+              user_id: options.authBehavior.user_id,
+              role: options.authBehavior.role,
+            };
+          } else if (options.authBehavior.kind === "invalid") {
+            authUser = null;
+          } else if (options.authBehavior.kind === "db_error") {
+            throw options.authBehavior;
+          }
+        }
+      } catch (e: any) {
+        safeRollback();
+        serverLogs.push(`[certificates/get.php][AUTH] Database error: ${e.message}`);
+        if (
+          !e.isRuntime &&
+          isConnUnavailable(e.sqlState || "", e.driverCode || 0, e.message || "")
+        ) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable during authentication check.",
+            },
+            dbQueryExecuted,
+            resolvedTargetUserId,
+            rollbackAttempts,
+            serverLogs,
+          };
+        }
+        return {
+          status: 500,
+          body: { success: false, error: "Database error during authentication check." },
+          dbQueryExecuted,
+          resolvedTargetUserId,
+          rollbackAttempts,
+          serverLogs,
+        };
+      }
+
+      if (!authUser || !authUser.user_id) {
+        return {
+          status: 401,
+          body: {
+            success: false,
+            error: "Authentication required. Please provide a valid Bearer session token.",
+          },
+          dbQueryExecuted,
+          resolvedTargetUserId,
+          rollbackAttempts,
+          serverLogs,
+        };
+      }
+
+      const requestedUserId = (options.queryUserId || "").trim();
+      if (requestedUserId === "") {
+        resolvedTargetUserId = authUser.user_id;
+      } else if (
+        requestedUserId.toUpperCase() === authUser.user_id.toUpperCase() ||
+        (authUser.id && requestedUserId.toUpperCase() === authUser.id.toUpperCase())
+      ) {
+        resolvedTargetUserId = authUser.user_id;
+      } else if (authUser.role.toLowerCase() === "admin") {
+        resolvedTargetUserId = requestedUserId;
+      } else {
+        return {
+          status: 403,
+          body: {
+            success: false,
+            error:
+              "Unauthorized: Cross-user certificate access is restricted to verified administrators.",
+          },
+          dbQueryExecuted,
+          resolvedTargetUserId,
+          rollbackAttempts,
+          serverLogs,
+        };
+      }
+
+      try {
+        dbQueryExecuted = true;
+        const db = options.dbBehavior || { kind: "user_only", name: "FaceTube Creator" };
+        if (db.kind === "db_error") {
+          throw db;
+        }
+        if (db.kind === "cert") {
+          return {
+            status: 200,
+            body: {
+              success: true,
+              certificate: {
+                certificateId: db.row.certificate_id,
+                userId: db.row.user_id,
+                name: db.row.name,
+                issueDate: db.row.issue_date,
+                verified: Boolean(db.row.verified),
+                pdfUrl: db.row.pdf_url,
+              },
+            },
+            dbQueryExecuted,
+            resolvedTargetUserId,
+            rollbackAttempts,
+            serverLogs,
+          };
+        }
+        const name = db.kind === "user_only" ? db.name : "FaceTube Creator";
+        return {
+          status: 200,
+          body: {
+            success: true,
+            certificate: {
+              certificateId: `FT-CERT-${resolvedTargetUserId.toUpperCase()}`,
+              userId: resolvedTargetUserId,
+              name,
+              issueDate: "2026-11-21",
+              verified: true,
+            },
+          },
+          dbQueryExecuted,
+          resolvedTargetUserId,
+          rollbackAttempts,
+          serverLogs,
+        };
+      } catch (e: any) {
+        safeRollback();
+        serverLogs.push(`[certificates/get.php] Database error: ${e.message}`);
+        if (
+          !e.isRuntime &&
+          isConnUnavailable(e.sqlState || "", e.driverCode || 0, e.message || "")
+        ) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable while loading certificate.",
+            },
+            dbQueryExecuted,
+            resolvedTargetUserId,
+            rollbackAttempts,
+            serverLogs,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            error: "Failed to load certificate due to a server error.",
+          },
+          dbQueryExecuted,
+          resolvedTargetUserId,
+          rollbackAttempts,
+          serverLogs,
+        };
+      }
+    }
+
+    it("1. Removes hardcoded FT102857 fallback and rejects unauthenticated or invalid-token requests with 401", () => {
+      const { certGetPhp } = loadCertPhpSources();
+
+      assert.doesNotMatch(
+        certGetPhp,
+        /FT102857/,
+        "api/certificates/get.php must never contain hardcoded FT102857 fallback",
+      );
+      assert.match(certGetPhp, /\$authUser\s*=\s*getAuthUser\(\$pdo,\s*true\);/);
+      assert.match(
+        certGetPhp,
+        /if\s*\(\s*!\$authUser\s*\|\|\s*empty\(\$authUser\['user_id'\]\)\s*\)/,
+      );
+      assert.match(certGetPhp, /jsonResponse\([\s\S]*?401\s*\);/);
+
+      const authPos = certGetPhp.indexOf("getAuthUser($pdo, true)");
+      const getQueryPos = certGetPhp.indexOf("$_GET['userId']");
+      assert.ok(authPos > 0 && authPos < getQueryPos, "Auth must run before reading $_GET userId");
+
+      const unauthOmitted = createCertGetHarness({
+        bearerToken: null,
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(unauthOmitted.status, 401);
+      assert.equal(unauthOmitted.dbQueryExecuted, false);
+      assert.equal("certificate" in unauthOmitted.body, false);
+
+      const unauthWithTarget = createCertGetHarness({
+        bearerToken: null,
+        queryUserId: "FT483921",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(unauthWithTarget.status, 401);
+      assert.equal(unauthWithTarget.dbQueryExecuted, false);
+
+      const invalidSession = createCertGetHarness({
+        bearerToken: "expired_or_invalid_session_tok",
+        queryUserId: "FT483921",
+        authBehavior: { kind: "invalid" },
+      });
+      assert.equal(invalidSession.status, 401);
+      assert.equal(invalidSession.dbQueryExecuted, false);
+    });
+
+    it("2. Allows authenticated user to retrieve own certificate and denies cross-user lookup unless verified admin", () => {
+      const { certGetPhp } = loadCertPhpSources();
+      assert.match(
+        certGetPhp,
+        /\$isAdmin\s*=\s*isset\(\$authUser\['role'\]\)\s*&&\s*strtolower\(trim\(\(string\)\$authUser\['role'\]\)\)\s*===\s*'admin'/,
+      );
+      assert.match(certGetPhp, /jsonResponse\([\s\S]*?403\s*\);/);
+
+      // Own lookup with userId omitted (stored certificate row)
+      const selfStored = createCertGetHarness({
+        bearerToken: "valid_user_tok",
+        authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+        dbBehavior: {
+          kind: "cert",
+          row: {
+            certificate_id: "FT-CERT-FT483921",
+            user_id: "FT483921",
+            name: "Alex Rivera",
+            issue_date: "2026-10-01",
+            verified: 1,
+            pdf_url: "https://api.facetube.online/uploads/certs/ft483921.pdf",
+          },
+        },
+      });
+      assert.equal(selfStored.status, 200);
+      assert.equal(selfStored.resolvedTargetUserId, "FT483921");
+      assert.deepEqual(selfStored.body, {
+        success: true,
+        certificate: {
+          certificateId: "FT-CERT-FT483921",
+          userId: "FT483921",
+          name: "Alex Rivera",
+          issueDate: "2026-10-01",
+          verified: true,
+          pdfUrl: "https://api.facetube.online/uploads/certs/ft483921.pdf",
+        },
+      });
+
+      // Own lookup with matching internal UUID resolves to canonical FT user_id and default certificate shape
+      const selfDefault = createCertGetHarness({
+        bearerToken: "valid_user_tok",
+        queryUserId: "UUID-483921",
+        authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+        dbBehavior: { kind: "user_only", name: "Alex Rivera" },
+      });
+      assert.equal(selfDefault.status, 200);
+      assert.equal(selfDefault.resolvedTargetUserId, "FT483921");
+      assert.deepEqual((selfDefault.body as any).certificate, {
+        certificateId: "FT-CERT-FT483921",
+        userId: "FT483921",
+        name: "Alex Rivera",
+        issueDate: "2026-11-21",
+        verified: true,
+      });
+
+      // Non-admin cross-user lookup rejected with 403
+      const crossUser = createCertGetHarness({
+        bearerToken: "valid_user_tok",
+        queryUserId: "FT900431",
+        authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+      });
+      assert.equal(crossUser.status, 403);
+      assert.equal(crossUser.dbQueryExecuted, false);
+
+      // Verified admin cross-user lookup succeeds
+      const adminCross = createCertGetHarness({
+        bearerToken: "valid_admin_tok",
+        queryUserId: "FT900431",
+        authBehavior: { kind: "user", id: "uuid-102857", user_id: "FT102857", role: "admin" },
+        dbBehavior: { kind: "user_only", name: "Maya Lin" },
+      });
+      assert.equal(adminCross.status, 200);
+      assert.equal(adminCross.resolvedTargetUserId, "FT900431");
+      assert.equal((adminCross.body as any).certificate.name, "Maya Lin");
+    });
+
+    it("3. Returns HTTP 503 on DB connection failures and sanitized HTTP 500 on unexpected errors without leaking or falling back", () => {
+      const { certGetPhp } = loadCertPhpSources();
+      assert.match(certGetPhp, /\}\s*catch\s*\(\s*Throwable\s+\$e\s*\)\s*\{/);
+      assert.match(certGetPhp, /isDatabaseConnectionUnavailableError\(\$e\)/);
+      assert.match(certGetPhp, /\$safeRollback\(\$pdo\);/);
+      assert.match(certGetPhp, /error_log\(/);
+      assert.doesNotMatch(certGetPhp, /jsonResponse\([^\n]*\$e->getMessage\(\)/);
+
+      // Auth DB 1203 connection failure -> 503 + safe rollback
+      const auth1203 = createCertGetHarness({
+        bearerToken: "valid_user_tok",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42000",
+          driverCode: 1203,
+          message: "User already has more than 'max_user_connections' active connections",
+        },
+        inTransaction: true,
+        rollbackThrows: true,
+      });
+      assert.equal(auth1203.status, 503);
+      assert.equal(auth1203.body.success, false);
+      assert.equal(auth1203.dbQueryExecuted, false);
+      assert.equal(auth1203.rollbackAttempts, 1);
+      assert.ok(auth1203.serverLogs.some((l) => l.includes("[ROLLBACK]")));
+      assert.equal(String(auth1203.body.error).includes("max_user_connections"), false);
+
+      // Auth unexpected DB 1146 -> sanitized 500
+      const auth1146 = createCertGetHarness({
+        bearerToken: "valid_user_tok",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42S02",
+          driverCode: 1146,
+          message: "Table 'prod_db.sessions' doesn't exist",
+        },
+      });
+      assert.equal(auth1146.status, 500);
+      assert.equal(auth1146.dbQueryExecuted, false);
+      assert.equal(String(auth1146.body.error).includes("sessions"), false);
+
+      // Certificate query DB 2002 -> 503 (never returns FT102857 or any certificate)
+      const cert2002 = createCertGetHarness({
+        bearerToken: "valid_user_tok",
+        authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+        dbBehavior: {
+          kind: "db_error",
+          sqlState: "HY000",
+          driverCode: 2002,
+          message: "Connection refused",
+        },
+      });
+      assert.equal(cert2002.status, 503);
+      assert.equal("certificate" in cert2002.body, false);
+
+      // Certificate query unexpected RuntimeException -> sanitized 500
+      const certRuntime = createCertGetHarness({
+        bearerToken: "valid_user_tok",
+        authBehavior: { kind: "user", id: "uuid-483921", user_id: "FT483921", role: "user" },
+        dbBehavior: {
+          kind: "db_error",
+          sqlState: "0",
+          driverCode: 0,
+          message: "Failed to execute certificate lookup query on prod_db.certificates",
+          isRuntime: true,
+        },
+      });
+      assert.equal(certRuntime.status, 500);
+      assert.equal("certificate" in certRuntime.body, false);
+      assert.equal(String(certRuntime.body.error).includes("prod_db"), false);
+
+      // Method not allowed preserved
+      const res405 = createCertGetHarness({
+        method: "POST",
+        bearerToken: null,
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(res405.status, 405);
+    });
+  });
+
+  describe("9. Task 5J-V4-S: PHP api/auth/me.php Authentication Fail-Closed Safety", () => {
+    interface MeAuthUser {
+      id: string;
+      user_id: string;
+      name: string;
+      mobile: string;
+      email: string;
+      role: string;
+      referral_code: string;
+      avatar_url: string | null;
+      channel_logo_url: string | null;
+      channel_name: string | null;
+      channel_description: string | null;
+      created_at: string;
+    }
+
+    interface MeHarnessResponse {
+      status: number;
+      body: {
+        success?: boolean;
+        authenticated: boolean;
+        user: MeAuthUser | null;
+        error?: string;
+      };
+      sessionQueryExecuted: boolean;
+      serverLogs: string[];
+    }
+
+    function loadMePhpSources() {
+      const mePhp = fs.readFileSync(path.resolve(process.cwd(), "api/auth/me.php"), "utf-8");
+      const responsePhp = fs.readFileSync(path.resolve(process.cwd(), "api/response.php"), "utf-8");
+      return { mePhp, responsePhp };
+    }
+
+    function createAuthMeHarness(options: {
+      bearerToken: string | null;
+      queryUserId?: string;
+      authBehavior:
+        | { kind: "none" }
+        | { kind: "invalid" }
+        | { kind: "user"; user: MeAuthUser }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+    }): MeHarnessResponse {
+      const { responsePhp } = loadMePhpSources();
+      const fnStart = responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+      const fnBlock = responsePhp.slice(fnStart, fnStart + 900);
+      const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+      const driverCodes = (codeMatch?.[1] || "")
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => !Number.isNaN(n));
+      const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+      const msgRegex = new RegExp(regexMatch?.[1] || "", "i");
+
+      const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
+        sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+      let sessionQueryExecuted = false;
+      const serverLogs: string[] = [];
+
+      // Client-supplied user_id (e.g. ?user_id=...) is ignored by api/auth/me.php
+      void options.queryUserId;
+
+      if (options.bearerToken === null || options.bearerToken.trim() === "") {
+        return {
+          status: 200,
+          body: { authenticated: false, user: null },
+          sessionQueryExecuted,
+          serverLogs,
+        };
+      }
+
+      let user: MeAuthUser | null = null;
+      try {
+        sessionQueryExecuted = true;
+        if (options.authBehavior.kind === "user") {
+          user = options.authBehavior.user;
+        } else if (
+          options.authBehavior.kind === "invalid" ||
+          options.authBehavior.kind === "none"
+        ) {
+          user = null;
+        } else if (options.authBehavior.kind === "db_error") {
+          throw options.authBehavior;
+        }
+      } catch (e: unknown) {
+        const err = e as {
+          sqlState?: string;
+          driverCode?: number;
+          message?: string;
+          isRuntime?: boolean;
+        };
+        serverLogs.push(`[auth/me.php][AUTH] Database error: ${err.message || ""}`);
+        if (
+          !err.isRuntime &&
+          isConnUnavailable(err.sqlState || "", err.driverCode || 0, err.message || "")
+        ) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              authenticated: false,
+              user: null,
+              error: "Database connection unavailable during authentication check.",
+            },
+            sessionQueryExecuted,
+            serverLogs,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            authenticated: false,
+            user: null,
+            error: "Database error during authentication check.",
+          },
+          sessionQueryExecuted,
+          serverLogs,
+        };
+      }
+
+      if (!user || !user.user_id) {
+        return {
+          status: 200,
+          body: { authenticated: false, user: null },
+          sessionQueryExecuted,
+          serverLogs,
+        };
+      }
+
+      return {
+        status: 200,
+        body: { authenticated: true, user },
+        sessionQueryExecuted,
+        serverLogs,
+      };
+    }
+
+    it("1. Preserves static fail-closed contract in api/auth/me.php without trusting client user IDs", () => {
+      const { mePhp } = loadMePhpSources();
+
+      assert.match(mePhp, /getDatabaseConnection\(\)/);
+      assert.match(mePhp, /getBearerToken\(\)/);
+      assert.match(mePhp, /getAuthUser\(\$pdo,\s*true\)/);
+      assert.match(mePhp, /\}\s*catch\s*\(\s*Throwable\s+\$e\s*\)\s*\{/);
+      assert.match(mePhp, /isDatabaseConnectionUnavailableError\(\$e\)/);
+      assert.match(mePhp, /error_log\(/);
+      assert.match(mePhp, /'authenticated'\s*=>\s*false,\s*'user'\s*=>\s*null/);
+      assert.match(mePhp, /'authenticated'\s*=>\s*true,\s*'user'\s*=>\s*\$user/);
+      assert.doesNotMatch(mePhp, /\$_GET|\$_POST|getRequestPayload\(/);
+      assert.doesNotMatch(mePhp, /FT102857|facetube_store\.json/);
+      assert.doesNotMatch(mePhp, /jsonResponse\([^\n]*\$e->getMessage\(\)/);
+    });
+
+    it("2. Handles no credentials, valid session, invalid/expired token, and client-supplied user ID impersonation attempts", () => {
+      // 1) No credentials -> existing unauthenticated response preserved (200)
+      const noCreds = createAuthMeHarness({
+        bearerToken: null,
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(noCreds.status, 200);
+      assert.deepEqual(noCreds.body, { authenticated: false, user: null });
+      assert.equal(noCreds.sessionQueryExecuted, false);
+
+      // 2) Valid session -> existing authenticated response structure and user fields preserved
+      const alexUser: MeAuthUser = {
+        id: "uuid-483921",
+        user_id: "FT483921",
+        name: "Alex Rivera",
+        mobile: "+1 555-014-8392",
+        email: "alex@facetube.com",
+        role: "user",
+        referral_code: "CREATOR50",
+        avatar_url: null,
+        channel_logo_url: "https://api.facetube.online/uploads/logos/alex.png",
+        channel_name: "Alex Studio",
+        channel_description: "Creator channel",
+        created_at: "2026-11-01T00:00:00.000Z",
+      };
+      const validSession = createAuthMeHarness({
+        bearerToken: "tok_valid_alex_5js",
+        authBehavior: { kind: "user", user: alexUser },
+      });
+      assert.equal(validSession.status, 200);
+      assert.equal(validSession.body.authenticated, true);
+      assert.deepEqual(validSession.body.user, alexUser);
+      assert.equal(validSession.sessionQueryExecuted, true);
+
+      // 3) Invalid / expired token -> not authenticated
+      const expiredToken = createAuthMeHarness({
+        bearerToken: "tok_expired_5js",
+        authBehavior: { kind: "invalid" },
+      });
+      assert.equal(expiredToken.status, 200);
+      assert.deepEqual(expiredToken.body, { authenticated: false, user: null });
+      assert.equal(expiredToken.sessionQueryExecuted, true);
+
+      // Empty Bearer credential -> not authenticated
+      const emptyToken = createAuthMeHarness({
+        bearerToken: "   ",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(emptyToken.status, 200);
+      assert.deepEqual(emptyToken.body, { authenticated: false, user: null });
+
+      // 4) Client-supplied user_id cannot impersonate another account (anonymous or authenticated)
+      const unauthSpoof = createAuthMeHarness({
+        bearerToken: null,
+        queryUserId: "FT102857",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(unauthSpoof.status, 200);
+      assert.deepEqual(unauthSpoof.body, { authenticated: false, user: null });
+
+      const authSpoof = createAuthMeHarness({
+        bearerToken: "tok_valid_alex_5js",
+        queryUserId: "FT102857",
+        authBehavior: { kind: "user", user: alexUser },
+      });
+      assert.equal(authSpoof.status, 200);
+      assert.equal(authSpoof.body.authenticated, true);
+      assert.equal(authSpoof.body.user?.user_id, "FT483921");
+    });
+
+    it("3. Returns HTTP 503 on auth DB connection failures and sanitized HTTP 500 on unexpected DB/runtime failures", () => {
+      // MySQL 1203 ER_TOO_MANY_USER_CONNECTIONS -> 503 (never 200 authenticated:false)
+      const db1203 = createAuthMeHarness({
+        bearerToken: "tok_secret_session_1203",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42000",
+          driverCode: 1203,
+          message:
+            "SQLSTATE[42000] [1203] User u123_prod already has more than 'max_user_connections' active connections",
+        },
+      });
+      assert.equal(db1203.status, 503);
+      assert.equal(db1203.body.success, false);
+      assert.equal(db1203.body.authenticated, false);
+      assert.equal(db1203.body.user, null);
+      assert.equal(db1203.sessionQueryExecuted, true);
+      assert.ok(db1203.serverLogs.some((l) => l.includes("max_user_connections")));
+      const db1203Serialized = JSON.stringify(db1203.body);
+      assert.doesNotMatch(
+        db1203Serialized,
+        /SQLSTATE|u123_prod|max_user_connections|tok_secret_session_1203/,
+      );
+
+      // MySQL 2002 / 08S01 -> 503
+      const db2002 = createAuthMeHarness({
+        bearerToken: "tok_secret_session_2002",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "08S01",
+          driverCode: 2002,
+          message: "SQLSTATE[HY000] [2002] Connection refused to mysql.internal:3306",
+        },
+      });
+      assert.equal(db2002.status, 503);
+      assert.equal(db2002.body.authenticated, false);
+      assert.doesNotMatch(JSON.stringify(db2002.body), /mysql\.internal|SQLSTATE|tok_secret/);
+
+      // Unexpected DB error (e.g. 1146 missing sessions table) -> sanitized 500
+      const db1146 = createAuthMeHarness({
+        bearerToken: "tok_secret_session_1146",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42S02",
+          driverCode: 1146,
+          message: "Table 'facetube_prod.sessions' doesn't exist in SELECT s.token FROM sessions",
+        },
+      });
+      assert.equal(db1146.status, 500);
+      assert.equal(db1146.body.success, false);
+      assert.equal(db1146.body.authenticated, false);
+      assert.equal(db1146.body.user, null);
+      assert.ok(db1146.serverLogs.some((l) => l.includes("facetube_prod.sessions")));
+      assert.doesNotMatch(
+        JSON.stringify(db1146.body),
+        /SELECT|sessions|facetube_prod|tok_secret_session_1146/,
+      );
+
+      // Unexpected RuntimeException -> sanitized 500
+      const runtimeErr = createAuthMeHarness({
+        bearerToken: "tok_secret_session_rt",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "0",
+          driverCode: 0,
+          message: "Failed to prepare authentication session query on secret_host",
+          isRuntime: true,
+        },
+      });
+      assert.equal(runtimeErr.status, 500);
+      assert.equal(runtimeErr.body.authenticated, false);
+      assert.doesNotMatch(JSON.stringify(runtimeErr.body), /secret_host|prepare|tok_secret/);
+    });
+  });
 });

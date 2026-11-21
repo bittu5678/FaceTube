@@ -137,8 +137,8 @@ function isDatabaseConnectionUnavailableError(Throwable $e): bool {
     $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
     $msg = $e->getMessage();
     return str_starts_with($sqlState, '08')
-        || in_array($driverCode, [1040, 2002, 2003, 2005, 2006, 2013], true)
-        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+        || in_array($driverCode, [1040, 1042, 1053, 1129, 1203, 1927, 2002, 2003, 2005, 2006, 2013, 2026], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
 }
 
 function getAuthUser($pdo, bool $rethrowDbError = false) {

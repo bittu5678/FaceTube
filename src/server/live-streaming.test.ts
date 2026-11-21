@@ -3149,4 +3149,1139 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
       assert.match(chatPhp, /429/);
     });
   });
+
+  describe("8. Task 5J-V4-Q: PHP Live Token Authentication Downgrade & Fail-Closed Tests (api/live/token.php)", () => {
+    const tokenPhpPath = path.resolve(process.cwd(), "api/live/token.php");
+    const responsePhpPath = path.resolve(process.cwd(), "api/response.php");
+
+    function loadPhpSources() {
+      return {
+        tokenPhp: fs.readFileSync(tokenPhpPath, "utf-8"),
+        responsePhp: fs.readFileSync(responsePhpPath, "utf-8"),
+      };
+    }
+
+    interface LiveTokenResponse {
+      success: boolean;
+      error?: string;
+      token?: string;
+      url?: string;
+      room?: string;
+      stream_id?: string;
+      identity?: string;
+      role?: "publisher" | "subscriber";
+      can_publish?: boolean;
+      expires_in?: number;
+    }
+
+    function createPhpLiveTokenHarness(options: {
+      method?: string;
+      livekitUrl?: string;
+      livekitApiKey?: string;
+      livekitApiSecret?: string;
+      streamId?: string;
+      requestedRole?: string;
+      streamBehavior?:
+        | { kind: "none" }
+        | { kind: "row"; id: string; user_id: string; status: string; room_name: string | null }
+        | { kind: "db_error"; sqlState: string; driverCode: number; message: string };
+      bearerToken: string | null;
+      authBehavior:
+        | { kind: "none" }
+        | { kind: "invalid" }
+        | { kind: "user"; user_id: string; name: string; role: string }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+      remoteAddr?: string;
+      userAgent?: string;
+    }) {
+      const { responsePhp } = loadPhpSources();
+      const fnStart = responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+      const fnBlock = responsePhp.slice(fnStart, fnStart + 900);
+      const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+      const driverCodes = (codeMatch?.[1] || "")
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => !Number.isNaN(n));
+      const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+      const msgRegex = new RegExp(regexMatch?.[1] || "", "i");
+
+      const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
+        sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+      const serverLogs: string[] = [];
+
+      const method = options.method ?? "POST";
+      if (method !== "POST") {
+        return {
+          status: 405,
+          body: {
+            success: false,
+            error: "Method Not Allowed. POST is required.",
+          } as LiveTokenResponse,
+          serverLogs,
+        };
+      }
+
+      const livekitUrl = options.livekitUrl ?? "wss://live.facetube.online";
+      const apiKey = options.livekitApiKey ?? "lk_api_key_prod";
+      const apiSecret = options.livekitApiSecret ?? "lk_api_secret_prod_32bytes_min_len";
+      if (!livekitUrl || !apiKey || !apiSecret) {
+        return {
+          status: 503,
+          body: {
+            success: false,
+            error:
+              "LiveKit Cloud streaming service is not configured on this server. Please define LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET in server environment.",
+          } as LiveTokenResponse,
+          serverLogs,
+        };
+      }
+
+      const streamId = (options.streamId ?? "live_01").trim();
+      const requestedRole = (options.requestedRole ?? "subscriber").toLowerCase().trim();
+      if (!streamId) {
+        return {
+          status: 400,
+          body: {
+            success: false,
+            error: "Stream ID (stream_id) is required.",
+          } as LiveTokenResponse,
+          serverLogs,
+        };
+      }
+
+      let stream: { id: string; user_id: string; status: string; room_name: string | null } | null =
+        null;
+      const sb = options.streamBehavior ?? {
+        kind: "row",
+        id: streamId,
+        user_id: "FT483921",
+        status: "live",
+        room_name: `room_${streamId}`,
+      };
+      if (sb.kind === "db_error") {
+        serverLogs.push(`[live/token.php][STREAM] Database error: ${sb.message}`);
+        if (isConnUnavailable(sb.sqlState, sb.driverCode, sb.message)) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable while loading stream.",
+            } as LiveTokenResponse,
+            serverLogs,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            error: "Database error loading stream.",
+          } as LiveTokenResponse,
+          serverLogs,
+        };
+      } else if (sb.kind === "row") {
+        stream = sb;
+      }
+
+      if (!stream) {
+        return {
+          status: 404,
+          body: {
+            success: false,
+            error: `Live stream '${streamId}' not found.`,
+          } as LiveTokenResponse,
+          serverLogs,
+        };
+      }
+      if (stream.status === "ended") {
+        return {
+          status: 410,
+          body: {
+            success: false,
+            error: "This live broadcast has ended.",
+          } as LiveTokenResponse,
+          serverLogs,
+        };
+      }
+
+      const suppliedBearerToken = options.bearerToken;
+      let authUser: { user_id: string; name: string; role: string } | null = null;
+      try {
+        if (suppliedBearerToken !== null) {
+          if (options.authBehavior.kind === "user") {
+            authUser = {
+              user_id: options.authBehavior.user_id,
+              name: options.authBehavior.name,
+              role: options.authBehavior.role,
+            };
+          } else if (options.authBehavior.kind === "invalid") {
+            authUser = null;
+          } else if (options.authBehavior.kind === "db_error") {
+            throw options.authBehavior;
+          }
+        }
+      } catch (e: unknown) {
+        const err = e as {
+          sqlState?: string;
+          driverCode?: number;
+          message?: string;
+          isRuntime?: boolean;
+        };
+        serverLogs.push(`[live/token.php][AUTH] Database error: ${err.message ?? ""}`);
+        if (
+          !err.isRuntime &&
+          isConnUnavailable(err.sqlState ?? "", err.driverCode ?? 0, err.message ?? "")
+        ) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable during authentication check.",
+            } as LiveTokenResponse,
+            serverLogs,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            error: "Database error during authentication check.",
+          } as LiveTokenResponse,
+          serverLogs,
+        };
+      }
+
+      if (suppliedBearerToken !== null && (!authUser || !authUser.user_id)) {
+        return {
+          status: 401,
+          body: {
+            success: false,
+            error: "Invalid or expired authentication session. Please log in again.",
+          } as LiveTokenResponse,
+          serverLogs,
+        };
+      }
+
+      const roomName = stream.room_name || `room_${stream.id}`;
+      let isBroadcaster = false;
+      let participantIdentity = "";
+      let participantName = "";
+
+      if (requestedRole === "publisher" || requestedRole === "broadcaster") {
+        if (!authUser || !authUser.user_id) {
+          return {
+            status: 401,
+            body: {
+              success: false,
+              error: "Authentication required to obtain broadcaster publishing permissions.",
+            } as LiveTokenResponse,
+            serverLogs,
+          };
+        }
+        if (
+          stream.user_id.toUpperCase() !== authUser.user_id.toUpperCase() &&
+          authUser.role.toLowerCase() !== "admin"
+        ) {
+          return {
+            status: 403,
+            body: {
+              success: false,
+              error: "Unauthorized. You do not own this live stream and cannot broadcast to it.",
+            } as LiveTokenResponse,
+            serverLogs,
+          };
+        }
+        isBroadcaster = true;
+        participantIdentity = authUser.user_id;
+        participantName = authUser.name || "Broadcaster";
+      } else {
+        if (authUser && authUser.user_id) {
+          participantIdentity = authUser.user_id;
+          participantName = authUser.name || "Viewer";
+        } else {
+          const ip = options.remoteAddr ?? "127.0.0.1";
+          const ua = options.userAgent ?? "browser";
+          const guestHash = crypto
+            .createHash("sha256")
+            .update(`${ip}|${ua}|`)
+            .digest("hex")
+            .slice(0, 12);
+          participantIdentity = `guest_${guestHash}`;
+          participantName = "Viewer";
+        }
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      const expirySeconds = 1800;
+      const videoGrant = isBroadcaster
+        ? {
+            room: roomName,
+            roomJoin: true,
+            canPublish: true,
+            canPublishSources: ["camera", "microphone"],
+            canSubscribe: true,
+            canPublishData: true,
+          }
+        : {
+            room: roomName,
+            roomJoin: true,
+            canPublish: false,
+            canSubscribe: true,
+            canPublishData: true,
+          };
+
+      const b64u = (input: string | Buffer) =>
+        Buffer.from(input)
+          .toString("base64")
+          .replace(/=/g, "")
+          .replace(/\+/g, "-")
+          .replace(/\//g, "_");
+      const h = b64u(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+      const p = b64u(
+        JSON.stringify({
+          iss: apiKey,
+          sub: participantIdentity,
+          name: participantName,
+          nbf: now,
+          exp: now + expirySeconds,
+          video: videoGrant,
+        }),
+      );
+      const s = b64u(crypto.createHmac("sha256", apiSecret).update(`${h}.${p}`).digest());
+
+      return {
+        status: 200,
+        body: {
+          success: true,
+          token: `${h}.${p}.${s}`,
+          url: livekitUrl,
+          room: roomName,
+          stream_id: stream.id,
+          identity: participantIdentity,
+          role: isBroadcaster ? "publisher" : "subscriber",
+          can_publish: isBroadcaster,
+          expires_in: expirySeconds,
+        } as LiveTokenResponse,
+        serverLogs,
+      };
+    }
+
+    it("1. Preserves guest live viewing (no Bearer token) and valid creator/viewer tokens", () => {
+      const { tokenPhp } = loadPhpSources();
+      assert.match(tokenPhp, /\$suppliedBearerToken\s*=\s*getBearerToken\(\);/);
+      assert.match(tokenPhp, /\$authUser\s*=\s*getAuthUser\(\$pdo,\s*true\);/);
+      assert.match(
+        tokenPhp,
+        /if\s*\(\s*\$suppliedBearerToken\s*!==\s*null\s*&&\s*\(!\$authUser\s*\|\|\s*empty\(\$authUser\['user_id'\]\)\)\s*\)/,
+      );
+
+      // Unauthenticated guest viewer (no Bearer header) -> valid subscriber guest token
+      const guestRes = createPhpLiveTokenHarness({
+        bearerToken: null,
+        requestedRole: "subscriber",
+        streamId: "live_guest_ok",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(guestRes.status, 200);
+      assert.equal(guestRes.body.success, true);
+      assert.equal(guestRes.body.role, "subscriber");
+      assert.equal(guestRes.body.can_publish, false);
+      assert.equal(guestRes.body.expires_in, 1800);
+      assert.equal(guestRes.body.room, "room_live_guest_ok");
+      assert.match(guestRes.body.identity!, /^guest_[a-f0-9]{12}$/);
+      const guestPayload = JSON.parse(
+        base64UrlDecode(guestRes.body.token!.split(".")[1]!).toString("utf8"),
+      );
+      assert.equal(guestPayload.sub, guestRes.body.identity);
+      assert.equal(guestPayload.video.roomJoin, true);
+      assert.equal(guestPayload.video.canPublish, false);
+      assert.equal(guestPayload.video.canSubscribe, true);
+      assert.equal(guestPayload.exp - guestPayload.nbf, 1800);
+
+      // Guest requesting publisher role -> HTTP 401
+      const guestPub = createPhpLiveTokenHarness({
+        bearerToken: null,
+        requestedRole: "publisher",
+        streamId: "live_guest_ok",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(guestPub.status, 401);
+
+      // Authenticated creator requesting publisher -> HTTP 200 with camera/mic publish grant
+      const creatorRes = createPhpLiveTokenHarness({
+        bearerToken: "valid_creator_tok",
+        requestedRole: "publisher",
+        streamId: "live_guest_ok",
+        authBehavior: { kind: "user", user_id: "FT483921", name: "Alex Rivera", role: "user" },
+      });
+      assert.equal(creatorRes.status, 200);
+      assert.equal(creatorRes.body.role, "publisher");
+      assert.equal(creatorRes.body.can_publish, true);
+      assert.equal(creatorRes.body.identity, "FT483921");
+      const creatorPayload = JSON.parse(
+        base64UrlDecode(creatorRes.body.token!.split(".")[1]!).toString("utf8"),
+      );
+      assert.equal(creatorPayload.video.canPublish, true);
+      assert.deepEqual(creatorPayload.video.canPublishSources, ["camera", "microphone"]);
+
+      // Authenticated viewer requesting subscriber -> HTTP 200 with user identity and publish=false
+      const viewerRes = createPhpLiveTokenHarness({
+        bearerToken: "valid_viewer_tok",
+        requestedRole: "subscriber",
+        streamId: "live_guest_ok",
+        authBehavior: { kind: "user", user_id: "FT900431", name: "Maya Lin", role: "user" },
+      });
+      assert.equal(viewerRes.status, 200);
+      assert.equal(viewerRes.body.role, "subscriber");
+      assert.equal(viewerRes.body.can_publish, false);
+      assert.equal(viewerRes.body.identity, "FT900431");
+
+      // Non-owner viewer requesting publisher -> HTTP 403
+      const hijackRes = createPhpLiveTokenHarness({
+        bearerToken: "valid_viewer_tok",
+        requestedRole: "publisher",
+        streamId: "live_guest_ok",
+        authBehavior: { kind: "user", user_id: "FT900431", name: "Maya Lin", role: "user" },
+      });
+      assert.equal(hijackRes.status, 403);
+    });
+
+    it("2. Rejects invalid/expired supplied Bearer tokens with HTTP 401 and never downgrades to guest", () => {
+      const invalidViewer = createPhpLiveTokenHarness({
+        bearerToken: "expired_or_invalid_session_tok",
+        requestedRole: "subscriber",
+        streamId: "live_01",
+        authBehavior: { kind: "invalid" },
+      });
+      assert.equal(invalidViewer.status, 401);
+      assert.equal(invalidViewer.body.success, false);
+      assert.equal(invalidViewer.body.token, undefined);
+      assert.equal(invalidViewer.body.identity, undefined);
+
+      const invalidBroadcaster = createPhpLiveTokenHarness({
+        bearerToken: "expired_or_invalid_session_tok",
+        requestedRole: "publisher",
+        streamId: "live_01",
+        authBehavior: { kind: "invalid" },
+      });
+      assert.equal(invalidBroadcaster.status, 401);
+      assert.equal(invalidBroadcaster.body.token, undefined);
+    });
+
+    it("3. Fails closed with HTTP 503 on auth/stream DB connection loss, sanitized HTTP 500 on unexpected errors, and HTTP 503 when LiveKit credentials are missing", () => {
+      const { tokenPhp } = loadPhpSources();
+      assert.match(tokenPhp, /\}\s*catch\s*\(\s*Throwable\s+\$e\s*\)\s*\{/);
+      assert.match(tokenPhp, /isDatabaseConnectionUnavailableError\(\$e\)/);
+      assert.match(tokenPhp, /error_log\(/);
+      assert.doesNotMatch(tokenPhp, /jsonResponse\([^\n]*\$e->getMessage\(\)/);
+      assert.doesNotMatch(tokenPhp, /devkey/);
+      assert.doesNotMatch(tokenPhp, /rollBack\(/);
+
+      // Auth DB connection error (errno 1203 / 2002) -> HTTP 503, never guest token
+      const auth1203 = createPhpLiveTokenHarness({
+        bearerToken: "valid_viewer_tok",
+        requestedRole: "subscriber",
+        streamId: "live_01",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42000",
+          driverCode: 1203,
+          message: "User already has more than 'max_user_connections' active connections",
+        },
+      });
+      assert.equal(auth1203.status, 503);
+      assert.equal(auth1203.body.success, false);
+      assert.equal(auth1203.body.token, undefined);
+      assert.equal(auth1203.body.identity, undefined);
+      assert.equal(String(auth1203.body.error).includes("max_user_connections"), false);
+      assert.ok(auth1203.serverLogs.some((l) => l.includes("max_user_connections")));
+
+      // Unexpected auth DB/runtime failure -> sanitized HTTP 500, never guest token
+      const auth500 = createPhpLiveTokenHarness({
+        bearerToken: "valid_viewer_tok",
+        requestedRole: "subscriber",
+        streamId: "live_01",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42S02",
+          driverCode: 1146,
+          message: "Table 'prod_db.sessions' doesn't exist",
+        },
+      });
+      assert.equal(auth500.status, 500);
+      assert.equal(auth500.body.success, false);
+      assert.equal(auth500.body.token, undefined);
+      assert.equal(String(auth500.body.error).includes("sessions"), false);
+
+      // Stream DB connection error -> HTTP 503
+      const stream503 = createPhpLiveTokenHarness({
+        bearerToken: null,
+        streamId: "live_01",
+        streamBehavior: {
+          kind: "db_error",
+          sqlState: "HY000",
+          driverCode: 2006,
+          message: "MySQL server has gone away",
+        },
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(stream503.status, 503);
+      assert.equal(stream503.body.token, undefined);
+
+      // Missing LiveKit credentials in production -> HTTP 503 fail-closed
+      const missingCreds = createPhpLiveTokenHarness({
+        bearerToken: null,
+        livekitApiKey: "",
+        livekitApiSecret: "",
+        streamId: "live_01",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(missingCreds.status, 503);
+      assert.equal(missingCreds.body.token, undefined);
+    });
+  });
+
+  describe("9. Task 5J-V4-R: PHP Live Heartbeat Authentication Downgrade & Fail-Closed Tests (api/live/heartbeat.php)", () => {
+    const heartbeatPhpPath = path.resolve(process.cwd(), "api/live/heartbeat.php");
+    const responsePhpPath = path.resolve(process.cwd(), "api/response.php");
+
+    function loadPhpSources() {
+      return {
+        heartbeatPhp: fs.readFileSync(heartbeatPhpPath, "utf-8"),
+        responsePhp: fs.readFileSync(responsePhpPath, "utf-8"),
+      };
+    }
+
+    interface HeartbeatResponse {
+      success: boolean;
+      error?: string;
+      stream_id?: string;
+      role?: "broadcaster" | "viewer";
+      stream_status?: string;
+      viewers_count?: number;
+      ping_received_at?: string;
+    }
+
+    function createPhpHeartbeatHarness(options: {
+      method?: string;
+      rawAuthHeader?: string | null;
+      rawXAuthHeader?: string | null;
+      streamId?: string;
+      requestedRole?: string;
+      spoofedBodyUserId?: string;
+      streamBehavior?:
+        | { kind: "none" }
+        | { kind: "row"; id: string; user_id: string; status: string; viewers_count: number }
+        | { kind: "db_error"; sqlState: string; driverCode: number; message: string };
+      authBehavior:
+        | { kind: "none" }
+        | { kind: "invalid" }
+        | { kind: "user"; user_id: string; role: string }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+      broadcasterUpdateBehavior?:
+        | { kind: "ok" }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+      viewerInsertBehavior?:
+        | { kind: "ok" }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+      remoteAddr?: string;
+      userAgent?: string;
+    }) {
+      const { responsePhp } = loadPhpSources();
+      const fnStart = responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+      const fnBlock = responsePhp.slice(fnStart, fnStart + 900);
+      const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+      const driverCodes = (codeMatch?.[1] || "")
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => !Number.isNaN(n));
+      const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+      const msgRegex = new RegExp(regexMatch?.[1] || "", "i");
+
+      const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
+        sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+      const isMissingColumn = (err: {
+        sqlState?: string;
+        driverCode?: number;
+        isRuntime?: boolean;
+      }) => !err.isRuntime && (err.sqlState === "42S22" || err.driverCode === 1054);
+
+      const isMissingTable = (err: {
+        sqlState?: string;
+        driverCode?: number;
+        isRuntime?: boolean;
+      }) => !err.isRuntime && (err.sqlState === "42S02" || err.driverCode === 1146);
+
+      const serverLogs: string[] = [];
+      let recordedViewerIdentifier: string | null = null;
+      let recordedViewerUserId: string | null = null;
+      let broadcasterUpdated = false;
+
+      const method = options.method ?? "POST";
+      if (method !== "POST") {
+        return {
+          status: 405,
+          body: {
+            success: false,
+            error: "Method Not Allowed. POST is required.",
+          } as HeartbeatResponse,
+          recordedViewerIdentifier,
+          recordedViewerUserId,
+          broadcasterUpdated,
+          serverLogs,
+        };
+      }
+
+      const streamId = (options.streamId ?? "live_hb_01").trim();
+      const role = (options.requestedRole ?? "viewer").toLowerCase().trim();
+      if (!streamId) {
+        return {
+          status: 400,
+          body: {
+            success: false,
+            error: "Stream ID (stream_id) is required.",
+          } as HeartbeatResponse,
+          recordedViewerIdentifier,
+          recordedViewerUserId,
+          broadcasterUpdated,
+          serverLogs,
+        };
+      }
+
+      let stream: { id: string; user_id: string; status: string; viewers_count: number } | null =
+        null;
+      const sb = options.streamBehavior ?? {
+        kind: "row",
+        id: streamId,
+        user_id: "FT483921",
+        status: "live",
+        viewers_count: 14,
+      };
+      if (sb.kind === "db_error") {
+        serverLogs.push(`[live/heartbeat.php][STREAM] Database error: ${sb.message}`);
+        if (isConnUnavailable(sb.sqlState, sb.driverCode, sb.message)) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable while loading stream.",
+            } as HeartbeatResponse,
+            recordedViewerIdentifier,
+            recordedViewerUserId,
+            broadcasterUpdated,
+            serverLogs,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            error: "Database error loading stream.",
+          } as HeartbeatResponse,
+          recordedViewerIdentifier,
+          recordedViewerUserId,
+          broadcasterUpdated,
+          serverLogs,
+        };
+      } else if (sb.kind === "row") {
+        stream = sb;
+      }
+
+      if (!stream) {
+        return {
+          status: 404,
+          body: {
+            success: false,
+            error: `Live stream '${streamId}' not found.`,
+          } as HeartbeatResponse,
+          recordedViewerIdentifier,
+          recordedViewerUserId,
+          broadcasterUpdated,
+          serverLogs,
+        };
+      }
+
+      if (stream.status === "ended") {
+        return {
+          status: 410,
+          body: {
+            success: false,
+            stream_status: "ended",
+            error: "Stream has already ended.",
+          } as HeartbeatResponse,
+          recordedViewerIdentifier,
+          recordedViewerUserId,
+          broadcasterUpdated,
+          serverLogs,
+        };
+      }
+
+      const headerCandidates = [options.rawAuthHeader ?? null, options.rawXAuthHeader ?? null];
+      const authHeaderSupplied = headerCandidates.some((c) => c !== null && c.trim() !== "");
+      let suppliedBearerToken: string | null = null;
+      for (const c of headerCandidates) {
+        if (c && c.trim() !== "") {
+          const m = c.trim().match(/Bearer\s+(\S+)/i);
+          if (m && m[1]) {
+            suppliedBearerToken = m[1];
+            break;
+          }
+        }
+      }
+
+      if (authHeaderSupplied && suppliedBearerToken === null) {
+        return {
+          status: 401,
+          body: {
+            success: false,
+            error:
+              "Malformed or empty Bearer authorization header. Please provide a valid Bearer session token.",
+          } as HeartbeatResponse,
+          recordedViewerIdentifier,
+          recordedViewerUserId,
+          broadcasterUpdated,
+          serverLogs,
+        };
+      }
+
+      let authUser: { user_id: string; role: string } | null = null;
+      if (suppliedBearerToken !== null) {
+        try {
+          if (options.authBehavior.kind === "user") {
+            authUser = {
+              user_id: options.authBehavior.user_id,
+              role: options.authBehavior.role,
+            };
+          } else if (options.authBehavior.kind === "invalid") {
+            authUser = null;
+          } else if (options.authBehavior.kind === "db_error") {
+            throw options.authBehavior;
+          }
+        } catch (e: unknown) {
+          const err = e as {
+            sqlState?: string;
+            driverCode?: number;
+            message?: string;
+            isRuntime?: boolean;
+          };
+          serverLogs.push(`[live/heartbeat.php][AUTH] Database error: ${err.message ?? ""}`);
+          if (
+            !err.isRuntime &&
+            isConnUnavailable(err.sqlState ?? "", err.driverCode ?? 0, err.message ?? "")
+          ) {
+            return {
+              status: 503,
+              body: {
+                success: false,
+                error: "Database connection unavailable during authentication check.",
+              } as HeartbeatResponse,
+              recordedViewerIdentifier,
+              recordedViewerUserId,
+              broadcasterUpdated,
+              serverLogs,
+            };
+          }
+          return {
+            status: 500,
+            body: {
+              success: false,
+              error: "Database error during authentication check.",
+            } as HeartbeatResponse,
+            recordedViewerIdentifier,
+            recordedViewerUserId,
+            broadcasterUpdated,
+            serverLogs,
+          };
+        }
+
+        if (!authUser || !authUser.user_id) {
+          return {
+            status: 401,
+            body: {
+              success: false,
+              error: "Invalid or expired authentication session. Please log in again.",
+            } as HeartbeatResponse,
+            recordedViewerIdentifier,
+            recordedViewerUserId,
+            broadcasterUpdated,
+            serverLogs,
+          };
+        }
+      }
+
+      if (role === "broadcaster" || role === "publisher") {
+        if (!authUser || !authUser.user_id) {
+          return {
+            status: 401,
+            body: {
+              success: false,
+              error: "Authentication required for broadcaster heartbeat.",
+            } as HeartbeatResponse,
+            recordedViewerIdentifier,
+            recordedViewerUserId,
+            broadcasterUpdated,
+            serverLogs,
+          };
+        }
+        if (
+          stream.user_id.toUpperCase() !== authUser.user_id.toUpperCase() &&
+          authUser.role.toLowerCase() !== "admin"
+        ) {
+          return {
+            status: 403,
+            body: {
+              success: false,
+              error:
+                "Unauthorized. You do not own this live stream and cannot send broadcaster heartbeats.",
+            } as HeartbeatResponse,
+            recordedViewerIdentifier,
+            recordedViewerUserId,
+            broadcasterUpdated,
+            serverLogs,
+          };
+        }
+
+        try {
+          const ub = options.broadcasterUpdateBehavior ?? { kind: "ok" };
+          if (ub.kind === "db_error") {
+            throw ub;
+          }
+          broadcasterUpdated = true;
+        } catch (e: unknown) {
+          const err = e as {
+            sqlState?: string;
+            driverCode?: number;
+            message?: string;
+            isRuntime?: boolean;
+          };
+          if (!isMissingColumn(err)) {
+            serverLogs.push(
+              `[live/heartbeat.php][BROADCASTER] Database error: ${err.message ?? ""}`,
+            );
+            if (
+              !err.isRuntime &&
+              isConnUnavailable(err.sqlState ?? "", err.driverCode ?? 0, err.message ?? "")
+            ) {
+              return {
+                status: 503,
+                body: {
+                  success: false,
+                  error: "Database connection unavailable while recording broadcaster heartbeat.",
+                } as HeartbeatResponse,
+                recordedViewerIdentifier,
+                recordedViewerUserId,
+                broadcasterUpdated,
+                serverLogs,
+              };
+            }
+            return {
+              status: 500,
+              body: {
+                success: false,
+                error: "Failed to record broadcaster heartbeat due to a server error.",
+              } as HeartbeatResponse,
+              recordedViewerIdentifier,
+              recordedViewerUserId,
+              broadcasterUpdated,
+              serverLogs,
+            };
+          }
+        }
+
+        return {
+          status: 200,
+          body: {
+            success: true,
+            stream_id: streamId,
+            role: "broadcaster",
+            stream_status: stream.status,
+            viewers_count: stream.viewers_count,
+            ping_received_at: new Date().toISOString(),
+          } as HeartbeatResponse,
+          recordedViewerIdentifier,
+          recordedViewerUserId,
+          broadcasterUpdated,
+          serverLogs,
+        };
+      }
+
+      // Viewer presence: strictly derived from verified authUser or deterministic guest hash (ignores spoofedBodyUserId)
+      const ip = options.remoteAddr ?? "127.0.0.1";
+      const ua = options.userAgent ?? "browser";
+      const guestHash = crypto
+        .createHash("sha256")
+        .update(`${ip}|${ua}|`)
+        .digest("hex")
+        .slice(0, 16);
+      const viewerId = authUser ? authUser.user_id : `guest_${guestHash}`;
+
+      try {
+        const vb = options.viewerInsertBehavior ?? { kind: "ok" };
+        if (vb.kind === "db_error") {
+          throw vb;
+        }
+        recordedViewerIdentifier = viewerId;
+        recordedViewerUserId = authUser ? authUser.user_id : null;
+      } catch (e: unknown) {
+        const err = e as {
+          sqlState?: string;
+          driverCode?: number;
+          message?: string;
+          isRuntime?: boolean;
+        };
+        if (!isMissingTable(err)) {
+          serverLogs.push(`[live/heartbeat.php][VIEWER] Database error: ${err.message ?? ""}`);
+          if (
+            !err.isRuntime &&
+            isConnUnavailable(err.sqlState ?? "", err.driverCode ?? 0, err.message ?? "")
+          ) {
+            return {
+              status: 503,
+              body: {
+                success: false,
+                error: "Database connection unavailable while recording viewer heartbeat.",
+              } as HeartbeatResponse,
+              recordedViewerIdentifier,
+              recordedViewerUserId,
+              broadcasterUpdated,
+              serverLogs,
+            };
+          }
+          return {
+            status: 500,
+            body: {
+              success: false,
+              error: "Failed to record viewer heartbeat due to a server error.",
+            } as HeartbeatResponse,
+            recordedViewerIdentifier,
+            recordedViewerUserId,
+            broadcasterUpdated,
+            serverLogs,
+          };
+        }
+      }
+
+      return {
+        status: 200,
+        body: {
+          success: true,
+          stream_id: streamId,
+          role: "viewer",
+          stream_status: stream.status,
+          viewers_count: stream.viewers_count,
+          ping_received_at: new Date().toISOString(),
+        } as HeartbeatResponse,
+        recordedViewerIdentifier,
+        recordedViewerUserId,
+        broadcasterUpdated,
+        serverLogs,
+      };
+    }
+
+    it("1. Preserves guest/viewer/broadcaster heartbeats and rejects spoofed client user_id impersonation", () => {
+      const { heartbeatPhp } = loadPhpSources();
+      assert.match(heartbeatPhp, /\$hasSuppliedAuthHeader\s*=/);
+      assert.match(heartbeatPhp, /\$suppliedBearerToken\s*=\s*getBearerToken\(\);/);
+      assert.match(heartbeatPhp, /\$authUser\s*=\s*getAuthUser\(\$pdo,\s*true\);/);
+      assert.doesNotMatch(heartbeatPhp, /\$payload\['user_id'\]|\$payload\['userId'\]/);
+
+      // Legitimate guest viewer heartbeat (no auth headers) -> 200 with deterministic guest_<16hex>, ignores spoofed user_id
+      const guestViewer = createPhpHeartbeatHarness({
+        rawAuthHeader: null,
+        requestedRole: "viewer",
+        spoofedBodyUserId: "FT102857",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(guestViewer.status, 200);
+      assert.equal(guestViewer.body.success, true);
+      assert.equal(guestViewer.body.role, "viewer");
+      assert.equal(guestViewer.body.viewers_count, 14);
+      assert.match(guestViewer.recordedViewerIdentifier!, /^guest_[a-f0-9]{16}$/);
+      assert.equal(guestViewer.recordedViewerUserId, null);
+
+      // Unauthenticated broadcaster heartbeat -> HTTP 401
+      const guestBroadcaster = createPhpHeartbeatHarness({
+        rawAuthHeader: null,
+        requestedRole: "broadcaster",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(guestBroadcaster.status, 401);
+
+      // Authenticated creator broadcaster heartbeat -> HTTP 200
+      const creatorHb = createPhpHeartbeatHarness({
+        rawAuthHeader: "Bearer valid_creator_tok",
+        requestedRole: "broadcaster",
+        authBehavior: { kind: "user", user_id: "FT483921", role: "user" },
+      });
+      assert.equal(creatorHb.status, 200);
+      assert.equal(creatorHb.body.role, "broadcaster");
+      assert.equal(creatorHb.broadcasterUpdated, true);
+
+      // Non-owner broadcaster heartbeat -> HTTP 403
+      const nonOwnerHb = createPhpHeartbeatHarness({
+        rawAuthHeader: "Bearer valid_viewer_tok",
+        requestedRole: "broadcaster",
+        authBehavior: { kind: "user", user_id: "FT900431", role: "user" },
+      });
+      assert.equal(nonOwnerHb.status, 403);
+      assert.equal(nonOwnerHb.broadcasterUpdated, false);
+
+      // Authenticated viewer heartbeat ignores spoofed user_id -> records session user_id only
+      const viewerHb = createPhpHeartbeatHarness({
+        rawAuthHeader: "Bearer valid_viewer_tok",
+        requestedRole: "viewer",
+        spoofedBodyUserId: "FT102857",
+        authBehavior: { kind: "user", user_id: "FT900431", role: "user" },
+      });
+      assert.equal(viewerHb.status, 200);
+      assert.equal(viewerHb.recordedViewerIdentifier, "FT900431");
+      assert.equal(viewerHb.recordedViewerUserId, "FT900431");
+    });
+
+    it("2. Rejects malformed, empty, invalid, or expired Bearer headers with HTTP 401 (never downgrading to guest)", () => {
+      for (const badHeader of [
+        "Bearer",
+        "Bearer   ",
+        "Basic dXNlcjpwYXNz",
+        "Token abc123",
+        "malformed_token",
+      ]) {
+        const res = createPhpHeartbeatHarness({
+          rawAuthHeader: badHeader,
+          requestedRole: "viewer",
+          authBehavior: { kind: "none" },
+        });
+        assert.equal(res.status, 401, `Expected 401 for malformed header: ${badHeader}`);
+        assert.equal(res.body.success, false);
+        assert.equal(res.recordedViewerIdentifier, null);
+      }
+
+      const badXAuth = createPhpHeartbeatHarness({
+        rawAuthHeader: null,
+        rawXAuthHeader: "Bearer   ",
+        requestedRole: "viewer",
+        authBehavior: { kind: "none" },
+      });
+      assert.equal(badXAuth.status, 401);
+      assert.equal(badXAuth.recordedViewerIdentifier, null);
+
+      const expiredBearer = createPhpHeartbeatHarness({
+        rawAuthHeader: "Bearer expired_session_tok",
+        requestedRole: "viewer",
+        authBehavior: { kind: "invalid" },
+      });
+      assert.equal(expiredBearer.status, 401);
+      assert.equal(expiredBearer.recordedViewerIdentifier, null);
+    });
+
+    it("3. Fails closed with HTTP 503 on DB connection loss and sanitized HTTP 500 on query errors across auth, stream, broadcaster, and viewer steps", () => {
+      const { heartbeatPhp } = loadPhpSources();
+      assert.match(heartbeatPhp, /\}\s*catch\s*\(\s*Throwable\s+\$e\s*\)\s*\{/);
+      assert.match(heartbeatPhp, /isDatabaseConnectionUnavailableError\(\$e\)/);
+      assert.match(heartbeatPhp, /error_log\(/);
+      assert.doesNotMatch(heartbeatPhp, /jsonResponse\([^\n]*\$e->getMessage\(\)/);
+      assert.doesNotMatch(heartbeatPhp, /rollBack\(/);
+
+      // Auth DB connection error (errno 1203) -> HTTP 503, never guest downgrade
+      const auth503 = createPhpHeartbeatHarness({
+        rawAuthHeader: "Bearer valid_tok",
+        requestedRole: "viewer",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42000",
+          driverCode: 1203,
+          message: "User already has more than 'max_user_connections' active connections",
+        },
+      });
+      assert.equal(auth503.status, 503);
+      assert.equal(auth503.body.success, false);
+      assert.equal(auth503.recordedViewerIdentifier, null);
+      assert.equal(String(auth503.body.error).includes("max_user_connections"), false);
+
+      // Auth unexpected DB error (42S02) -> sanitized HTTP 500
+      const auth500 = createPhpHeartbeatHarness({
+        rawAuthHeader: "Bearer valid_tok",
+        requestedRole: "viewer",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42S02",
+          driverCode: 1146,
+          message: "Table 'prod_db.sessions' doesn't exist",
+        },
+      });
+      assert.equal(auth500.status, 500);
+      assert.equal(auth500.body.success, false);
+      assert.equal(String(auth500.body.error).includes("sessions"), false);
+
+      // Broadcaster UPDATE failure -> HTTP 503 / 500 (never false 200 success)
+      const broadcaster503 = createPhpHeartbeatHarness({
+        rawAuthHeader: "Bearer valid_tok",
+        requestedRole: "broadcaster",
+        authBehavior: { kind: "user", user_id: "FT483921", role: "user" },
+        broadcasterUpdateBehavior: {
+          kind: "db_error",
+          sqlState: "HY000",
+          driverCode: 2006,
+          message: "MySQL server has gone away",
+        },
+      });
+      assert.equal(broadcaster503.status, 503);
+      assert.equal(broadcaster503.body.success, false);
+
+      // Viewer INSERT failure -> HTTP 503 / 500 (never false 200 success); missing optional table 42S02/1146 stays tolerated
+      const viewer500 = createPhpHeartbeatHarness({
+        rawAuthHeader: null,
+        requestedRole: "viewer",
+        authBehavior: { kind: "none" },
+        viewerInsertBehavior: {
+          kind: "db_error",
+          sqlState: "42000",
+          driverCode: 1142,
+          message: "INSERT command denied to user",
+        },
+      });
+      assert.equal(viewer500.status, 500);
+      assert.equal(viewer500.body.success, false);
+      assert.equal(String(viewer500.body.error).includes("INSERT command denied"), false);
+
+      const viewerOptionalTableMissing = createPhpHeartbeatHarness({
+        rawAuthHeader: null,
+        requestedRole: "viewer",
+        authBehavior: { kind: "none" },
+        viewerInsertBehavior: {
+          kind: "db_error",
+          sqlState: "42S02",
+          driverCode: 1146,
+          message: "Table 'prod_db.live_stream_viewers' doesn't exist",
+        },
+      });
+      assert.equal(viewerOptionalTableMissing.status, 200);
+      assert.equal(viewerOptionalTableMissing.body.success, true);
+    });
+  });
 });

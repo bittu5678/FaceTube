@@ -8,15 +8,89 @@
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../response.php';
 
-$pdo = getDatabaseConnection();
-$authUser = getAuthUser($pdo);
-
-if (!$authUser) {
-    jsonResponse(['success' => false, 'error' => 'Authentication required'], 401);
+$method = $_SERVER['REQUEST_METHOD'] ?? '';
+if ($method !== 'GET') {
+    jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
 }
 
-$requestedUserId = trim($_GET['user_id'] ?? ($authUser['user_id'] ?? ''));
-$rawPeriod = strtoupper(trim($_GET['period'] ?? ''));
+$isConnectionUnavailable = static function (Throwable $e): bool {
+    if (function_exists('isDatabaseConnectionUnavailableError')) {
+        return isDatabaseConnectionUnavailableError($e);
+    }
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 1042, 1053, 1129, 1203, 1927, 2002, 2003, 2005, 2006, 2013, 2026], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+};
+
+$safeRollback = static function (PDO $conn): void {
+    try {
+        if ($conn->inTransaction()) {
+            $conn->rollBack();
+        }
+    } catch (Throwable $_rollbackErr) {
+        error_log('[wallet/earnings-history.php][ROLLBACK] Rollback failed: ' . $_rollbackErr->getMessage());
+    }
+};
+
+$readStringField = static function ($val, string $default = ''): string {
+    if (is_string($val) || is_int($val) || is_float($val)) {
+        return trim((string)$val);
+    }
+    return $default;
+};
+
+$pdo = getDatabaseConnection();
+
+try {
+    $authUser = getAuthUser($pdo, true);
+} catch (Throwable $e) {
+    $safeRollback($pdo);
+    error_log('[wallet/earnings-history.php][AUTH] Database error: ' . $e->getMessage());
+    if ($isConnectionUnavailable($e)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database connection unavailable during authentication check.'
+        ], 503);
+    }
+    jsonResponse([
+        'success' => false,
+        'error' => 'Database error during authentication check.'
+    ], 500);
+}
+
+if (!$authUser || empty($authUser['user_id'])) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Authentication required. Please provide a valid Bearer session token.'
+    ], 401);
+}
+
+$rawRequestedUserId = $readStringField($_GET['user_id'] ?? ($_GET['userId'] ?? ''));
+$authPublicId = trim((string)$authUser['user_id']);
+$authInternalId = trim((string)($authUser['id'] ?? ''));
+
+if ($rawRequestedUserId === '') {
+    $requestedUserId = $authPublicId;
+} elseif (
+    strcasecmp($rawRequestedUserId, $authPublicId) === 0 ||
+    ($authInternalId !== '' && strcasecmp($rawRequestedUserId, $authInternalId) === 0)
+) {
+    $requestedUserId = $authPublicId;
+} else {
+    $isAdmin = isset($authUser['role']) && strtolower(trim((string)$authUser['role'])) === 'admin';
+    if (!$isAdmin) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Unauthorized: Cross-user earnings history access is restricted to verified administrators.'
+        ], 403);
+    }
+    $requestedUserId = $rawRequestedUserId;
+}
+
+$rawPeriod = strtoupper($readStringField($_GET['period'] ?? ''));
 $rawDays = intval($_GET['days'] ?? 0);
 
 $period = '30D';
@@ -63,7 +137,12 @@ try {
             GROUP BY DATE_FORMAT(created_at, "%Y-%m"), income_type
             ORDER BY period_key ASC
         ');
-        $stmt->execute([$requestedUserId]);
+        if ($stmt === false) {
+            throw new RuntimeException('Failed to prepare 12M earnings history query.');
+        }
+        if ($stmt->execute([$requestedUserId]) === false) {
+            throw new RuntimeException('Failed to execute 12M earnings history query.');
+        }
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         $now = new DateTime('first day of this month');
@@ -101,7 +180,12 @@ try {
             GROUP BY DATE(created_at), income_type
             ORDER BY period_key ASC
         ');
-        $stmt->execute([$requestedUserId, $days]);
+        if ($stmt === false) {
+            throw new RuntimeException('Failed to prepare earnings history query.');
+        }
+        if ($stmt->execute([$requestedUserId, $days]) === false) {
+            throw new RuntimeException('Failed to execute earnings history query.');
+        }
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         $today = new DateTime();
@@ -166,6 +250,17 @@ try {
         'summary' => $summary,
         'history' => array_values($timeline),
     ]);
-} catch (PDOException $e) {
-    jsonResponse(['success' => false, 'error' => 'Database error: ' . $e->getMessage()], 500);
+} catch (Throwable $e) {
+    $safeRollback($pdo);
+    error_log('[wallet/earnings-history.php] Database error: ' . $e->getMessage());
+    if ($isConnectionUnavailable($e)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database connection unavailable while loading earnings history.'
+        ], 503);
+    }
+    jsonResponse([
+        'success' => false,
+        'error' => 'Failed to load earnings history due to a server error.'
+    ], 500);
 }

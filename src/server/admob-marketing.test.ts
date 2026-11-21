@@ -2525,4 +2525,39 @@ describe("FaceTube Google AdMob Integration & Backend Statements Test Suite", ()
       "Existing V4-D deterministic TX ID and V4-E precision/rowCount validations must remain intact",
     );
   });
+
+  it("16. Task 5J-V4-J PHP AdMob Connection Classification (1203/1042/1053/1129/1927/2026) & Rollback Failure Logging", () => {
+    const admobPhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api/admin/record-admob-earning.php"),
+      "utf-8",
+    );
+    const responsePhp = fs.readFileSync(path.resolve(process.cwd(), "api/response.php"), "utf-8");
+
+    // 1. AdMob fallback classifier includes errno 1203 and matches shared classifier codes
+    const sharedCodeMatch = responsePhp.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+    const admobCodeMatch = admobPhp.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+    assert.ok(sharedCodeMatch?.[1] && admobCodeMatch?.[1]);
+    assert.equal(
+      admobCodeMatch[1].trim(),
+      sharedCodeMatch[1].trim(),
+      "AdMob fallback connection-unavailable driverCode list must stay synced with api/response.php",
+    );
+    assert.ok(
+      admobPhp.includes("1203") && admobPhp.includes("max_user_connections"),
+      "AdMob fallback classifier must handle MySQL errno 1203 (ER_TOO_MANY_USER_CONNECTIONS)",
+    );
+
+    // 2. safeRollback logs server-side via error_log and never leaks rollback details or hides original error
+    const rollbackStart = admobPhp.indexOf("$safeRollback = static function");
+    const rollbackEnd = admobPhp.indexOf("};", rollbackStart);
+    assert.ok(rollbackStart !== -1 && rollbackEnd > rollbackStart);
+    const rollbackBlock = admobPhp.slice(rollbackStart, rollbackEnd + 2);
+    assert.ok(
+      rollbackBlock.includes("error_log('[record-admob-earning.php][ROLLBACK]") &&
+        rollbackBlock.includes("$_rollbackErr->getMessage()") &&
+        !rollbackBlock.includes("jsonResponse") &&
+        !rollbackBlock.includes("throw "),
+      "AdMob safeRollback must log rollback failures server-side without throwing or leaking details in JSON",
+    );
+  });
 });
