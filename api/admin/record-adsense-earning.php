@@ -20,8 +20,53 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST' && $_SERVER['REQUEST_METHOD'] !== 'GET
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
 }
 
+$isMissingOptionalTable = static function (Throwable $e): bool {
+    if (!($e instanceof PDOException)) {
+        return false;
+    }
+    $sqlState = (string)$e->getCode();
+    $driverCode = isset($e->errorInfo[1]) ? (int)$e->errorInfo[1] : 0;
+    return $sqlState === '42S02' || $driverCode === 1146;
+};
+
+$isConnectionUnavailable = static function (Throwable $e): bool {
+    if (function_exists('isDatabaseConnectionUnavailableError')) {
+        return isDatabaseConnectionUnavailableError($e);
+    }
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 2002, 2003, 2005, 2006, 2013], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+};
+
+$safeRollback = static function (PDO $conn): void {
+    try {
+        if ($conn->inTransaction()) {
+            $conn->rollBack();
+        }
+    } catch (Throwable $_rollbackErr) {
+        // Ignore rollback failure so the original error response is preserved
+    }
+};
+
 $pdo = getDatabaseConnection();
-$authUser = getAuthUser($pdo);
+try {
+    $authUser = getAuthUser($pdo, true);
+} catch (Throwable $e) {
+    error_log('[record-adsense-earning.php][AUTH] Database error: ' . $e->getMessage());
+    if ($isConnectionUnavailable($e)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database connection unavailable during authentication check.'
+        ], 503);
+    }
+    jsonResponse([
+        'success' => false,
+        'error' => 'Database error during authentication check.'
+    ], 500);
+}
 
 if (!$authUser) {
     jsonResponse([
@@ -50,8 +95,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
                 FROM adsense_historical_conflicts
                 ORDER BY report_month DESC, ledger_created_at ASC
             ');
-            $conflicts = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        } catch (Exception $e) {
+            if ($stmt === false) {
+                throw new RuntimeException('Failed to query adsense_historical_conflicts.');
+            }
+            $conflicts = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            if (!$isMissingOptionalTable($e)) {
+                error_log('[record-adsense-earning.php][GET][conflicts] Database error: ' . $e->getMessage());
+                if ($isConnectionUnavailable($e)) {
+                    jsonResponse([
+                        'success' => false,
+                        'error' => 'Database connection unavailable while loading AdSense conflict records.'
+                    ], 503);
+                }
+                jsonResponse([
+                    'success' => false,
+                    'error' => 'Database error loading AdSense conflict records.'
+                ], 500);
+            }
             $conflicts = [];
         }
         jsonResponse([
@@ -71,8 +132,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
                 FROM adsense_monthly_statements
                 ORDER BY report_month DESC, created_at DESC
             ');
-            $statements = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-        } catch (Exception $e) {
+            if ($stmt === false) {
+                throw new RuntimeException('Failed to query adsense_monthly_statements.');
+            }
+            $statements = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) {
+            if (!$isMissingOptionalTable($e)) {
+                error_log('[record-adsense-earning.php][GET][statements] Database error: ' . $e->getMessage());
+                if ($isConnectionUnavailable($e)) {
+                    jsonResponse([
+                        'success' => false,
+                        'error' => 'Database connection unavailable while loading AdSense statements.'
+                    ], 503);
+                }
+                jsonResponse([
+                    'success' => false,
+                    'error' => 'Database error loading AdSense statements.'
+                ], 500);
+            }
             $statements = [];
         }
         jsonResponse([
@@ -87,12 +164,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 
 $input = getRequestPayload();
 
-$targetUserId = trim($input['userId'] ?? ($input['user_id'] ?? ''));
-$amount = floatval($input['amount'] ?? 0);
-$rawMonth = trim($input['reportMonth'] ?? ($input['report_month'] ?? ($input['statement_month'] ?? date('Y-m'))));
-$referenceId = trim($input['referenceId'] ?? ($input['reference_id'] ?? ''));
-$videoId = trim($input['videoId'] ?? ($input['video_id'] ?? ''));
-$description = trim($input['description'] ?? '');
+$targetUserId = trim((string)($input['userId'] ?? ($input['user_id'] ?? '')));
+$rawAmount = $input['amount'] ?? null;
+$rawMonth = trim((string)($input['reportMonth'] ?? ($input['report_month'] ?? ($input['statement_month'] ?? date('Y-m')))));
+$referenceId = trim((string)($input['referenceId'] ?? ($input['reference_id'] ?? '')));
+$videoId = trim((string)($input['videoId'] ?? ($input['video_id'] ?? '')));
+$description = trim((string)($input['description'] ?? ''));
 
 if (empty($targetUserId)) {
     jsonResponse([
@@ -101,12 +178,53 @@ if (empty($targetUserId)) {
     ], 400);
 }
 
-if ($amount <= 0) {
+$parsedAmount = null;
+if ($rawAmount === null || is_bool($rawAmount) || is_array($rawAmount) || is_object($rawAmount)) {
     jsonResponse([
         'success' => false,
-        'error' => 'Verified AdSense earnings amount must be strictly greater than 0.'
+        'error' => 'Verified AdSense earnings amount must be a finite number strictly greater than 0.'
     ], 400);
 }
+if (is_string($rawAmount)) {
+    $trimmedAmount = trim($rawAmount);
+    if ($trimmedAmount === '' || !preg_match('/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/', $trimmedAmount)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Verified AdSense earnings amount must be a finite number strictly greater than 0.'
+        ], 400);
+    }
+    $parsedAmount = (float)$trimmedAmount;
+} elseif (is_int($rawAmount) || is_float($rawAmount)) {
+    $parsedAmount = (float)$rawAmount;
+} else {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Verified AdSense earnings amount must be a finite number strictly greater than 0.'
+    ], 400);
+}
+
+if (!is_finite($parsedAmount) || $parsedAmount <= 0) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Verified AdSense earnings amount must be a finite number strictly greater than 0.'
+    ], 400);
+}
+
+if ($parsedAmount > 999999999999.99) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Verified AdSense earnings amount exceeds maximum supported wallet precision.'
+    ], 400);
+}
+
+$scaledAmount = round($parsedAmount * 100);
+if ($scaledAmount < 1 || abs(($parsedAmount * 100) - $scaledAmount) > 1e-6) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Verified AdSense earnings amount supports at most 2 decimal places (minimum ₹0.01).'
+    ], 400);
+}
+$amount = $scaledAmount / 100;
 
 // Normalize and validate reporting month (format: YYYY-MM)
 if (!preg_match('/^(\d{4})-(0[1-9]|1[0-2])/', $rawMonth, $monthMatches)) {
@@ -118,64 +236,71 @@ if (!preg_match('/^(\d{4})-(0[1-9]|1[0-2])/', $rawMonth, $monthMatches)) {
 $normalizedMonth = "{$monthMatches[1]}-{$monthMatches[2]}";
 $cleanMonth = "{$monthMatches[1]}{$monthMatches[2]}";
 
-// Verify target user exists
-$stmtUser = $pdo->prepare('SELECT id, user_id, name, email FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1');
-$stmtUser->execute([$targetUserId]);
-$targetUser = $stmtUser->fetch();
-
-if (!$targetUser) {
-    jsonResponse([
-        'success' => false,
-        'error' => "User ID '{$targetUserId}' not found in database."
-    ], 404);
-}
-
-$canonicalUserId = $targetUser['user_id'];
-$cleanUserId = preg_replace('/[^0-9A-Z]/', '', strtoupper($canonicalUserId));
-$creatorName = $targetUser['name'] ?? $canonicalUserId;
-
-if (empty($referenceId)) {
-    $referenceId = "ADS-{$cleanMonth}-{$cleanUserId}";
-}
-
-if (empty($description)) {
-    $description = "Verified Google AdSense earnings for {$normalizedMonth} (Statement Ref: {$referenceId})";
-}
-
-// Generate deterministic transaction ID to enforce idempotency on income_ledger
-$txId = "TX_ADSENSE_{$cleanUserId}_{$cleanMonth}";
+$canonicalUserId = strtoupper($targetUserId);
 
 try {
     $pdo->beginTransaction();
 
-    // 1. Check if adsense_monthly_statements table exists, and check for duplicates with row lock
-    $hasStatementTable = false;
-    try {
-        $chkTable = $pdo->query("SHOW TABLES LIKE 'adsense_monthly_statements'");
-        $hasStatementTable = ($chkTable && $chkTable->rowCount() > 0);
-    } catch (Exception $e) {
-        $hasStatementTable = false;
+    // Verify target user exists inside safe transaction handling
+    $stmtUser = $pdo->prepare('SELECT id, user_id, name, email FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1');
+    if ($stmtUser === false || $stmtUser->execute([$targetUserId]) === false) {
+        throw new RuntimeException('Failed to look up target user.');
+    }
+    $targetUser = $stmtUser->fetch();
+
+    if (!$targetUser) {
+        $safeRollback($pdo);
+        jsonResponse([
+            'success' => false,
+            'error' => "User ID '{$targetUserId}' not found in database."
+        ], 404);
     }
 
-    if ($hasStatementTable) {
+    $canonicalUserId = $targetUser['user_id'];
+    $cleanUserId = preg_replace('/[^0-9A-Z]/', '', strtoupper($canonicalUserId));
+    $creatorName = $targetUser['name'] ?? $canonicalUserId;
+
+    if (empty($referenceId)) {
+        $referenceId = "ADS-{$cleanMonth}-{$cleanUserId}";
+    }
+
+    if (empty($description)) {
+        $description = "Verified Google AdSense earnings for {$normalizedMonth} (Statement Ref: {$referenceId})";
+    }
+
+    // Generate deterministic transaction ID to enforce idempotency on income_ledger
+    $txId = "TX_ADSENSE_{$cleanUserId}_{$cleanMonth}";
+
+    // 1. Check adsense_monthly_statements directly for duplicates with row lock.
+    // Tolerate ONLY genuine missing-table errors (SQLSTATE 42S02 / MySQL errno 1146).
+    $hasStatementTable = true;
+    try {
         $stmtCheck = $pdo->prepare('
             SELECT id, amount, transaction_id, created_at
             FROM adsense_monthly_statements
             WHERE UPPER(user_id) = UPPER(?) AND report_month = ?
             FOR UPDATE
         ');
-        $stmtCheck->execute([$canonicalUserId, $normalizedMonth]);
+        if ($stmtCheck === false || $stmtCheck->execute([$canonicalUserId, $normalizedMonth]) === false) {
+            throw new RuntimeException('Failed to query adsense_monthly_statements.');
+        }
         $existingStatement = $stmtCheck->fetch();
         if ($existingStatement) {
-            $pdo->rollBack();
+            $safeRollback($pdo);
             jsonResponse([
                 'success' => false,
                 'error' => "AdSense earnings statement for creator {$canonicalUserId} for period {$normalizedMonth} has already been credited and settled (Transaction: {$existingStatement['transaction_id']})."
             ], 409);
         }
+    } catch (Throwable $e) {
+        if (!$isMissingOptionalTable($e)) {
+            throw $e;
+        }
+        $hasStatementTable = false;
     }
 
-    // 1b. Check if adsense_historical_conflicts has unresolved flagged conflicts for this creator & period
+    // 1b. Check if adsense_historical_conflicts has unresolved flagged conflicts for this creator & period.
+    // Tolerate ONLY genuine missing-table errors (SQLSTATE 42S02 / MySQL errno 1146).
     try {
         $stmtConflict = $pdo->prepare('
             SELECT id, transaction_id, amount, status
@@ -183,17 +308,22 @@ try {
             WHERE UPPER(user_id) = UPPER(?) AND report_month = ? AND status = "flagged_for_review"
             LIMIT 1
         ');
-        $stmtConflict->execute([$canonicalUserId, $normalizedMonth]);
+        if ($stmtConflict === false || $stmtConflict->execute([$canonicalUserId, $normalizedMonth]) === false) {
+            throw new RuntimeException('Failed to query adsense_historical_conflicts.');
+        }
         $existingConflict = $stmtConflict->fetch();
         if ($existingConflict) {
-            $pdo->rollBack();
+            $safeRollback($pdo);
             jsonResponse([
                 'success' => false,
                 'error' => "AdSense earnings statement for creator {$canonicalUserId} for period {$normalizedMonth} has historical records flagged for manual review (Conflict TX: {$existingConflict['transaction_id']}). Please reconcile flagged historical records before posting a new statement."
             ], 409);
         }
-    } catch (Exception $e) {
-        // Table may not exist yet if migration pending; proceed
+    } catch (Throwable $e) {
+        if (!$isMissingOptionalTable($e)) {
+            throw $e;
+        }
+        // Optional table may not exist yet if migration pending (42S02 / 1146); proceed
     }
 
     // 2. Double-check income_ledger for existing AdSense credit for this creator & period
@@ -208,10 +338,12 @@ try {
           )
         FOR UPDATE
     ');
-    $stmtLedgerCheck->execute([$canonicalUserId, $txId, "%{$normalizedMonth}%"]);
+    if ($stmtLedgerCheck === false || $stmtLedgerCheck->execute([$canonicalUserId, $txId, "%{$normalizedMonth}%"]) === false) {
+        throw new RuntimeException('Failed to query income_ledger for AdSense duplicates.');
+    }
     $existingLedger = $stmtLedgerCheck->fetch();
     if ($existingLedger) {
-        $pdo->rollBack();
+        $safeRollback($pdo);
         jsonResponse([
             'success' => false,
             'error' => "AdSense earnings statement for creator {$canonicalUserId} for period {$normalizedMonth} has already been credited and settled (Transaction: {$existingLedger['transaction_id']})."
@@ -227,26 +359,37 @@ try {
 
     // 3. Record in adsense_monthly_statements if table exists
     if ($hasStatementTable) {
-        $stmtInsertStatement = $pdo->prepare('
-            INSERT INTO adsense_monthly_statements (
-                id, user_id, report_month, amount, reference_id,
-                transaction_id, recorded_by, video_id, description, status, created_at
-            ) VALUES (
-                ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, "settled", NOW()
-            )
-        ');
-        $stmtInsertStatement->execute([
-            $ledgerUuid,
-            $canonicalUserId,
-            $normalizedMonth,
-            $amount,
-            $referenceId,
-            $txId,
-            $authUser['user_id'],
-            $videoId ?: null,
-            $description
-        ]);
+        try {
+            $stmtInsertStatement = $pdo->prepare('
+                INSERT INTO adsense_monthly_statements (
+                    id, user_id, report_month, amount, reference_id,
+                    transaction_id, recorded_by, video_id, description, status, created_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, "settled", NOW()
+                )
+            ');
+            if ($stmtInsertStatement === false || $stmtInsertStatement->execute([
+                $ledgerUuid,
+                $canonicalUserId,
+                $normalizedMonth,
+                $amount,
+                $referenceId,
+                $txId,
+                $authUser['user_id'],
+                $videoId ?: null,
+                $description
+            ]) === false) {
+                throw new RuntimeException('Failed to persist AdSense monthly statement record.');
+            }
+            if ($stmtInsertStatement->rowCount() < 1) {
+                throw new RuntimeException('Failed to persist AdSense monthly statement record.');
+            }
+        } catch (Throwable $e) {
+            if (!$isMissingOptionalTable($e)) {
+                throw $e;
+            }
+        }
     }
 
     // 4. Insert into income_ledger
@@ -259,7 +402,7 @@ try {
             "adsense_income", ?, "settled", "VERIFIED_ADSENSE_STATEMENT", ?, NOW()
         )
     ');
-    $stmtLedger->execute([
+    if ($stmtLedger === false || $stmtLedger->execute([
         $ledgerUuid,
         $txId,
         $canonicalUserId,
@@ -268,7 +411,12 @@ try {
         $videoId ?: null,
         $amount,
         $description
-    ]);
+    ]) === false) {
+        throw new RuntimeException('Failed to record AdSense income ledger entry.');
+    }
+    if ($stmtLedger->rowCount() < 1) {
+        throw new RuntimeException('Failed to record AdSense income ledger entry.');
+    }
 
     // 5. Atomic update to wallet_balances
     $stmtCredit = $pdo->prepare('
@@ -280,7 +428,12 @@ try {
             adsense_income = adsense_income + VALUES(adsense_income),
             updated_at = NOW()
     ');
-    $stmtCredit->execute([$canonicalUserId, $amount, $amount, $amount]);
+    if ($stmtCredit === false || $stmtCredit->execute([$canonicalUserId, $amount, $amount, $amount]) === false) {
+        throw new RuntimeException('Failed to credit creator wallet for AdSense.');
+    }
+    if ($stmtCredit->rowCount() < 1) {
+        throw new RuntimeException('Failed to credit creator wallet for AdSense.');
+    }
 
     $pdo->commit();
 
@@ -293,29 +446,29 @@ try {
         'reportMonth' => $normalizedMonth,
         'referenceId' => $referenceId,
     ]);
-} catch (PDOException $e) {
-    if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-    }
-    // Handle concurrent duplicate entry constraint collision (MySQL 1062 / SQLSTATE 23000)
-    if ($e->getCode() == 23000 || strpos($e->getMessage(), 'Duplicate entry') !== false) {
+} catch (Throwable $e) {
+    $safeRollback($pdo);
+
+    // Handle concurrent duplicate entry constraint collision strictly on MySQL errno 1062
+    $mysqlErrno = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    if ($mysqlErrno === 1062) {
         jsonResponse([
             'success' => false,
             'error' => "AdSense earnings statement for creator {$canonicalUserId} for period {$normalizedMonth} has already been credited or is currently being processed."
         ], 409);
     }
-    error_log('[record-adsense-earning.php] Transaction error: ' . $e->getMessage());
-    jsonResponse([
-        'success' => false,
-        'error' => 'Database error recording AdSense earnings: ' . $e->getMessage()
-    ], 500);
-} catch (Exception $e) {
-    if ($pdo->inTransaction()) {
-        $pdo->rollBack();
+
+    error_log('[record-adsense-earning.php][POST] Transaction error: ' . $e->getMessage());
+
+    if ($isConnectionUnavailable($e)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database connection unavailable while recording AdSense earnings.'
+        ], 503);
     }
-    error_log('[record-adsense-earning.php] Exception: ' . $e->getMessage());
+
     jsonResponse([
         'success' => false,
-        'error' => 'Error recording AdSense earnings: ' . $e->getMessage()
+        'error' => 'Database error recording AdSense earnings.'
     ], 500);
 }

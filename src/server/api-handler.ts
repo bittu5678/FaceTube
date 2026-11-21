@@ -169,6 +169,175 @@ export function isMysqlDuplicateKeyError(err: unknown): boolean {
   return record.code === "ER_DUP_ENTRY" || record.errno === 1062;
 }
 
+export function isMysqlConnectionUnavailableError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: unknown; errno?: unknown; message?: unknown };
+  const code = String(e.code ?? "");
+  const errno = Number(e.errno ?? 0);
+  const msg = String(e.message ?? "");
+  return (
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "ETIMEDOUT" ||
+    code === "EPIPE" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENOTFOUND" ||
+    code === "PROTOCOL_CONNECTION_LOST" ||
+    code === "PROTOCOL_ENQUEUE_AFTER_QUIT" ||
+    code === "ER_CON_COUNT_ERROR" ||
+    errno === 1040 ||
+    errno === 2002 ||
+    errno === 2003 ||
+    errno === 2006 ||
+    errno === 2013 ||
+    /connection (lost|refused|closed|unavailable|timed out)|pool.*closed|too many connections/i.test(
+      msg,
+    )
+  );
+}
+
+export function isMysqlMissingTableError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: unknown; errno?: unknown; sqlState?: unknown };
+  return (
+    String(e.code ?? "") === "ER_NO_SUCH_TABLE" ||
+    Number(e.errno ?? 0) === 1146 ||
+    String(e.sqlState ?? "") === "42S02"
+  );
+}
+
+const MAX_WALLET_CURRENCY_AMOUNT = 999999999999.99;
+
+export function parseValidatedCurrencyAmount(
+  raw: unknown,
+  label: string,
+): { valid: true; amount: number } | { valid: false; error: string } {
+  if (raw === null || raw === undefined || typeof raw === "boolean" || typeof raw === "object") {
+    return {
+      valid: false,
+      error: `Verified ${label} earnings amount must be a finite number strictly greater than 0.`,
+    };
+  }
+
+  let num: number;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(trimmed)) {
+      return {
+        valid: false,
+        error: `Verified ${label} earnings amount must be a finite number strictly greater than 0.`,
+      };
+    }
+    num = Number(trimmed);
+  } else if (typeof raw === "number") {
+    num = raw;
+  } else {
+    return {
+      valid: false,
+      error: `Verified ${label} earnings amount must be a finite number strictly greater than 0.`,
+    };
+  }
+
+  if (!Number.isFinite(num) || num <= 0) {
+    return {
+      valid: false,
+      error: `Verified ${label} earnings amount must be a finite number strictly greater than 0.`,
+    };
+  }
+
+  if (num > MAX_WALLET_CURRENCY_AMOUNT) {
+    return {
+      valid: false,
+      error: `Verified ${label} earnings amount exceeds maximum supported wallet precision.`,
+    };
+  }
+
+  const scaled = Math.round(num * 100);
+  if (scaled < 1 || Math.abs(num * 100 - scaled) > 1e-6) {
+    return {
+      valid: false,
+      error: `Verified ${label} earnings amount supports at most 2 decimal places (minimum ₹0.01).`,
+    };
+  }
+
+  return {
+    valid: true,
+    amount: scaled / 100,
+  };
+}
+
+export function parseValidatedAdMobMetric(
+  raw: unknown,
+  label: string,
+  options: { integerOnly: boolean; max: number },
+): { valid: true; value: number } | { valid: false; error: string } {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) {
+    return { valid: true, value: 0 };
+  }
+  if (typeof raw === "boolean" || typeof raw === "object") {
+    return {
+      valid: false,
+      error: `AdMob ${label} must be a finite non-negative ${options.integerOnly ? "integer" : "number"}.`,
+    };
+  }
+
+  let num: number;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(trimmed)) {
+      return {
+        valid: false,
+        error: `AdMob ${label} must be a finite non-negative ${options.integerOnly ? "integer" : "number"}.`,
+      };
+    }
+    num = Number(trimmed);
+  } else if (typeof raw === "number") {
+    num = raw;
+  } else {
+    return {
+      valid: false,
+      error: `AdMob ${label} must be a finite non-negative ${options.integerOnly ? "integer" : "number"}.`,
+    };
+  }
+
+  if (!Number.isFinite(num) || num < 0) {
+    return {
+      valid: false,
+      error: `AdMob ${label} must be a finite non-negative ${options.integerOnly ? "integer" : "number"}.`,
+    };
+  }
+
+  if (options.integerOnly && !Number.isInteger(num)) {
+    return {
+      valid: false,
+      error: `AdMob ${label} must be a finite non-negative integer.`,
+    };
+  }
+
+  if (num > options.max) {
+    return {
+      valid: false,
+      error: `AdMob ${label} exceeds maximum supported range.`,
+    };
+  }
+
+  return { valid: true, value: num };
+}
+
+function assertMysqlWriteConfirmed(queryResult: unknown, failureMessage: string): void {
+  const header = Array.isArray(queryResult) ? queryResult[0] : queryResult;
+  if (
+    header &&
+    typeof header === "object" &&
+    !Array.isArray(header) &&
+    "affectedRows" in header &&
+    typeof (header as { affectedRows?: unknown }).affectedRows === "number" &&
+    (header as { affectedRows: number }).affectedRows < 1
+  ) {
+    throw new Error(failureMessage);
+  }
+}
+
 /**
  * Masks sensitive bank account number leaving only the last 4 characters visible.
  * E.g. '50100481920194' -> 'XXXXXXXXXX0194'
@@ -7512,8 +7681,22 @@ async function dispatchApiRequest(
   // 15. Admin Bulk Withdrawal Payouts
   if (route === "admin/bulk-payout") {
     if (method === "POST") {
+      const readEnv = (key: string) => readEnvValue(env, key);
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
       const pool = getMysqlPool();
-      const authUser = await getAuthUserFromRequest(request, store, pool);
+
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required to execute bulk payouts.",
+          },
+          503,
+        );
+      }
+
+      const authUser = await getAuthUserFromRequest(request, store, pool, env);
       if (!authUser || authUser.role !== "admin") {
         return jsonResponse({ success: false, error: "Admin authorization required" }, 403);
       }
@@ -7548,6 +7731,52 @@ async function dispatchApiRequest(
       let totalAmount = 0;
       const processed: any[] = [];
 
+      const isMissingSchemaObjectError = (err: unknown): boolean => {
+        if (!err || typeof err !== "object") return false;
+        const e = err as { code?: unknown; errno?: unknown; message?: unknown };
+        const code = String(e.code ?? "");
+        const errno = Number(e.errno ?? 0);
+        const msg = String(e.message ?? "");
+        return (
+          code === "ER_NO_SUCH_TABLE" ||
+          code === "ER_BAD_FIELD_ERROR" ||
+          errno === 1146 ||
+          errno === 1054 ||
+          /doesn't exist|no such table|unknown column|unknown table/i.test(msg)
+        );
+      };
+
+      const isDbConnectionError = (err: unknown): boolean => {
+        if (!err || typeof err !== "object") return false;
+        const e = err as { code?: unknown; message?: unknown };
+        const code = String(e.code ?? "");
+        const msg = String(e.message ?? "");
+        return (
+          code === "ECONNREFUSED" ||
+          code === "ECONNRESET" ||
+          code === "ETIMEDOUT" ||
+          code === "PROTOCOL_CONNECTION_LOST" ||
+          code === "ER_CON_COUNT_ERROR" ||
+          /connection (lost|refused|closed|unavailable|timed out)|pool.*closed/i.test(msg)
+        );
+      };
+
+      const assertAffectedRowsIfPresent = (queryResult: unknown, failureMessage: string): void => {
+        const header = Array.isArray(queryResult) ? queryResult[0] : queryResult;
+        if (
+          header &&
+          typeof header === "object" &&
+          !Array.isArray(header) &&
+          "affectedRows" in header &&
+          typeof (header as { affectedRows?: unknown }).affectedRows === "number" &&
+          (header as { affectedRows: number }).affectedRows < 1
+        ) {
+          const err: any = new Error(failureMessage);
+          err.statusCode = 500;
+          throw err;
+        }
+      };
+
       if (pool) {
         // Initialize or update payout batch record as 'processing' for progress tracking
         try {
@@ -7557,14 +7786,69 @@ async function dispatchApiRequest(
              ON DUPLICATE KEY UPDATE status = 'processing', notes = VALUES(notes)`,
             [batchId, authUser.user_id || "ADMIN", payouts.length, notes],
           );
-        } catch (_e) {
+        } catch (batchInitErr: unknown) {
+          if (isProduction && !isMissingSchemaObjectError(batchInitErr)) {
+            const status = isDbConnectionError(batchInitErr) ? 503 : 500;
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  status === 503
+                    ? "Database connection unavailable while initializing payout batch."
+                    : "Database error while initializing payout batch.",
+                batch_id: batchId,
+              },
+              status,
+            );
+          }
           // Optional table if migration pending
         }
 
         for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
           const chunk = chunks[chunkIndex];
           if (!chunk) continue;
-          const conn = await pool.getConnection();
+
+          let conn: PoolConnection;
+          try {
+            conn = await pool.getConnection();
+          } catch (connErr: unknown) {
+            const statusCode = isDbConnectionError(connErr) ? 503 : 500;
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  statusCode === 503
+                    ? "Database connection unavailable while processing bulk payout."
+                    : "Failed to acquire database connection for bulk payout.",
+                batch_id: batchId,
+                chunks_completed: chunksProcessed,
+                total_chunks: totalChunks,
+                chunk_size: chunkSize,
+                total_processed: totalProcessed,
+                total_amount: totalAmount,
+                failed_chunk_index: chunkIndex,
+              },
+              statusCode,
+            );
+          }
+
+          if (!conn) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database connection unavailable while processing bulk payout.",
+                batch_id: batchId,
+                chunks_completed: chunksProcessed,
+                total_chunks: totalChunks,
+                chunk_size: chunkSize,
+                total_processed: totalProcessed,
+                total_amount: totalAmount,
+                failed_chunk_index: chunkIndex,
+              },
+              503,
+            );
+          }
+
           let chunkBegun = false;
 
           try {
@@ -7603,8 +7887,11 @@ async function dispatchApiRequest(
                   if (rows && rows.length > 0) {
                     existingTx = rows[0];
                   }
-                } catch (_e) {
-                  // Table might not exist or error, attempt income_ledger
+                } catch (walletLookupErr) {
+                  if (!isMissingSchemaObjectError(walletLookupErr)) {
+                    throw walletLookupErr;
+                  }
+                  // Table might not exist, attempt income_ledger
                 }
 
                 if (!existingTx) {
@@ -7617,18 +7904,17 @@ async function dispatchApiRequest(
                       existingTx = rows[0];
                       isWalletTxTable = false;
                     }
-                  } catch (_eCols) {
-                    try {
-                      const [rows]: any = await conn.query(
-                        `SELECT id, transaction_id, user_id, amount, status FROM income_ledger WHERE transaction_id = ? OR id = ? FOR UPDATE`,
-                        [inputTxId, inputTxId],
-                      );
-                      if (rows && rows.length > 0) {
-                        existingTx = rows[0];
-                        isWalletTxTable = false;
-                      }
-                    } catch (_e) {
-                      // Ignore
+                  } catch (eCols) {
+                    if (!isMissingSchemaObjectError(eCols)) {
+                      throw eCols;
+                    }
+                    const [rows]: any = await conn.query(
+                      `SELECT id, transaction_id, user_id, amount, status FROM income_ledger WHERE transaction_id = ? OR id = ? FOR UPDATE`,
+                      [inputTxId, inputTxId],
+                    );
+                    if (rows && rows.length > 0) {
+                      existingTx = rows[0];
+                      isWalletTxTable = false;
                     }
                   }
                 }
@@ -7679,22 +7965,34 @@ async function dispatchApiRequest(
                 const itemPayoutMethod =
                   String(p.payout_method || p.payoutMethod || "").trim() || "bulk_bank_transfer";
                 if (isWalletTxTable) {
-                  await conn.query(
+                  const updRes = await conn.query(
                     `UPDATE wallet_transactions SET status = 'completed', batch_id = ?, payout_method = COALESCE(payout_method, ?), updated_at = NOW() WHERE id = ?`,
                     [batchId, itemPayoutMethod, inputTxId],
                   );
+                  assertAffectedRowsIfPresent(
+                    updRes,
+                    `Failed to persist payout status update for transaction '${inputTxId}'.`,
+                  );
                 } else {
+                  let updRes: unknown;
                   try {
-                    await conn.query(
+                    updRes = await conn.query(
                       `UPDATE income_ledger SET status = 'settled', batch_id = ?, payout_method = COALESCE(payout_method, ?) WHERE transaction_id = ? OR id = ?`,
                       [batchId, itemPayoutMethod, inputTxId, inputTxId],
                     );
-                  } catch (_eUpLedger) {
-                    await conn.query(
+                  } catch (eUpLedger) {
+                    if (!isMissingSchemaObjectError(eUpLedger)) {
+                      throw eUpLedger;
+                    }
+                    updRes = await conn.query(
                       `UPDATE income_ledger SET status = 'settled' WHERE transaction_id = ? OR id = ?`,
                       [inputTxId, inputTxId],
                     );
                   }
+                  assertAffectedRowsIfPresent(
+                    updRes,
+                    `Failed to persist payout status update for ledger transaction '${inputTxId}'.`,
+                  );
                 }
 
                 // Do NOT deduct from wallet_balances again!
@@ -7721,8 +8019,10 @@ async function dispatchApiRequest(
                   if (alreadyRows && alreadyRows.length > 0) {
                     alreadyDirect = alreadyRows[0];
                   }
-                } catch (_eDirectCheck) {
-                  // Ignore
+                } catch (eDirectCheck) {
+                  if (!isMissingSchemaObjectError(eDirectCheck)) {
+                    throw eDirectCheck;
+                  }
                 }
 
                 if (!alreadyDirect) {
@@ -7734,8 +8034,10 @@ async function dispatchApiRequest(
                     if (alreadyLedgerRows && alreadyLedgerRows.length > 0) {
                       alreadyDirect = alreadyLedgerRows[0];
                     }
-                  } catch (_eDirectLedger) {
-                    // Ignore
+                  } catch (eDirectLedger) {
+                    if (!isMissingSchemaObjectError(eDirectLedger)) {
+                      throw eDirectLedger;
+                    }
                   }
                 }
 
@@ -7782,15 +8084,19 @@ async function dispatchApiRequest(
                         : null;
                 const itemBeneficiaryMasked = buildMaskedBeneficiaryDetails(itemBank);
 
+                let insertRes: unknown;
                 try {
-                  await conn.query(
+                  insertRes = await conn.query(
                     `INSERT INTO wallet_transactions (id, user_id, batch_id, type, amount, status, payout_method, beneficiary_details, created_at)
                      VALUES (?, ?, ?, 'withdrawal', ?, 'completed', ?, ?, NOW())`,
                     [deterministicTxId, uId, batchId, amt, itemPayoutMethod, itemBeneficiaryMasked],
                   );
-                } catch (_e) {
+                } catch (eTxInsert) {
+                  if (!isMissingSchemaObjectError(eTxInsert)) {
+                    throw eTxInsert;
+                  }
                   try {
-                    await conn.query(
+                    insertRes = await conn.query(
                       `INSERT INTO income_ledger (id, transaction_id, user_id, batch_id, income_type, amount, status, payout_method, beneficiary_details, description, created_at)
                        VALUES (?, ?, ?, ?, 'withdrawal', ?, 'settled', ?, ?, ?, NOW())`,
                       [
@@ -7804,8 +8110,11 @@ async function dispatchApiRequest(
                         `Direct bulk payout disbursement (Batch ${batchId})`,
                       ],
                     );
-                  } catch (_eLedger) {
-                    await conn.query(
+                  } catch (eLedger) {
+                    if (!isMissingSchemaObjectError(eLedger)) {
+                      throw eLedger;
+                    }
+                    insertRes = await conn.query(
                       `INSERT INTO income_ledger (id, transaction_id, user_id, income_type, amount, status, description, created_at)
                        VALUES (?, ?, ?, 'withdrawal', ?, 'settled', ?, NOW())`,
                       [
@@ -7818,12 +8127,20 @@ async function dispatchApiRequest(
                     );
                   }
                 }
+                assertAffectedRowsIfPresent(
+                  insertRes,
+                  `Failed to persist payout transaction record '${deterministicTxId}'.`,
+                );
 
-                await conn.query(
+                const walletUpdRes = await conn.query(
                   `UPDATE wallet_balances
                    SET balance = balance - ?, total_withdrawn = total_withdrawn + ?, updated_at = NOW()
                    WHERE UPPER(user_id) = UPPER(?)`,
                   [amt, amt, uId],
+                );
+                assertAffectedRowsIfPresent(
+                  walletUpdRes,
+                  `Failed to persist wallet balance update for user '${uId}'.`,
                 );
 
                 chunkProcessed.push({
@@ -7846,10 +8163,25 @@ async function dispatchApiRequest(
             processed.push(...chunkProcessed);
           } catch (chunkErr: any) {
             if (chunkBegun) {
-              await conn.rollback();
+              try {
+                await conn.rollback();
+              } catch (_rollbackErr) {
+                // Ignore rollback failure on dropped connection
+              }
             }
 
-            const statusCode = chunkErr.statusCode || 500;
+            const statusCode =
+              typeof chunkErr?.statusCode === "number"
+                ? chunkErr.statusCode
+                : isDbConnectionError(chunkErr)
+                  ? 503
+                  : 500;
+            const safeError =
+              typeof chunkErr?.statusCode === "number" && chunkErr.statusCode < 500
+                ? chunkErr.message
+                : statusCode === 503
+                  ? "Database connection unavailable while processing bulk payout."
+                  : chunkErr?.message || "Database error while processing bulk payout.";
             const failStatus = totalProcessed > 0 ? "partially_completed" : "failed";
             try {
               await pool.query(
@@ -7860,7 +8192,7 @@ async function dispatchApiRequest(
                   totalProcessed,
                   totalAmount,
                   failStatus,
-                  `${notes} (Chunk failure: ${chunkErr.message})`,
+                  `${notes} (Chunk failure: ${safeError})`,
                   batchId,
                 ],
               );
@@ -7871,7 +8203,7 @@ async function dispatchApiRequest(
             return jsonResponse(
               {
                 success: false,
-                error: chunkErr.message,
+                error: safeError,
                 batch_id: batchId,
                 chunks_completed: chunksProcessed,
                 total_chunks: totalChunks,
@@ -7883,7 +8215,11 @@ async function dispatchApiRequest(
               statusCode,
             );
           } finally {
-            conn.release();
+            try {
+              conn.release();
+            } catch (_releaseErr) {
+              // Ignore connection release errors
+            }
           }
         }
 
@@ -7898,7 +8234,21 @@ async function dispatchApiRequest(
                notes = VALUES(notes)`,
             [batchId, authUser.user_id || "ADMIN", totalProcessed, totalAmount, notes],
           );
-        } catch (_e) {
+        } catch (batchFinishErr: unknown) {
+          if (isProduction && !isMissingSchemaObjectError(batchFinishErr)) {
+            const status = isDbConnectionError(batchFinishErr) ? 503 : 500;
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  status === 503
+                    ? "Database connection unavailable while finalizing payout batch record."
+                    : "Failed to persist payout batch completion record.",
+                batch_id: batchId,
+              },
+              status,
+            );
+          }
           // payout_batches optional if migration pending
         }
 
@@ -7919,6 +8269,17 @@ async function dispatchApiRequest(
           },
           processed,
         });
+      }
+
+      if (isProduction) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required to execute bulk payouts.",
+          },
+          503,
+        );
       }
 
       // In-memory/JSON store bulk payout implementation (for dev & test environments)
@@ -12152,8 +12513,32 @@ async function dispatchApiRequest(
     if (method !== "POST" && method !== "GET") {
       return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
     }
+    const isProduction = isFailClosedProductionEnv(
+      readEnvValue(env, "APP_ENV"),
+      readEnvValue(env, "NODE_ENV"),
+    );
     const pool = getMysqlPool();
-    const authUser = await getAuthUserFromRequest(request, store, pool);
+    if (method === "POST" && isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required to record AdSense earnings.",
+        },
+        503,
+      );
+    }
+    if (method === "GET" && isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required to query AdSense records.",
+        },
+        503,
+      );
+    }
+    const authUser = await getAuthUserFromRequest(request, store, pool, env);
     if (!authUser) {
       return jsonResponse(
         {
@@ -12189,9 +12574,38 @@ async function dispatchApiRequest(
               count: (rows || []).length,
               conflicts: rows || [],
             });
-          } catch (_e) {
-            return jsonResponse({ success: true, count: 0, conflicts: [] });
+          } catch (dbErr: unknown) {
+            if (isMysqlMissingTableError(dbErr)) {
+              return jsonResponse({ success: true, count: 0, conflicts: [] });
+            }
+            console.error("[record-adsense-earning][GET][conflicts] Database error:", dbErr);
+            if (isMysqlConnectionUnavailableError(dbErr)) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Database connection unavailable while loading AdSense conflict records.",
+                },
+                503,
+              );
+            }
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database error loading AdSense conflict records.",
+              },
+              500,
+            );
           }
+        }
+        if (isProduction) {
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                "Database connection unavailable. In production, persistent database storage is required to query AdSense records.",
+            },
+            503,
+          );
         }
         const conflictsList = Object.values((store as any).adsenseHistoricalConflicts || {});
         return jsonResponse({
@@ -12212,9 +12626,38 @@ async function dispatchApiRequest(
               count: (rows || []).length,
               statements: rows || [],
             });
-          } catch (_e) {
-            return jsonResponse({ success: true, count: 0, statements: [] });
+          } catch (dbErr: unknown) {
+            if (isMysqlMissingTableError(dbErr)) {
+              return jsonResponse({ success: true, count: 0, statements: [] });
+            }
+            console.error("[record-adsense-earning][GET][statements] Database error:", dbErr);
+            if (isMysqlConnectionUnavailableError(dbErr)) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Database connection unavailable while loading AdSense statements.",
+                },
+                503,
+              );
+            }
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database error loading AdSense statements.",
+              },
+              500,
+            );
           }
+        }
+        if (isProduction) {
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                "Database connection unavailable. In production, persistent database storage is required to query AdSense records.",
+            },
+            503,
+          );
         }
         const statementsList = Object.values((store as any).adsenseStatements || {});
         return jsonResponse({
@@ -12232,7 +12675,7 @@ async function dispatchApiRequest(
 
     const payload: any = await request.json().catch(() => ({}));
     const targetUserId = String(payload?.["userId"] || payload?.["user_id"] || "").trim();
-    const amount = Number(payload?.["amount"] || 0);
+    const amountValidation = parseValidatedCurrencyAmount(payload?.["amount"], "AdSense");
     const rawMonth = String(
       payload?.["reportMonth"] ||
         payload?.["report_month"] ||
@@ -12249,15 +12692,16 @@ async function dispatchApiRequest(
     if (!targetUserId) {
       return jsonResponse({ success: false, error: "target user_id is required." }, 400);
     }
-    if (amount <= 0 || isNaN(amount)) {
+    if (!amountValidation.valid) {
       return jsonResponse(
         {
           success: false,
-          error: "Verified AdSense earnings amount must be strictly greater than 0.",
+          error: amountValidation.error,
         },
         400,
       );
     }
+    const amount = amountValidation.amount;
 
     // Normalize and validate reporting month (format: YYYY-MM)
     const monthMatch = rawMonth.match(/^(\d{4})-(0[1-9]|1[0-2])/);
@@ -12276,9 +12720,47 @@ async function dispatchApiRequest(
     const ledgerUuid = crypto.randomUUID();
 
     if (pool) {
-      const conn = await pool.getConnection();
+      let conn: PoolConnection | null = null;
+      let txBegun = false;
+      const safeRollback = async (): Promise<void> => {
+        if (!conn || !txBegun) return;
+        txBegun = false;
+        try {
+          await conn.rollback();
+        } catch (_rollbackErr) {
+          // Ignore rollback failure on dropped connection
+        }
+      };
+
       try {
+        try {
+          conn = await pool.getConnection();
+        } catch (connErr: unknown) {
+          const status = isMysqlConnectionUnavailableError(connErr) ? 503 : 500;
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                status === 503
+                  ? "Database connection unavailable while recording AdSense earnings."
+                  : "Failed to acquire database connection while recording AdSense earnings.",
+            },
+            status,
+          );
+        }
+
+        if (!conn) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database connection unavailable while recording AdSense earnings.",
+            },
+            503,
+          );
+        }
+
         await conn.beginTransaction();
+        txBegun = true;
 
         // Verify target creator exists
         const [uRows]: any = await conn.query(
@@ -12286,7 +12768,7 @@ async function dispatchApiRequest(
           [targetUserId],
         );
         if (!uRows || uRows.length === 0) {
-          await conn.rollback();
+          await safeRollback();
           return jsonResponse(
             { success: false, error: `User ID '${targetUserId}' not found in database.` },
             404,
@@ -12306,6 +12788,16 @@ async function dispatchApiRequest(
           description = `Verified Google AdSense earnings for ${normalizedMonth} (Statement Ref: ${referenceId})`;
         }
 
+        const isMissingTableError = (dbErr: unknown): boolean => {
+          if (!dbErr || typeof dbErr !== "object") return false;
+          const e = dbErr as { code?: unknown; errno?: unknown; sqlState?: unknown };
+          return (
+            String(e.code ?? "") === "ER_NO_SUCH_TABLE" ||
+            Number(e.errno ?? 0) === 1146 ||
+            String(e.sqlState ?? "") === "42S02"
+          );
+        };
+
         // 1. Check if adsense_monthly_statements table exists, and check for duplicates with row lock
         try {
           const [stmtRows]: any = await conn.query(
@@ -12313,7 +12805,7 @@ async function dispatchApiRequest(
             [canonicalUserId, normalizedMonth],
           );
           if (stmtRows && stmtRows.length > 0) {
-            await conn.rollback();
+            await safeRollback();
             return jsonResponse(
               {
                 success: false,
@@ -12322,7 +12814,10 @@ async function dispatchApiRequest(
               409,
             );
           }
-        } catch (_tableErr: any) {
+        } catch (tableErr: any) {
+          if (!isMissingTableError(tableErr)) {
+            throw tableErr;
+          }
           // Table may not exist yet if migration pending; fall back to income_ledger check
         }
 
@@ -12333,7 +12828,7 @@ async function dispatchApiRequest(
             [canonicalUserId, normalizedMonth],
           );
           if (conflictRows && conflictRows.length > 0) {
-            await conn.rollback();
+            await safeRollback();
             return jsonResponse(
               {
                 success: false,
@@ -12342,7 +12837,10 @@ async function dispatchApiRequest(
               409,
             );
           }
-        } catch (_conflictErr: any) {
+        } catch (conflictErr: any) {
+          if (!isMissingTableError(conflictErr)) {
+            throw conflictErr;
+          }
           // Table may not exist yet if migration pending; proceed
         }
 
@@ -12360,7 +12858,7 @@ async function dispatchApiRequest(
           [canonicalUserId, txId, `%${normalizedMonth}%`],
         );
         if (dupLedger && dupLedger.length > 0) {
-          await conn.rollback();
+          await safeRollback();
           return jsonResponse(
             {
               success: false,
@@ -12372,7 +12870,7 @@ async function dispatchApiRequest(
 
         // 3. Record in adsense_monthly_statements if table exists
         try {
-          await conn.query(
+          const stmtResult = await conn.query(
             `INSERT INTO adsense_monthly_statements (
               id, user_id, report_month, amount, reference_id,
               transaction_id, recorded_by, video_id, description, status, created_at
@@ -12389,12 +12887,19 @@ async function dispatchApiRequest(
               description,
             ],
           );
-        } catch (_stmtInsertErr) {
+          assertMysqlWriteConfirmed(
+            stmtResult,
+            "Failed to persist AdSense monthly statement record.",
+          );
+        } catch (stmtInsertErr: any) {
+          if (!isMissingTableError(stmtInsertErr)) {
+            throw stmtInsertErr;
+          }
           // If table doesn't exist yet, continue with income_ledger
         }
 
         // 4. Insert into income_ledger
-        await conn.query(
+        const ledgerResult = await conn.query(
           `INSERT INTO income_ledger (
             id, transaction_id, user_id, source_user_id, source_user_name, video_id,
             income_type, amount, status, special_tag, description, created_at
@@ -12410,9 +12915,10 @@ async function dispatchApiRequest(
             description,
           ],
         );
+        assertMysqlWriteConfirmed(ledgerResult, "Failed to record AdSense income ledger entry.");
 
         // 5. Atomic credit to wallet_balances
-        await conn.query(
+        const walletResult = await conn.query(
           `INSERT INTO wallet_balances (user_id, balance, total_earned, total_withdrawn, referral_income, global_income, adsense_income, affiliate_income, updated_at)
            VALUES (?, ?, ?, 0.00, 0.00, 0.00, ?, 0.00, NOW())
            ON DUPLICATE KEY UPDATE
@@ -12422,8 +12928,10 @@ async function dispatchApiRequest(
              updated_at = NOW()`,
           [canonicalUserId, amount, amount, amount],
         );
+        assertMysqlWriteConfirmed(walletResult, "Failed to credit creator wallet for AdSense.");
 
         await conn.commit();
+        txBegun = false;
 
         return jsonResponse({
           success: true,
@@ -12435,7 +12943,7 @@ async function dispatchApiRequest(
           referenceId,
         });
       } catch (err: any) {
-        await conn.rollback();
+        await safeRollback();
         // Handle concurrent duplicate entry constraint collision (MySQL 1062 / ER_DUP_ENTRY)
         if (
           err?.code === "ER_DUP_ENTRY" ||
@@ -12456,8 +12964,25 @@ async function dispatchApiRequest(
           500,
         );
       } finally {
-        conn.release();
+        if (conn) {
+          try {
+            conn.release();
+          } catch (_releaseErr) {
+            // Ignore connection release failure
+          }
+        }
       }
+    }
+
+    if (isProduction) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required to record AdSense earnings.",
+        },
+        503,
+      );
     }
 
     // Fallback store update (preview/offline)
@@ -12527,9 +13052,11 @@ async function dispatchApiRequest(
       };
     }
     const existingWallet = store.wallets[upperId]!;
-    existingWallet.balance += amount;
-    existingWallet.total_earned += amount;
-    existingWallet.adsense_income = (existingWallet.adsense_income || 0) + amount;
+    existingWallet.balance = Number((existingWallet.balance + amount).toFixed(2));
+    existingWallet.total_earned = Number((existingWallet.total_earned + amount).toFixed(2));
+    existingWallet.adsense_income = Number(
+      ((existingWallet.adsense_income || 0) + amount).toFixed(2),
+    );
     existingWallet.updated_at = new Date().toISOString();
 
     const txRecord = {
@@ -12575,8 +13102,32 @@ async function dispatchApiRequest(
     if (method !== "POST" && method !== "GET") {
       return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
     }
+    const isProduction = isFailClosedProductionEnv(
+      readEnvValue(env, "APP_ENV"),
+      readEnvValue(env, "NODE_ENV"),
+    );
     const pool = getMysqlPool();
-    const authUser = await getAuthUserFromRequest(request, store, pool);
+    if (method === "POST" && isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required to record AdMob earnings.",
+        },
+        503,
+      );
+    }
+    if (method === "GET" && isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required to query AdMob statements.",
+        },
+        503,
+      );
+    }
+    const authUser = await getAuthUserFromRequest(request, store, pool, env);
     if (!authUser) {
       return jsonResponse(
         {
@@ -12608,9 +13159,35 @@ async function dispatchApiRequest(
             count: (rows || []).length,
             statements: rows || [],
           });
-        } catch (_e) {
-          return jsonResponse({ success: true, count: 0, statements: [] });
+        } catch (dbErr: unknown) {
+          console.error("[record-admob-earning][GET] Database error:", dbErr);
+          if (isMysqlConnectionUnavailableError(dbErr)) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database connection unavailable while loading AdMob statements.",
+              },
+              503,
+            );
+          }
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database error loading AdMob statements.",
+            },
+            500,
+          );
         }
+      }
+      if (isProduction) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required to query AdMob statements.",
+          },
+          503,
+        );
       }
       const stList = Object.values((store as any).admobStatements || {});
       return jsonResponse({
@@ -12629,36 +13206,48 @@ async function dispatchApiRequest(
     }
 
     const targetUserId = String(body.userId || body.user_id || "").trim();
-    const amount = Number(body.amount);
+    const amountValidation = parseValidatedCurrencyAmount(body.amount, "AdMob");
     const rawMonth = String(
       body.reportMonth || body.report_month || new Date().toISOString().slice(0, 7),
     ).trim();
-    const impressions = Number(body.impressions || 0);
-    const ecpm = Number(body.ecpm || 0);
+    const impressionsValidation = parseValidatedAdMobMetric(body.impressions, "impressions", {
+      integerOnly: true,
+      max: 4294967295,
+    });
+    const ecpmValidation = parseValidatedAdMobMetric(body.ecpm, "ecpm", {
+      integerOnly: false,
+      max: 999999.9999,
+    });
     const description = String(
       body.description || `Google AdMob Finalized Statement (${rawMonth}) - Android Native App`,
     ).trim();
 
-    const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
-    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
-
     const requestedAppId = String(body.appId ?? body.app_id ?? "").trim();
-    const configuredAppId = readEnv("ADMOB_APP_ID");
+    const configuredAppId = readEnvValue(env, "ADMOB_APP_ID");
     const resolvedAppId = requestedAppId || configuredAppId;
     let appId: string | null = null;
 
     if (!targetUserId) {
       return jsonResponse({ success: false, error: "target user_id is required." }, 400);
     }
-    if (Number.isNaN(amount) || amount <= 0) {
+    if (!amountValidation.valid) {
       return jsonResponse(
         {
           success: false,
-          error: "Verified AdMob earnings amount must be strictly greater than 0.",
+          error: amountValidation.error,
         },
         400,
       );
     }
+    if (!impressionsValidation.valid) {
+      return jsonResponse({ success: false, error: impressionsValidation.error }, 400);
+    }
+    if (!ecpmValidation.valid) {
+      return jsonResponse({ success: false, error: ecpmValidation.error }, 400);
+    }
+    const amount = amountValidation.amount;
+    const impressions = impressionsValidation.value;
+    const ecpm = ecpmValidation.value;
 
     const monthMatch = rawMonth.match(/^(\d{4})-(0[1-9]|1[0-2])/);
     if (!monthMatch) {
@@ -12710,10 +13299,48 @@ async function dispatchApiRequest(
     }
 
     if (pool) {
-      const conn = await pool.getConnection();
+      let conn: PoolConnection | null = null;
+      let txBegun = false;
       let canonicalUserId = targetUserId;
+      const safeRollback = async (): Promise<void> => {
+        if (!conn || !txBegun) return;
+        txBegun = false;
+        try {
+          await conn.rollback();
+        } catch (_rollbackErr) {
+          // Ignore rollback failure on dropped connection
+        }
+      };
+
       try {
+        try {
+          conn = await pool.getConnection();
+        } catch (connErr: unknown) {
+          const status = isMysqlConnectionUnavailableError(connErr) ? 503 : 500;
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                status === 503
+                  ? "Database connection unavailable while recording AdMob earnings."
+                  : "Failed to acquire database connection while recording AdMob earnings.",
+            },
+            status,
+          );
+        }
+
+        if (!conn) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database connection unavailable while recording AdMob earnings.",
+            },
+            503,
+          );
+        }
+
         await conn.beginTransaction();
+        txBegun = true;
 
         // Verify user exists
         const [userRows]: any = await conn.query(
@@ -12721,13 +13348,17 @@ async function dispatchApiRequest(
           [targetUserId],
         );
         if (!userRows || userRows.length === 0) {
-          await conn.rollback();
+          await safeRollback();
           return jsonResponse(
             { success: false, error: `User ID '${targetUserId}' not found in database.` },
             404,
           );
         }
         canonicalUserId = userRows[0].user_id;
+        const cleanUserId = canonicalUserId.toUpperCase().replace(/[^0-9A-Z]/g, "");
+        const txId = `TX_ADMOB_${cleanUserId}_${cleanMonth}`;
+        const statementId = `STMT-ADMOB-${cleanMonth}-${cleanUserId}`;
+        const ledgerId = `led_${crypto.randomBytes(12).toString("hex")}`;
 
         // 1. Race-safe Duplicate check inside transaction
         const [dupRows]: any = await conn.query(
@@ -12735,7 +13366,7 @@ async function dispatchApiRequest(
           [canonicalUserId, normalizedMonth],
         );
         if (dupRows && dupRows.length > 0) {
-          await conn.rollback();
+          await safeRollback();
           return jsonResponse(
             {
               success: false,
@@ -12745,18 +13376,31 @@ async function dispatchApiRequest(
           );
         }
 
-        const txId = `TX-ADMOB-${cleanMonth}-${crypto.randomBytes(4).toString("hex")}`;
-        const statementId = `STMT-ADMOB-${cleanMonth}-${canonicalUserId.replace(/[^0-9A-Z]/g, "")}`;
-        const ledgerId = `led_${crypto.randomBytes(12).toString("hex")}`;
+        // 1b. Race-safe Duplicate check on income_ledger by deterministic transaction ID
+        const [dupLedgerRows]: any = await conn.query(
+          "SELECT id, transaction_id FROM income_ledger WHERE transaction_id = ? LIMIT 1 FOR UPDATE",
+          [txId],
+        );
+        if (dupLedgerRows && dupLedgerRows.length > 0) {
+          await safeRollback();
+          return jsonResponse(
+            {
+              success: false,
+              error: `AdMob statement already finalized for creator '${canonicalUserId}' in month '${normalizedMonth}'. Duplicate credits blocked.`,
+            },
+            409,
+          );
+        }
 
         // 2. Insert into income_ledger
-        await conn.query(
+        const ledgerResult = await conn.query(
           "INSERT INTO income_ledger (id, transaction_id, user_id, income_type, amount, status, special_tag, description, created_at) VALUES (?, ?, ?, 'admob_income', ?, 'settled', 'ADMOB_FINALIZED_STATEMENT', ?, NOW())",
           [ledgerId, txId, canonicalUserId, amount, description],
         );
+        assertMysqlWriteConfirmed(ledgerResult, "Failed to record AdMob income ledger entry.");
 
         // 3. Insert into admob_monthly_statements (atomic with ledger and wallet)
-        await conn.query(
+        const statementResult = await conn.query(
           "INSERT INTO admob_monthly_statements (statement_id, user_id, report_month, gross_amount, net_amount, impressions, ecpm, app_id, ledger_id, transaction_id, verified_by, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'finalized', ?)",
           [
             statementId,
@@ -12773,14 +13417,20 @@ async function dispatchApiRequest(
             description,
           ],
         );
+        assertMysqlWriteConfirmed(
+          statementResult,
+          "Failed to persist AdMob monthly statement record.",
+        );
 
         // 4. Increment creator wallet
-        await conn.query(
+        const walletResult = await conn.query(
           "INSERT INTO wallet_balances (user_id, balance, total_earned, total_withdrawn, admob_income, updated_at) VALUES (?, ?, ?, 0.00, ?, NOW()) ON DUPLICATE KEY UPDATE balance = balance + VALUES(balance), total_earned = total_earned + VALUES(total_earned), admob_income = admob_income + VALUES(admob_income), updated_at = NOW()",
           [canonicalUserId, amount, amount, amount],
         );
+        assertMysqlWriteConfirmed(walletResult, "Failed to credit creator wallet for AdMob.");
 
         await conn.commit();
+        txBegun = false;
 
         return jsonResponse(
           {
@@ -12795,7 +13445,7 @@ async function dispatchApiRequest(
           201,
         );
       } catch (err: any) {
-        await conn.rollback();
+        await safeRollback();
         if (isMysqlDuplicateKeyError(err)) {
           return jsonResponse(
             {
@@ -12810,8 +13460,25 @@ async function dispatchApiRequest(
           500,
         );
       } finally {
-        conn.release();
+        if (conn) {
+          try {
+            conn.release();
+          } catch (_releaseErr) {
+            // Ignore connection release failure
+          }
+        }
       }
+    }
+
+    if (isProduction) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required to record AdMob earnings.",
+        },
+        503,
+      );
     }
 
     // Local / In-memory fallback
@@ -12837,7 +13504,21 @@ async function dispatchApiRequest(
       );
     }
 
-    const txId = `TX_ADMOB_${canonicalUserId.replace(/[^0-9A-Z]/g, "")}_${cleanMonth}`;
+    const cleanUserId = canonicalUserId.toUpperCase().replace(/[^0-9A-Z]/g, "");
+    const txId = `TX_ADMOB_${cleanUserId}_${cleanMonth}`;
+    const existingLedgerTx = (store.walletTransactions || []).find(
+      (tx: any) => String(tx["transaction_id"] || tx["transactionId"] || "") === txId,
+    );
+    if (existingLedgerTx) {
+      return jsonResponse(
+        {
+          success: false,
+          error: `AdMob statement already finalized for creator '${canonicalUserId}' in month '${normalizedMonth}'. Duplicate credits blocked.`,
+        },
+        409,
+      );
+    }
+
     const ledgerUuid = `led_admob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     if (!store.wallets[upperId]) {
@@ -12854,9 +13535,9 @@ async function dispatchApiRequest(
       };
     }
     const existingWallet = store.wallets[upperId]!;
-    existingWallet.balance += amount;
-    existingWallet.total_earned += amount;
-    existingWallet.admob_income = (existingWallet.admob_income || 0) + amount;
+    existingWallet.balance = Number((existingWallet.balance + amount).toFixed(2));
+    existingWallet.total_earned = Number((existingWallet.total_earned + amount).toFixed(2));
+    existingWallet.admob_income = Number(((existingWallet.admob_income || 0) + amount).toFixed(2));
     existingWallet.updated_at = new Date().toISOString();
 
     const txRecord = {
@@ -12883,6 +13564,10 @@ async function dispatchApiRequest(
       userId: canonicalUserId,
       app_id: appId,
       amount,
+      gross_amount: amount,
+      net_amount: amount,
+      impressions,
+      ecpm,
       reportMonth: normalizedMonth,
       creditedAt: new Date().toISOString(),
     };

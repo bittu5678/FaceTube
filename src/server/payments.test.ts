@@ -3842,3 +3842,749 @@ describe("Task 5J-V2: Payment Create-Order Production Fail-Closed Tests", () => 
     assert.match(phpCode, /Video not found for promotion\./);
   });
 });
+
+describe("Task 5J-V3: Admin Bulk Payout Production Fail-Closed Tests", () => {
+  const envKeys = [
+    "NODE_ENV",
+    "APP_ENV",
+    "USE_REMOTE_PHP_API",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_NAME",
+    "DB_USER",
+    "DB_PASSWORD",
+    "MYSQL_HOST",
+    "MYSQL_PORT",
+    "MYSQL_DATABASE",
+    "MYSQL_USER",
+    "MYSQL_PASSWORD",
+  ] as const;
+
+  const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+  let envSnapshot: Record<string, string | undefined> = {};
+  let storeExisted = false;
+  let storeSnapshot: string | null = null;
+
+  function installStoreFsSpy() {
+    const origExistsSync = fs.existsSync;
+    const origStatSync = fs.statSync;
+    const origReadFileSync = fs.readFileSync;
+    const origWriteFileSync = fs.writeFileSync;
+
+    const ops = {
+      existsChecks: 0,
+      statChecks: 0,
+      reads: 0,
+      writes: 0,
+    };
+
+    const isTargetStore = (p: fs.PathOrFileDescriptor | fs.PathLike): boolean => {
+      if (typeof p !== "string" && !(p instanceof URL)) return false;
+      const resolved = p instanceof URL ? p.pathname : path.resolve(p);
+      return resolved === storePath;
+    };
+
+    fs.existsSync = ((p: fs.PathLike) => {
+      if (isTargetStore(p)) ops.existsChecks++;
+      return origExistsSync(p);
+    }) as typeof fs.existsSync;
+
+    (fs as any).statSync = ((p: fs.PathLike, options?: any) => {
+      if (isTargetStore(p)) ops.statChecks++;
+      return origStatSync(p, options);
+    }) as typeof fs.statSync;
+
+    fs.readFileSync = ((p: fs.PathOrFileDescriptor, options?: any) => {
+      if (isTargetStore(p)) ops.reads++;
+      return origReadFileSync(p, options);
+    }) as typeof fs.readFileSync;
+
+    fs.writeFileSync = ((p: fs.PathOrFileDescriptor, data: any, options?: any) => {
+      if (isTargetStore(p)) ops.writes++;
+      return origWriteFileSync(p, data, options);
+    }) as typeof fs.writeFileSync;
+
+    return {
+      ops,
+      restore: () => {
+        fs.existsSync = origExistsSync;
+        (fs as any).statSync = origStatSync;
+        fs.readFileSync = origReadFileSync;
+        fs.writeFileSync = origWriteFileSync;
+      },
+    };
+  }
+
+  function enableMockDbEnv() {
+    process.env["DB_HOST"] = "127.0.0.1";
+    process.env["DB_NAME"] = "facetube_test";
+    process.env["DB_USER"] = "facetube_user";
+    process.env["DB_PASSWORD"] = "secret";
+  }
+
+  function createAuthSessionRow(userId = "FT102857", role: "admin" | "user" = "admin") {
+    return {
+      id: userId,
+      user_id: userId,
+      name: role === "admin" ? "FaceTube Admin" : "Alex Rivera",
+      mobile: "9999999999",
+      email: role === "admin" ? "admin@facetube.com" : "alex@facetube.com",
+      role,
+      referral_code: userId,
+      avatar_url: null,
+      channel_logo_url: null,
+      channel_name: "FaceTube Official",
+      channel_description: null,
+      created_at: new Date().toISOString(),
+    };
+  }
+
+  beforeEach(() => {
+    envSnapshot = {};
+    for (const k of envKeys) {
+      envSnapshot[k] = process.env[k];
+    }
+    storeExisted = fs.existsSync(storePath);
+    storeSnapshot = storeExisted ? fs.readFileSync(storePath, "utf-8") : null;
+    resetInMemoryStore();
+    setMysqlPoolForTesting(null);
+    delete process.env["USE_REMOTE_PHP_API"];
+    delete process.env["DB_HOST"];
+    delete process.env["DB_NAME"];
+    delete process.env["DB_USER"];
+    delete process.env["DB_PASSWORD"];
+    delete process.env["MYSQL_HOST"];
+    delete process.env["MYSQL_DATABASE"];
+    delete process.env["MYSQL_USER"];
+    delete process.env["MYSQL_PASSWORD"];
+  });
+
+  afterEach(() => {
+    setMysqlPoolForTesting(null);
+    resetInMemoryStore();
+    for (const k of envKeys) {
+      if (envSnapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = envSnapshot[k];
+    }
+    if (storeExisted && storeSnapshot !== null) {
+      const dir = path.dirname(storePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+    } else if (!storeExisted && fs.existsSync(storePath)) {
+      fs.unlinkSync(storePath);
+    }
+  });
+
+  it("1. Production without MySQL pool returns 503 and never accesses JSON store or seeds demo balances", async () => {
+    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+
+    const spy = installStoreFsSpy();
+    try {
+      const cases: Array<{
+        label: string;
+        procNode?: string;
+        procApp?: string;
+        handlerEnv?: Record<string, string | undefined>;
+        withBearer?: boolean;
+      }> = [
+        { label: "NODE_ENV=production (no token)", procNode: "production", withBearer: false },
+        { label: "NODE_ENV=production (with token)", procNode: "production", withBearer: true },
+        {
+          label: "APP_ENV=production overrides NODE_ENV=development",
+          procNode: "development",
+          procApp: "production",
+          withBearer: true,
+        },
+        {
+          label: "Handler env APP_ENV=production overrides process.env",
+          procNode: "development",
+          handlerEnv: { APP_ENV: "production", NODE_ENV: "development" },
+          withBearer: true,
+        },
+        { label: "Unset APP_ENV and NODE_ENV fail closed as production", withBearer: true },
+      ];
+
+      for (const tc of cases) {
+        if (tc.procNode === undefined) delete process.env["NODE_ENV"];
+        else process.env["NODE_ENV"] = tc.procNode;
+
+        if (tc.procApp === undefined) delete process.env["APP_ENV"];
+        else process.env["APP_ENV"] = tc.procApp;
+
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (tc.withBearer) {
+          headers["Authorization"] = "Bearer prod_admin_token";
+        }
+
+        const req = new Request("https://facetube.online/api/admin/bulk-payout", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            payouts: [{ userId: "FT102857", amount: 100 }],
+          }),
+        });
+
+        const res = await handleApiRequest(req, tc.handlerEnv);
+        assert.ok(res, tc.label);
+        assert.equal(res.status, 503, `${tc.label}: expected 503`);
+        const body = await res.json();
+        assert.equal(body.success, false, tc.label);
+        assert.match(body.error || "", /database connection unavailable/i, tc.label);
+      }
+
+      assert.equal(spy.ops.reads, 0);
+      assert.equal(spy.ops.writes, 0);
+      assert.equal(spy.ops.existsChecks, 0);
+      assert.equal(fs.existsSync(storePath), false);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("2. Production MySQL read/query/persistence failures return 500/503, roll back transactions, and never return success", async () => {
+    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+    process.env["NODE_ENV"] = "production";
+    delete process.env["APP_ENV"];
+    enableMockDbEnv();
+
+    const spy = installStoreFsSpy();
+    try {
+      // Scenario A: pool.getConnection() throws ECONNREFUSED -> 503
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) {
+            return [[createAuthSessionRow("FT102857", "admin")], []];
+          }
+          return [{ affectedRows: 1 }, []];
+        },
+        getConnection: async () => {
+          const err: any = new Error("connect ECONNREFUSED 127.0.0.1:3306");
+          err.code = "ECONNREFUSED";
+          throw err;
+        },
+      } as any);
+
+      const resConnErr = await handleApiRequest(
+        new Request("https://facetube.online/api/admin/bulk-payout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer prod_admin_token",
+          },
+          body: JSON.stringify({
+            payouts: [{ userId: "FT483921", amount: 100 }],
+          }),
+        }),
+      );
+      assert.ok(resConnErr);
+      assert.equal(resConnErr.status, 503);
+      assert.equal((await resConnErr.json()).success, false);
+
+      // Scenario B: Case 1 transaction lookup throws non-schema DB read error -> 500 (never 404)
+      let rollbackCountB = 0;
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) {
+            return [[createAuthSessionRow("FT102857", "admin")], []];
+          }
+          return [{ affectedRows: 1 }, []];
+        },
+        getConnection: async () => ({
+          beginTransaction: async () => {},
+          commit: async () => {},
+          rollback: async () => {
+            rollbackCountB++;
+          },
+          release: () => {},
+          query: async (sql: string) => {
+            if (sql.includes("FROM wallet_transactions")) {
+              throw new Error("MySQL deadlock during transaction lookup");
+            }
+            return [[], []];
+          },
+        }),
+      } as any);
+
+      const resLookupErr = await handleApiRequest(
+        new Request("https://facetube.online/api/admin/bulk-payout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer prod_admin_token",
+          },
+          body: JSON.stringify({
+            payouts: [{ userId: "FT483921", amount: 100, transactionId: "tx_wdr_1" }],
+          }),
+        }),
+      );
+      assert.ok(resLookupErr);
+      assert.equal(resLookupErr.status, 500);
+      assert.equal(rollbackCountB, 1);
+      assert.equal((await resLookupErr.json()).success, false);
+
+      // Scenario C: Case 2 INSERT INTO wallet_transactions returns affectedRows: 0 -> 500 + rollback
+      let rollbackCountC = 0;
+      let commitCountC = 0;
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) {
+            return [[createAuthSessionRow("FT102857", "admin")], []];
+          }
+          return [{ affectedRows: 1 }, []];
+        },
+        getConnection: async () => ({
+          beginTransaction: async () => {},
+          commit: async () => {
+            commitCountC++;
+          },
+          rollback: async () => {
+            rollbackCountC++;
+          },
+          release: () => {},
+          query: async (sql: string) => {
+            if (sql.includes("FROM wallet_transactions WHERE id = ? AND batch_id = ?")) {
+              return [[], []];
+            }
+            if (sql.includes("FROM income_ledger WHERE")) {
+              return [[], []];
+            }
+            if (sql.includes("SELECT balance FROM wallet_balances")) {
+              return [[{ balance: 5000 }], []];
+            }
+            if (sql.includes("INSERT INTO wallet_transactions")) {
+              return [{ affectedRows: 0 }, []];
+            }
+            return [{ affectedRows: 1 }, []];
+          },
+        }),
+      } as any);
+
+      const resZeroInsert = await handleApiRequest(
+        new Request("https://facetube.online/api/admin/bulk-payout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer prod_admin_token",
+          },
+          body: JSON.stringify({
+            payouts: [{ userId: "FT483921", amount: 100 }],
+          }),
+        }),
+      );
+      assert.equal(resZeroInsert?.status, 500);
+      assert.equal(commitCountC, 0);
+      assert.equal(rollbackCountC, 1);
+      const bodyZeroInsert = await resZeroInsert?.json();
+      assert.equal(bodyZeroInsert.success, false);
+      assert.match(bodyZeroInsert.error || "", /failed to persist payout transaction record/i);
+
+      // Scenario D: Case 2 UPDATE wallet_balances returns affectedRows: 0 -> 500 + rollback
+      let rollbackCountD = 0;
+      let commitCountD = 0;
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) {
+            return [[createAuthSessionRow("FT102857", "admin")], []];
+          }
+          return [{ affectedRows: 1 }, []];
+        },
+        getConnection: async () => ({
+          beginTransaction: async () => {},
+          commit: async () => {
+            commitCountD++;
+          },
+          rollback: async () => {
+            rollbackCountD++;
+          },
+          release: () => {},
+          query: async (sql: string) => {
+            if (sql.includes("FROM wallet_transactions WHERE id = ? AND batch_id = ?")) {
+              return [[], []];
+            }
+            if (sql.includes("FROM income_ledger WHERE")) {
+              return [[], []];
+            }
+            if (sql.includes("SELECT balance FROM wallet_balances")) {
+              return [[{ balance: 5000 }], []];
+            }
+            if (sql.includes("INSERT INTO wallet_transactions")) {
+              return [{ affectedRows: 1 }, []];
+            }
+            if (sql.includes("UPDATE wallet_balances")) {
+              return [{ affectedRows: 0 }, []];
+            }
+            return [{ affectedRows: 1 }, []];
+          },
+        }),
+      } as any);
+
+      const resZeroWallet = await handleApiRequest(
+        new Request("https://facetube.online/api/admin/bulk-payout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer prod_admin_token",
+          },
+          body: JSON.stringify({
+            payouts: [{ userId: "FT483921", amount: 100 }],
+          }),
+        }),
+      );
+      assert.equal(resZeroWallet?.status, 500);
+      assert.equal(commitCountD, 0);
+      assert.equal(rollbackCountD, 1);
+      const bodyZeroWallet = await resZeroWallet?.json();
+      assert.equal(bodyZeroWallet.success, false);
+      assert.match(bodyZeroWallet.error || "", /failed to persist wallet balance update/i);
+
+      // Scenario E: Case 1 UPDATE wallet_transactions returns affectedRows: 0 -> 500 + rollback
+      let rollbackCountE = 0;
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) {
+            return [[createAuthSessionRow("FT102857", "admin")], []];
+          }
+          return [{ affectedRows: 1 }, []];
+        },
+        getConnection: async () => ({
+          beginTransaction: async () => {},
+          commit: async () => {},
+          rollback: async () => {
+            rollbackCountE++;
+          },
+          release: () => {},
+          query: async (sql: string) => {
+            if (
+              sql.includes("SELECT id, user_id, amount, status, batch_id FROM wallet_transactions")
+            ) {
+              return [
+                [
+                  {
+                    id: "tx_wdr_pending_1",
+                    user_id: "FT483921",
+                    amount: 250,
+                    status: "pending",
+                    batch_id: null,
+                  },
+                ],
+                [],
+              ];
+            }
+            if (sql.includes("UPDATE wallet_transactions")) {
+              return [{ affectedRows: 0 }, []];
+            }
+            return [{ affectedRows: 1 }, []];
+          },
+        }),
+      } as any);
+
+      const resZeroStatusUpd = await handleApiRequest(
+        new Request("https://facetube.online/api/admin/bulk-payout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer prod_admin_token",
+          },
+          body: JSON.stringify({
+            payouts: [{ userId: "FT483921", amount: 250, transactionId: "tx_wdr_pending_1" }],
+          }),
+        }),
+      );
+      assert.ok(resZeroStatusUpd);
+      assert.equal(resZeroStatusUpd.status, 500);
+      assert.equal(rollbackCountE, 1);
+      assert.equal((await resZeroStatusUpd.json()).success, false);
+
+      assert.equal(spy.ops.reads, 0);
+      assert.equal(spy.ops.writes, 0);
+      assert.equal(fs.existsSync(storePath), false);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("3. Production never seeds demo wallet balances for FT102857/FT483921/FT900431 when MySQL wallet row is missing", async () => {
+    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+    process.env["APP_ENV"] = "production";
+    process.env["NODE_ENV"] = "development";
+    enableMockDbEnv();
+
+    let walletUpdates = 0;
+    let txInserts = 0;
+    setMysqlPoolForTesting({
+      query: async (sql: string) => {
+        if (sql.includes("FROM sessions s")) {
+          return [[createAuthSessionRow("FT102857", "admin")], []];
+        }
+        return [{ affectedRows: 1 }, []];
+      },
+      getConnection: async () => ({
+        beginTransaction: async () => {},
+        commit: async () => {},
+        rollback: async () => {},
+        release: () => {},
+        query: async (sql: string) => {
+          if (sql.includes("FROM wallet_transactions WHERE id = ? AND batch_id = ?")) {
+            return [[], []];
+          }
+          if (sql.includes("FROM income_ledger WHERE")) {
+            return [[], []];
+          }
+          if (sql.includes("SELECT balance FROM wallet_balances")) {
+            return [[], []]; // Missing wallet row in MySQL
+          }
+          if (
+            sql.includes("INSERT INTO wallet_transactions") ||
+            sql.includes("INSERT INTO income_ledger")
+          ) {
+            txInserts++;
+          }
+          if (sql.includes("UPDATE wallet_balances")) {
+            walletUpdates++;
+          }
+          return [{ affectedRows: 1 }, []];
+        },
+      }),
+    } as any);
+
+    const spy = installStoreFsSpy();
+    try {
+      const res = await handleApiRequest(
+        new Request("https://facetube.online/api/admin/bulk-payout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer prod_admin_token",
+          },
+          body: JSON.stringify({
+            payouts: [{ userId: "FT102857", amount: 100 }],
+          }),
+        }),
+        { APP_ENV: "production", NODE_ENV: "development" },
+      );
+
+      assert.equal(res?.status, 400);
+      const body = await res?.json();
+      assert.equal(body.success, false);
+      assert.match(body.error || "", /insufficient balance.*Available:\s*₹0/i);
+      assert.equal(txInserts, 0);
+      assert.equal(walletUpdates, 0);
+      assert.equal(spy.ops.reads, 0);
+      assert.equal(spy.ops.writes, 0);
+      assert.equal(fs.existsSync(storePath), false);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("4. Successful production MySQL payout preserves exact accounting behavior without touching JSON store", async () => {
+    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+    process.env["NODE_ENV"] = "production";
+    delete process.env["APP_ENV"];
+    enableMockDbEnv();
+
+    const wallets: Record<string, { balance: number; total_withdrawn: number }> = {
+      FT483921: { balance: 1200, total_withdrawn: 300 },
+      FT900431: { balance: 500, total_withdrawn: 0 },
+    };
+    const existingPendingTx = {
+      id: "tx_wdr_existing_1",
+      user_id: "FT900431",
+      amount: 400,
+      status: "pending",
+      batch_id: null as string | null,
+      payout_method: null as string | null,
+    };
+    const insertedDirectTxs: any[] = [];
+    const batchRecords: any[] = [];
+    let commits = 0;
+
+    setMysqlPoolForTesting({
+      query: async (sql: string, params?: any[]) => {
+        if (sql.includes("FROM sessions s")) {
+          return [[createAuthSessionRow("FT102857", "admin")], []];
+        }
+        if (sql.includes("INSERT INTO payout_batches")) {
+          batchRecords.push(params);
+          return [{ affectedRows: 1 }, []];
+        }
+        return [{ affectedRows: 1 }, []];
+      },
+      getConnection: async () => ({
+        beginTransaction: async () => {},
+        commit: async () => {
+          commits++;
+        },
+        rollback: async () => {},
+        release: () => {},
+        query: async (sql: string, params?: any[]) => {
+          if (
+            sql.includes(
+              "SELECT id, user_id, amount, status, batch_id FROM wallet_transactions WHERE id = ?",
+            )
+          ) {
+            if (params?.[0] === existingPendingTx.id) {
+              return [[{ ...existingPendingTx }], []];
+            }
+            return [[], []];
+          }
+          if (sql.includes("UPDATE wallet_transactions SET status = 'completed'")) {
+            existingPendingTx.status = "completed";
+            existingPendingTx.batch_id = params?.[0];
+            existingPendingTx.payout_method = params?.[1];
+            return [{ affectedRows: 1 }, []];
+          }
+          if (sql.includes("FROM wallet_transactions WHERE id = ? AND batch_id = ?")) {
+            return [[], []];
+          }
+          if (sql.includes("FROM income_ledger WHERE")) {
+            return [[], []];
+          }
+          if (sql.includes("SELECT balance FROM wallet_balances")) {
+            const uid = String(params?.[0] || "").toUpperCase();
+            const w = wallets[uid];
+            return [w ? [{ balance: w.balance }] : [], []];
+          }
+          if (sql.includes("INSERT INTO wallet_transactions")) {
+            insertedDirectTxs.push(params);
+            return [{ affectedRows: 1 }, []];
+          }
+          if (sql.includes("UPDATE wallet_balances")) {
+            const amt = Number(params?.[0] || 0);
+            const uid = String(params?.[2] || "").toUpperCase();
+            if (!wallets[uid]) return [{ affectedRows: 0 }, []];
+            wallets[uid]!.balance -= amt;
+            wallets[uid]!.total_withdrawn += amt;
+            return [{ affectedRows: 1 }, []];
+          }
+          return [{ affectedRows: 1 }, []];
+        },
+      }),
+    } as any);
+
+    const spy = installStoreFsSpy();
+    try {
+      const batchId = "prod_batch_001";
+      const res = await handleApiRequest(
+        new Request("https://facetube.online/api/admin/bulk-payout", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer prod_admin_token",
+          },
+          body: JSON.stringify({
+            batch_id: batchId,
+            notes: "Production MySQL payout",
+            payouts: [
+              {
+                userId: "FT900431",
+                amount: 400,
+                transactionId: "tx_wdr_existing_1",
+                payout_method: "bank_transfer",
+              },
+              {
+                userId: "FT483921",
+                amount: 250,
+                payout_method: "bulk_bank_transfer",
+                bankDetails: {
+                  accountHolder: "Alex Rivera",
+                  accountNumber: "50100481920194",
+                  bankName: "HDFC Bank",
+                  ifscCode: "HDFC0001234",
+                },
+              },
+            ],
+          }),
+        }),
+      );
+
+      assert.equal(res?.status, 200);
+      const data = await res?.json();
+      assert.equal(data.success, true);
+      assert.equal(data.batch_id, batchId);
+      assert.equal(data.total_recipients, 2);
+      assert.equal(data.total_amount, 650);
+      assert.equal(data.chunks_processed, 1);
+      assert.deepEqual(data.progress, { total: 2, processed: 2, successful: 2, failed: 0 });
+      assert.equal(data.processed[0].deduction_type, "settled_existing_request");
+      assert.equal(data.processed[1].deduction_type, "new_direct_disbursement");
+      assert.equal(data.processed[1].transaction_id, `tx_wdr_bulk_${batchId}_1`);
+
+      // Existing withdrawal settlement must NOT deduct FT900431 wallet again
+      assert.equal(wallets["FT900431"]?.balance, 500);
+      assert.equal(wallets["FT900431"]?.total_withdrawn, 0);
+      assert.equal(existingPendingTx.status, "completed");
+      assert.equal(existingPendingTx.batch_id, batchId);
+
+      // Direct payout deducts FT483921 wallet exactly once and masks beneficiary details
+      assert.equal(wallets["FT483921"]?.balance, 950);
+      assert.equal(wallets["FT483921"]?.total_withdrawn, 550);
+      assert.equal(insertedDirectTxs.length, 1);
+      assert.equal(String(insertedDirectTxs[0]?.[5] || "").includes("50100481920194"), false);
+      assert.equal(String(insertedDirectTxs[0]?.[5] || "").includes("XXXXXXXXXX0194"), true);
+
+      assert.equal(commits, 1);
+      assert.equal(batchRecords.length, 2);
+      assert.equal(spy.ops.reads, 0);
+      assert.equal(spy.ops.writes, 0);
+      assert.equal(fs.existsSync(storePath), false);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("5. Development/test fallback without MySQL pool preserves JSON store bulk payout behavior", async () => {
+    process.env["NODE_ENV"] = "test";
+    delete process.env["APP_ENV"];
+
+    const devEnv = { NODE_ENV: "test" };
+    const loginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "FT102857", password: "password" }),
+      }),
+      devEnv,
+    );
+    assert.equal(loginRes?.status, 200);
+    const { token: adminToken } = await loginRes!.json();
+
+    const batchId = `dev_fallback_batch_${Date.now()}`;
+    const res = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/bulk-payout", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({
+          batch_id: batchId,
+          payouts: [{ userId: "FT102857", amount: 75 }],
+        }),
+      }),
+      devEnv,
+    );
+
+    assert.equal(res?.status, 200);
+    const data = await res?.json();
+    assert.equal(data.success, true);
+    assert.equal(data.total_amount, 75);
+
+    const diskStore = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+    const savedBatch = (diskStore.payoutBatches || []).find((b: any) => b.id === batchId);
+    assert.ok(savedBatch, "Dev/test fallback should persist payoutBatches to JSON store");
+    assert.equal(savedBatch.status, "completed");
+    assert.equal(savedBatch.total_amount, 75);
+  });
+
+  it("6. PHP counterpart api/admin/bulk-payout.php fails closed on non-schema PDO errors and zero-row mutations", () => {
+    const phpPath = path.resolve(process.cwd(), "api/admin/bulk-payout.php");
+    const phpCode = fs.readFileSync(phpPath, "utf-8");
+
+    assert.match(phpCode, /function isMissingSchemaObjectException\(PDOException \$e\): bool/);
+    assert.match(phpCode, /if\s*\(\s*!isMissingSchemaObjectException\(\$eCheck\)\s*\)/);
+    assert.match(phpCode, /if\s*\(\s*\$stmtUpdate->rowCount\(\)\s*<\s*1\s*\)/);
+    assert.match(phpCode, /if\s*\(\s*\$insertedRows\s*<\s*1\s*\)/);
+    assert.match(phpCode, /if\s*\(\s*\$stmtWallet->rowCount\(\)\s*<\s*1\s*\)/);
+  });
+});

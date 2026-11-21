@@ -254,17 +254,18 @@ function getDatabaseConnection() {
     $conf = getDatabaseConfig();
 
     if (!$conf['isConfigured']) {
+        error_log('[database.php] Database configuration missing: DB_HOST, DB_NAME, or DB_USER is not defined.');
         if (function_exists('jsonResponse')) {
             jsonResponse([
                 'success' => false,
-                'error' => 'Database configuration missing: DB_HOST, DB_NAME, and DB_USER must be defined in your Hostinger .env file or database configuration.'
-            ], 500);
+                'error' => 'Database connection unavailable.'
+            ], 503);
         } else {
-            http_response_code(500);
+            http_response_code(503);
             header('Content-Type: application/json; charset=utf-8');
             echo json_encode([
                 'success' => false,
-                'error' => 'Database configuration missing.'
+                'error' => 'Database connection unavailable.'
             ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             exit;
         }
@@ -287,18 +288,30 @@ function getDatabaseConnection() {
     try {
         $pdo = new PDO($dsn, $user, $pass, $options);
         return $pdo;
-    } catch (PDOException $e) {
+    } catch (Throwable $e) {
+        $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+        $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+        error_log("[database.php] Database connection failed (SQLSTATE={$sqlState}, errno={$driverCode}): " . $e->getMessage());
+
+        $isUnavailable = function_exists('isDatabaseConnectionUnavailableError')
+            ? isDatabaseConnectionUnavailableError($e)
+            : (str_starts_with($sqlState, '08') || in_array($driverCode, [1040, 2002, 2003, 2005, 2006, 2013], true));
+        $statusCode = $isUnavailable ? 503 : 500;
+        $clientError = $isUnavailable
+            ? 'Database connection unavailable.'
+            : 'Database connection failed.';
+
         if (function_exists('jsonResponse')) {
             jsonResponse([
                 'success' => false,
-                'error' => 'Database connection failed. Please verify DB credentials in Hostinger configuration.'
-            ], 500);
+                'error' => $clientError
+            ], $statusCode);
         } else {
-            http_response_code(500);
+            http_response_code($statusCode);
             header('Content-Type: application/json; charset=utf-8');
             echo json_encode([
                 'success' => false,
-                'error' => 'Database connection failed.'
+                'error' => $clientError
             ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
             exit;
         }

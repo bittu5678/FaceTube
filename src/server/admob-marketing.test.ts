@@ -6,6 +6,9 @@ import {
   handleApiRequest,
   isFailClosedProductionEnv,
   isMysqlDuplicateKeyError,
+  parseValidatedAdMobMetric,
+  parseValidatedCurrencyAmount,
+  resetInMemoryStore,
 } from "./api-handler.ts";
 import { setMysqlPoolForTesting } from "./mysql.ts";
 import { ADMOB_TEST_IDS, resolveAdMobConfig, requireAdMobConfig } from "../lib/admob-service.ts";
@@ -1148,5 +1151,1378 @@ describe("FaceTube Google AdMob Integration & Backend Statements Test Suite", ()
     assert.ok(runbook.includes("20261112_wallet_balances_admob_income.sql"));
     assert.ok(runbook.includes("20261113_admob_statements_remove_test_app_id_default.sql"));
     assert.ok(runbook.includes("mysqldump"));
+  });
+
+  it("10. Production Fail-Closed Guards Without MySQL Pool (503 & Zero Local Store Writes)", async () => {
+    const envKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "ADMOB_APP_ID",
+      "DB_HOST",
+      "DB_PORT",
+      "DB_NAME",
+      "DB_USER",
+      "DB_PASSWORD",
+      "MYSQL_HOST",
+      "MYSQL_PORT",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "MYSQL_PASSWORD",
+    ] as const;
+
+    const envSnapshot: Record<string, string | undefined> = {};
+    for (const k of envKeys) {
+      envSnapshot[k] = process.env[k];
+    }
+
+    const storeExisted = fs.existsSync(storePath);
+    const storeSnapshot = storeExisted ? fs.readFileSync(storePath, "utf-8") : null;
+
+    const installStoreFsSpy = () => {
+      const origExistsSync = fs.existsSync;
+      const origStatSync = fs.statSync;
+      const origReadFileSync = fs.readFileSync;
+      const origWriteFileSync = fs.writeFileSync;
+
+      const ops = {
+        existsChecks: 0,
+        statChecks: 0,
+        reads: 0,
+        writes: 0,
+      };
+
+      const isTargetStore = (p: fs.PathOrFileDescriptor | fs.PathLike): boolean => {
+        if (typeof p !== "string" && !(p instanceof URL)) return false;
+        const resolved = p instanceof URL ? p.pathname : path.resolve(p);
+        return resolved === storePath;
+      };
+
+      fs.existsSync = ((p: fs.PathLike) => {
+        if (isTargetStore(p)) ops.existsChecks += 1;
+        return origExistsSync(p);
+      }) as typeof fs.existsSync;
+
+      (fs as any).statSync = ((p: fs.PathLike, options?: any) => {
+        if (isTargetStore(p)) ops.statChecks += 1;
+        return origStatSync(p, options);
+      }) as typeof fs.statSync;
+
+      fs.readFileSync = ((p: fs.PathOrFileDescriptor, options?: any) => {
+        if (isTargetStore(p)) ops.reads += 1;
+        return origReadFileSync(p, options);
+      }) as typeof fs.readFileSync;
+
+      fs.writeFileSync = ((p: fs.PathOrFileDescriptor, data: any, options?: any) => {
+        if (isTargetStore(p)) ops.writes += 1;
+        return origWriteFileSync(p, data, options);
+      }) as typeof fs.writeFileSync;
+
+      return {
+        ops,
+        restore: () => {
+          fs.existsSync = origExistsSync;
+          (fs as any).statSync = origStatSync;
+          fs.readFileSync = origReadFileSync;
+          fs.writeFileSync = origWriteFileSync;
+        },
+      };
+    };
+
+    resetInMemoryStore();
+    setMysqlPoolForTesting(null);
+    for (const k of envKeys) {
+      if (k !== "NODE_ENV" && k !== "APP_ENV") {
+        delete process.env[k];
+      }
+    }
+
+    try {
+      const cases: Array<{
+        label: string;
+        procApp?: string | undefined;
+        procNode?: string | undefined;
+        admobAppId?: string | undefined;
+        handlerEnv?: Record<string, string | undefined> | undefined;
+        withBearer?: boolean | undefined;
+      }> = [
+        {
+          label: "APP_ENV=production overrides NODE_ENV=development",
+          procApp: "production",
+          procNode: "development",
+          admobAppId: "ca-app-pub-1234567890123456~1234567890",
+          withBearer: true,
+        },
+        {
+          label: "NODE_ENV=production without APP_ENV (no Bearer token)",
+          procApp: undefined,
+          procNode: "production",
+          withBearer: false,
+        },
+        {
+          label: "NODE_ENV=production with Bearer token",
+          procApp: undefined,
+          procNode: "production",
+          admobAppId: "ca-app-pub-1234567890123456~1234567890",
+          withBearer: true,
+        },
+        {
+          label: "Both APP_ENV and NODE_ENV unset fail closed as production",
+          procApp: undefined,
+          procNode: undefined,
+          withBearer: true,
+        },
+        {
+          label: "Unexpected APP_ENV=staging fails closed with NODE_ENV=test",
+          procApp: "staging",
+          procNode: "test",
+          withBearer: true,
+        },
+        {
+          label: "Unexpected NODE_ENV=qa fails closed with APP_ENV=development",
+          procApp: "development",
+          procNode: "qa",
+          withBearer: true,
+        },
+        {
+          label: "Runtime handler env APP_ENV=production overrides development process.env",
+          procApp: "development",
+          procNode: "development",
+          handlerEnv: {
+            APP_ENV: "production",
+            NODE_ENV: "development",
+            ADMOB_APP_ID: "ca-app-pub-1234567890123456~1234567890",
+          },
+          withBearer: true,
+        },
+      ];
+
+      const spy = installStoreFsSpy();
+      try {
+        for (const tc of cases) {
+          if (tc.procApp === undefined) delete process.env["APP_ENV"];
+          else process.env["APP_ENV"] = tc.procApp;
+
+          if (tc.procNode === undefined) delete process.env["NODE_ENV"];
+          else process.env["NODE_ENV"] = tc.procNode;
+
+          if (tc.admobAppId === undefined) delete process.env["ADMOB_APP_ID"];
+          else process.env["ADMOB_APP_ID"] = tc.admobAppId;
+
+          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          if (tc.withBearer) {
+            headers["Authorization"] = `Bearer ${adminToken}`;
+          }
+
+          const res = await handleApiRequest(
+            new Request("http://localhost:3000/api/admin/record-admob-earning", {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                userId: targetCreator,
+                amount: 640,
+                reportMonth: "2026-11",
+              }),
+            }),
+            tc.handlerEnv,
+          );
+
+          assert.ok(res, tc.label);
+          assert.equal(res.status, 503, `${tc.label}: expected HTTP 503`);
+          const body = (await res.json()) as any;
+          assert.equal(body.success, false, tc.label);
+          assert.match(body.error || "", /database connection unavailable/i, tc.label);
+        }
+
+        assert.equal(spy.ops.reads, 0, "Production 503 must not read local JSON store");
+        assert.equal(spy.ops.writes, 0, "Production 503 must not write local JSON store");
+        assert.equal(
+          spy.ops.existsChecks,
+          0,
+          "Production 503 must not stat/check local JSON store",
+        );
+      } finally {
+        spy.restore();
+      }
+
+      // Preserve development/test local-store fallback when runtime handler env explicitly selects test
+      process.env["APP_ENV"] = "production";
+      process.env["NODE_ENV"] = "production";
+      const fallbackRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: targetCreator,
+            amount: 640,
+            reportMonth: "2026-11",
+          }),
+        }),
+        { APP_ENV: "test", NODE_ENV: "test" },
+      );
+
+      assert.ok(fallbackRes);
+      assert.equal(fallbackRes.status, 201);
+      const fallbackBody = (await fallbackRes.json()) as any;
+      assert.equal(fallbackBody.success, true);
+      assert.equal(fallbackBody.transactionId, "TX_ADMOB_FT483921_202611");
+
+      const persisted = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      assert.equal(persisted.admobStatements?.["FT483921_2026-11"]?.amount, 640);
+    } finally {
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+      for (const k of envKeys) {
+        if (envSnapshot[k] === undefined) delete process.env[k];
+        else process.env[k] = envSnapshot[k];
+      }
+      if (storeExisted && storeSnapshot !== null) {
+        const dir = path.dirname(storePath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+      } else if (!storeExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+    }
+  });
+
+  it("11. MySQL Connection Acquisition & Rollback Failure Safety", async () => {
+    const dbEnvKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "ADMOB_APP_ID",
+      "DB_HOST",
+      "DB_PORT",
+      "DB_NAME",
+      "DB_USER",
+      "DB_PASSWORD",
+      "MYSQL_HOST",
+      "MYSQL_PORT",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "MYSQL_PASSWORD",
+    ] as const;
+
+    const envSnapshot: Record<string, string | undefined> = {};
+    for (const k of dbEnvKeys) {
+      envSnapshot[k] = process.env[k];
+    }
+
+    const prodEnv = {
+      APP_ENV: "production",
+      NODE_ENV: "production",
+      ADMOB_APP_ID: "ca-app-pub-1234567890123456~1234567890",
+    };
+
+    const sessionQuery = async (sql: string) => {
+      if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
+        return [
+          [
+            {
+              id: "a0000000-0000-0000-0000-000000000001",
+              user_id: "FT102857",
+              name: "FaceTube Administrator",
+              email: "admin@facetube.com",
+              role: "admin",
+              referral_code: "FTVIP",
+            },
+          ],
+        ];
+      }
+      return [[]];
+    };
+
+    try {
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+
+      // 11a. ECONNREFUSED on pool.getConnection() -> 503, zero DB writes
+      let econnQueryCalls = 0;
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          econnQueryCalls += 1;
+          return sessionQuery(sql);
+        },
+        getConnection: async () => {
+          const err: any = new Error("connect ECONNREFUSED 127.0.0.1:3306");
+          err.code = "ECONNREFUSED";
+          err.errno = 2003;
+          throw err;
+        },
+      } as any);
+
+      const econnRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: targetCreator,
+            amount: 550,
+            reportMonth: "2026-10",
+          }),
+        }),
+        prodEnv,
+      );
+      assert.ok(econnRes);
+      assert.equal(econnRes.status, 503);
+      const econnBody = (await econnRes.json()) as any;
+      assert.equal(econnBody.success, false);
+      assert.match(econnBody.error || "", /database connection unavailable/i);
+      assert.equal(econnQueryCalls, 1, "Zero earning/ledger/wallet queries on ECONNREFUSED");
+
+      // 11b. Unexpected pool.getConnection() error -> 500, zero DB writes
+      let unexpectedQueryCalls = 0;
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          unexpectedQueryCalls += 1;
+          return sessionQuery(sql);
+        },
+        getConnection: async () => {
+          throw new Error("Unexpected pool driver error");
+        },
+      } as any);
+
+      const unexpectedRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: targetCreator,
+            amount: 550,
+            reportMonth: "2026-10",
+          }),
+        }),
+        prodEnv,
+      );
+      assert.ok(unexpectedRes);
+      assert.equal(unexpectedRes.status, 500);
+      const unexpectedBody = (await unexpectedRes.json()) as any;
+      assert.equal(unexpectedBody.success, false);
+      assert.match(unexpectedBody.error || "", /failed to acquire database connection/i);
+      assert.equal(
+        unexpectedQueryCalls,
+        1,
+        "Zero earning/ledger/wallet queries on unexpected error",
+      );
+
+      // 11c. Rollback failure after transaction error (500 and 409) does not mask error and still releases connection
+      for (const scenario of [
+        { label: "lock timeout", errCode: "ER_LOCK_WAIT_TIMEOUT", errNo: 1205, status: 500 },
+        { label: "duplicate key race", errCode: "ER_DUP_ENTRY", errNo: 1062, status: 409 },
+      ] as const) {
+        let rollbackAttempts = 0;
+        let releaseAttempts = 0;
+        let committed = false;
+        let walletWrites = 0;
+
+        setMysqlPoolForTesting({
+          query: sessionQuery,
+          getConnection: async () => ({
+            beginTransaction: async () => {},
+            query: async (sql: string) => {
+              if (sql.includes("FROM users WHERE UPPER(user_id)")) {
+                return [
+                  [
+                    {
+                      id: "u2",
+                      user_id: targetCreator,
+                      name: "Alex Rivera",
+                      email: "alex@facetube.com",
+                    },
+                  ],
+                ];
+              }
+              if (sql.startsWith("INSERT INTO income_ledger")) {
+                const err: any = new Error(`${scenario.label} failed`);
+                err.code = scenario.errCode;
+                err.errno = scenario.errNo;
+                throw err;
+              }
+              if (sql.startsWith("INSERT INTO wallet_balances")) {
+                walletWrites += 1;
+              }
+              return [[]];
+            },
+            commit: async () => {
+              committed = true;
+            },
+            rollback: async () => {
+              rollbackAttempts += 1;
+              throw new Error("Rollback transport failure");
+            },
+            release: () => {
+              releaseAttempts += 1;
+            },
+          }),
+        } as any);
+
+        const res = await handleApiRequest(
+          new Request("http://localhost:3000/api/admin/record-admob-earning", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              userId: targetCreator,
+              amount: 550,
+              reportMonth: "2026-10",
+            }),
+          }),
+          prodEnv,
+        );
+        assert.ok(res, scenario.label);
+        assert.equal(res.status, scenario.status, `${scenario.label}: original status preserved`);
+        const body = (await res.json()) as any;
+        assert.equal(body.success, false);
+        assert.equal(
+          String(body.error || "").includes("Rollback transport failure"),
+          false,
+          `${scenario.label}: rollback failure must not mask original DB error`,
+        );
+        assert.equal(rollbackAttempts, 1, `${scenario.label}: rollback attempted`);
+        assert.equal(releaseAttempts, 1, `${scenario.label}: conn.release() still attempted`);
+        assert.equal(committed, false);
+        assert.equal(walletWrites, 0);
+      }
+
+      // 11d. beginTransaction failure before tx starts skips rollback and still calls conn.release()
+      let preTxRollbackAttempts = 0;
+      let preTxReleaseAttempts = 0;
+      setMysqlPoolForTesting({
+        query: sessionQuery,
+        getConnection: async () => ({
+          beginTransaction: async () => {
+            throw new Error("beginTransaction failure");
+          },
+          query: async () => [[]],
+          commit: async () => {},
+          rollback: async () => {
+            preTxRollbackAttempts += 1;
+          },
+          release: () => {
+            preTxReleaseAttempts += 1;
+          },
+        }),
+      } as any);
+
+      const preTxRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: targetCreator,
+            amount: 550,
+            reportMonth: "2026-10",
+          }),
+        }),
+        prodEnv,
+      );
+      assert.ok(preTxRes);
+      assert.equal(preTxRes.status, 500);
+      assert.equal(preTxRollbackAttempts, 0, "Must not call rollback if transaction never started");
+      assert.equal(preTxReleaseAttempts, 1, "Must still release acquired connection");
+    } finally {
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+      for (const k of dbEnvKeys) {
+        if (envSnapshot[k] === undefined) delete process.env[k];
+        else process.env[k] = envSnapshot[k];
+      }
+    }
+  });
+
+  it("12. Deterministic Transaction ID & income_ledger Duplicate Protection (Node & PHP Parity)", async () => {
+    const dbEnvKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "ADMOB_APP_ID",
+      "DB_HOST",
+      "DB_PORT",
+      "DB_NAME",
+      "DB_USER",
+      "DB_PASSWORD",
+      "MYSQL_HOST",
+      "MYSQL_PORT",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "MYSQL_PASSWORD",
+    ] as const;
+
+    const envSnapshot: Record<string, string | undefined> = {};
+    for (const k of dbEnvKeys) {
+      envSnapshot[k] = process.env[k];
+    }
+
+    const storeExisted = fs.existsSync(storePath);
+    const storeSnapshot = storeExisted ? fs.readFileSync(storePath, "utf-8") : null;
+
+    const prodEnv = {
+      APP_ENV: "production",
+      NODE_ENV: "production",
+      ADMOB_APP_ID: "ca-app-pub-1234567890123456~1234567890",
+    };
+
+    try {
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+
+      const recordedStatements = new Map<string, { id: number; statement_id: string }>();
+      const recordedLedgerByTx = new Map<string, { id: string; transaction_id: string }>();
+      let walletCredits = 0;
+      let ledgerInserts = 0;
+      let rolledBack = false;
+      let committed = false;
+
+      const executeQuery = async (sql: string, params: any[] = []) => {
+        if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
+          return [
+            [
+              {
+                id: "a0000000-0000-0000-0000-000000000001",
+                user_id: "FT102857",
+                name: "FaceTube Administrator",
+                email: "admin@facetube.com",
+                role: "admin",
+                referral_code: "FTVIP",
+              },
+            ],
+          ];
+        }
+        if (sql.includes("FROM users WHERE UPPER(user_id)")) {
+          const reqId = String(params[0] || "")
+            .trim()
+            .toUpperCase();
+          if (reqId === "FT483921" || reqId === "FT900431") {
+            return [[{ id: `u_${reqId}`, user_id: reqId, name: reqId, email: `${reqId}@ft.test` }]];
+          }
+          return [[]];
+        }
+        if (sql.includes("FROM admob_monthly_statements WHERE user_id = ? AND report_month = ?")) {
+          const existing = recordedStatements.get(`${params[0]}_${params[1]}`);
+          return [existing ? [existing] : []];
+        }
+        if (
+          sql.includes("FROM income_ledger WHERE transaction_id = ?") &&
+          sql.includes("FOR UPDATE")
+        ) {
+          const existing = recordedLedgerByTx.get(String(params[0]));
+          return [existing ? [existing] : []];
+        }
+        if (sql.startsWith("INSERT INTO income_ledger")) {
+          ledgerInserts += 1;
+          recordedLedgerByTx.set(String(params[1]), {
+            id: String(params[0]),
+            transaction_id: String(params[1]),
+          });
+          return [{ affectedRows: 1 }];
+        }
+        if (sql.startsWith("INSERT INTO admob_monthly_statements")) {
+          recordedStatements.set(`${params[1]}_${params[2]}`, {
+            id: recordedStatements.size + 1,
+            statement_id: String(params[0]),
+          });
+          return [{ affectedRows: 1 }];
+        }
+        if (sql.startsWith("INSERT INTO wallet_balances")) {
+          walletCredits += Number(params[1] || 0);
+          return [{ affectedRows: 1 }];
+        }
+        return [[]];
+      };
+
+      setMysqlPoolForTesting({
+        query: executeQuery,
+        getConnection: async () => ({
+          beginTransaction: async () => {
+            rolledBack = false;
+            committed = false;
+          },
+          query: executeQuery,
+          commit: async () => {
+            committed = true;
+          },
+          rollback: async () => {
+            rolledBack = true;
+          },
+          release: () => {},
+        }),
+      } as any);
+
+      // 12a. First submission succeeds with deterministic TX_ADMOB_<CANONICAL_USER_ID>_<YYYYMM>
+      const firstRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: "ft483921",
+            amount: 420,
+            reportMonth: "2026-10",
+          }),
+        }),
+        prodEnv,
+      );
+      assert.ok(firstRes);
+      assert.equal(firstRes.status, 201);
+      const firstBody = (await firstRes.json()) as any;
+      assert.equal(firstBody.success, true);
+      assert.equal(firstBody.transactionId, "TX_ADMOB_FT483921_202610");
+      assert.equal(committed, true);
+      assert.equal(walletCredits, 420);
+      assert.equal(ledgerInserts, 1);
+
+      // 12b. Submitting the same creator + same month a second time returns 409 and skips writes
+      const secondRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: "FT483921",
+            amount: 420,
+            reportMonth: "2026-10",
+          }),
+        }),
+        prodEnv,
+      );
+      assert.ok(secondRes);
+      assert.equal(secondRes.status, 409);
+      assert.equal(rolledBack, true);
+      assert.equal(walletCredits, 420);
+      assert.equal(ledgerInserts, 1);
+
+      // 12c. Monthly statement record missing/cleared, but income_ledger still has deterministic txId -> 409
+      recordedStatements.delete("FT483921_2026-10");
+      const ledgerDupRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: "FT483921",
+            amount: 420,
+            reportMonth: "2026-10",
+          }),
+        }),
+        prodEnv,
+      );
+      assert.ok(ledgerDupRes);
+      assert.equal(
+        ledgerDupRes.status,
+        409,
+        "Must block duplicate via income_ledger deterministic TX ID even if monthly statement row is missing",
+      );
+      const ledgerDupBody = (await ledgerDupRes.json()) as any;
+      assert.equal(ledgerDupBody.success, false);
+      assert.match(ledgerDupBody.error || "", /duplicate credits blocked/i);
+      assert.equal(rolledBack, true);
+      assert.equal(committed, false);
+      assert.equal(walletCredits, 420);
+      assert.equal(ledgerInserts, 1);
+
+      // 12d. Different month for same creator remains eligible
+      const diffMonthRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: "FT483921",
+            amount: 310,
+            reportMonth: "2026-11",
+          }),
+        }),
+        prodEnv,
+      );
+      assert.ok(diffMonthRes);
+      assert.equal(diffMonthRes.status, 201);
+      const diffMonthBody = (await diffMonthRes.json()) as any;
+      assert.equal(diffMonthBody.transactionId, "TX_ADMOB_FT483921_202611");
+      assert.equal(walletCredits, 730);
+      assert.equal(ledgerInserts, 2);
+
+      // 12e. Different creator for same month remains eligible
+      const diffCreatorRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            userId: "FT900431",
+            amount: 185,
+            reportMonth: "2026-10",
+          }),
+        }),
+        prodEnv,
+      );
+      assert.ok(diffCreatorRes);
+      assert.equal(diffCreatorRes.status, 201);
+      const diffCreatorBody = (await diffCreatorRes.json()) as any;
+      assert.equal(diffCreatorBody.transactionId, "TX_ADMOB_FT900431_202610");
+      assert.equal(walletCredits, 915);
+      assert.equal(ledgerInserts, 3);
+
+      // 12f. PHP static parity: deterministic TX_ADMOB_<USER>_<YYYYMM> & parameterized income_ledger FOR UPDATE check
+      const phpSource = fs.readFileSync(
+        path.resolve(process.cwd(), "api/admin/record-admob-earning.php"),
+        "utf-8",
+      );
+      assert.ok(
+        phpSource.includes("$txId = 'TX_ADMOB_' . $cleanUserId . '_' . $cleanMonth;"),
+        "PHP endpoint must generate deterministic TX_ADMOB_<CANONICAL_USER_ID>_<YYYYMM>",
+      );
+      assert.ok(
+        !/\$txId\s*=.*random_bytes/.test(phpSource),
+        "PHP endpoint must not use random_bytes for $txId",
+      );
+      assert.ok(
+        phpSource.includes("FROM income_ledger") &&
+          phpSource.includes("WHERE transaction_id = ?") &&
+          phpSource.includes("FOR UPDATE") &&
+          phpSource.includes("$stmtLedgerDup->execute([$txId])"),
+        "PHP endpoint must run parameterized income_ledger FOR UPDATE duplicate check inside transaction",
+      );
+      assert.ok(
+        phpSource.includes("FROM admob_monthly_statements"),
+        "PHP endpoint preserves admob_monthly_statements duplicate check",
+      );
+    } finally {
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+      for (const k of dbEnvKeys) {
+        if (envSnapshot[k] === undefined) delete process.env[k];
+        else process.env[k] = envSnapshot[k];
+      }
+      if (storeExisted && storeSnapshot !== null) {
+        const dir = path.dirname(storePath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+      } else if (!storeExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+    }
+  });
+
+  it("13. Amount Precision, Impressions/eCPM Validation, Ledger-Wallet Consistency & Write Confirmation Safety", async () => {
+    const dbEnvKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "ADMOB_APP_ID",
+      "DB_HOST",
+      "DB_PORT",
+      "DB_NAME",
+      "DB_USER",
+      "DB_PASSWORD",
+      "MYSQL_HOST",
+      "MYSQL_PORT",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "MYSQL_PASSWORD",
+    ] as const;
+
+    const envSnapshot: Record<string, string | undefined> = {};
+    for (const k of dbEnvKeys) {
+      envSnapshot[k] = process.env[k];
+    }
+
+    const storeExisted = fs.existsSync(storePath);
+    const storeSnapshot = storeExisted ? fs.readFileSync(storePath, "utf-8") : null;
+
+    const prodEnv = {
+      APP_ENV: "production",
+      NODE_ENV: "production",
+      ADMOB_APP_ID: "ca-app-pub-1234567890123456~1234567890",
+    };
+
+    try {
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+
+      const sessionQuery = async (sql: string) => {
+        if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
+          return [
+            [
+              {
+                id: "a0000000-0000-0000-0000-000000000001",
+                user_id: "FT102857",
+                name: "FaceTube Administrator",
+                email: "admin@facetube.com",
+                role: "admin",
+                referral_code: "FTVIP",
+              },
+            ],
+          ];
+        }
+        return [[]];
+      };
+
+      // 13a. Direct helper assertions for JS NaN / Infinity / precision / metrics
+      for (const rawInvalid of [NaN, Infinity, -Infinity, 0, -1, 0.004, 100.1234, 1e-5]) {
+        assert.equal(
+          parseValidatedCurrencyAmount(rawInvalid, "AdMob").valid,
+          false,
+          `Amount helper must reject ${String(rawInvalid)}`,
+        );
+      }
+      for (const rawBadImp of [-1, NaN, Infinity, 12.5, "abc", true]) {
+        assert.equal(
+          parseValidatedAdMobMetric(rawBadImp, "impressions", {
+            integerOnly: true,
+            max: 4294967295,
+          }).valid,
+          false,
+          `Impressions helper must reject ${String(rawBadImp)}`,
+        );
+      }
+      for (const rawBadEcpm of [-0.01, NaN, Infinity, "abc", false]) {
+        assert.equal(
+          parseValidatedAdMobMetric(rawBadEcpm, "ecpm", { integerOnly: false, max: 999999.9999 })
+            .valid,
+          false,
+          `eCPM helper must reject ${String(rawBadEcpm)}`,
+        );
+      }
+
+      // 13b. Endpoint rejects invalid amounts, impressions, and ecpm with 400 and zero DB calls
+      let dbConnCalls = 0;
+      setMysqlPoolForTesting({
+        query: sessionQuery,
+        getConnection: async () => {
+          dbConnCalls += 1;
+          throw new Error("Should not acquire DB connection on validation failure");
+        },
+      } as any);
+
+      const invalidPayloads: Array<Record<string, unknown>> = [
+        { userId: targetCreator, amount: null, reportMonth: "2026-12" },
+        { userId: targetCreator, amount: 0, reportMonth: "2026-12" },
+        { userId: targetCreator, amount: -5, reportMonth: "2026-12" },
+        { userId: targetCreator, amount: "NaN", reportMonth: "2026-12" },
+        { userId: targetCreator, amount: "Infinity", reportMonth: "2026-12" },
+        { userId: targetCreator, amount: "-Infinity", reportMonth: "2026-12" },
+        { userId: targetCreator, amount: 0.004, reportMonth: "2026-12" },
+        { userId: targetCreator, amount: 100.1234, reportMonth: "2026-12" },
+        { userId: targetCreator, amount: "19.999", reportMonth: "2026-12" },
+        { userId: targetCreator, amount: 100, reportMonth: "2026-12", impressions: -10 },
+        { userId: targetCreator, amount: 100, reportMonth: "2026-12", impressions: 12.5 },
+        { userId: targetCreator, amount: 100, reportMonth: "2026-12", impressions: "NaN" },
+        { userId: targetCreator, amount: 100, reportMonth: "2026-12", ecpm: -1.5 },
+        { userId: targetCreator, amount: 100, reportMonth: "2026-12", ecpm: "Infinity" },
+        { userId: targetCreator, amount: 100, reportMonth: "2026-12", ecpm: "bad" },
+      ];
+
+      for (const payload of invalidPayloads) {
+        const res = await handleApiRequest(
+          new Request("http://localhost:3000/api/admin/record-admob-earning", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify(payload),
+          }),
+          prodEnv,
+        );
+        assert.ok(res);
+        assert.equal(res.status, 400, `Expected HTTP 400 for payload ${JSON.stringify(payload)}`);
+        const body = (await res.json()) as any;
+        assert.equal(body.success, false);
+      }
+      assert.equal(dbConnCalls, 0, "Zero DB connections opened for invalid inputs");
+
+      // 13c. Valid 2-decimal amounts persist identically across ledger, statement, wallet, response
+      for (const validAmount of [0.01, 19.99, 425.75]) {
+        const recorded: {
+          ledgerAmount?: number;
+          stmtGross?: number;
+          stmtNet?: number;
+          stmtImpressions?: number;
+          stmtEcpm?: number;
+          walletAmounts?: number[];
+          committed: boolean;
+        } = { committed: false };
+
+        const executeQuery = async (sql: string, params: any[] = []) => {
+          if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
+            return sessionQuery(sql);
+          }
+          if (sql.includes("FROM users WHERE UPPER(user_id)")) {
+            return [[{ id: "u2", user_id: targetCreator, name: "Alex Rivera", email: "a@b.c" }]];
+          }
+          if (sql.startsWith("INSERT INTO income_ledger")) {
+            recorded.ledgerAmount = params[3];
+            return [{ affectedRows: 1 }];
+          }
+          if (sql.startsWith("INSERT INTO admob_monthly_statements")) {
+            recorded.stmtGross = params[3];
+            recorded.stmtNet = params[4];
+            recorded.stmtImpressions = params[5];
+            recorded.stmtEcpm = params[6];
+            return [{ affectedRows: 1 }];
+          }
+          if (sql.startsWith("INSERT INTO wallet_balances")) {
+            recorded.walletAmounts = [params[1], params[2], params[3]];
+            return [{ affectedRows: 1 }];
+          }
+          return [[]];
+        };
+
+        setMysqlPoolForTesting({
+          query: executeQuery,
+          getConnection: async () => ({
+            beginTransaction: async () => {},
+            query: executeQuery,
+            commit: async () => {
+              recorded.committed = true;
+            },
+            rollback: async () => {},
+            release: () => {},
+          }),
+        } as any);
+
+        const res = await handleApiRequest(
+          new Request("http://localhost:3000/api/admin/record-admob-earning", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              userId: targetCreator,
+              amount: validAmount,
+              reportMonth: "2026-12",
+              impressions: 1500,
+              ecpm: 13.32,
+            }),
+          }),
+          prodEnv,
+        );
+        assert.ok(res);
+        assert.equal(res.status, 201, `Expected HTTP 201 for valid amount ${validAmount}`);
+        const body = (await res.json()) as any;
+        assert.equal(body.success, true);
+        assert.equal(body.amount, validAmount);
+        assert.equal(recorded.committed, true);
+        assert.equal(recorded.ledgerAmount, validAmount);
+        assert.equal(recorded.stmtGross, validAmount);
+        assert.equal(recorded.stmtNet, validAmount);
+        assert.equal(recorded.stmtImpressions, 1500);
+        assert.equal(recorded.stmtEcpm, 13.32);
+        assert.deepEqual(recorded.walletAmounts, [validAmount, validAmount, validAmount]);
+      }
+
+      // 13d. affectedRows < 1 triggers rollback + HTTP 500 without committing
+      for (const failStage of ["ledger", "statement", "wallet"] as const) {
+        let committed = false;
+        let rolledBack = false;
+        let released = false;
+        let walletAttempts = 0;
+
+        const executeQuery = async (sql: string) => {
+          if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
+            return sessionQuery(sql);
+          }
+          if (sql.includes("FROM users WHERE UPPER(user_id)")) {
+            return [[{ id: "u2", user_id: targetCreator, name: "Alex Rivera", email: "a@b.c" }]];
+          }
+          if (sql.startsWith("INSERT INTO income_ledger")) {
+            return [{ affectedRows: failStage === "ledger" ? 0 : 1 }];
+          }
+          if (sql.startsWith("INSERT INTO admob_monthly_statements")) {
+            return [{ affectedRows: failStage === "statement" ? 0 : 1 }];
+          }
+          if (sql.startsWith("INSERT INTO wallet_balances")) {
+            walletAttempts += 1;
+            return [{ affectedRows: failStage === "wallet" ? 0 : 1 }];
+          }
+          return [[]];
+        };
+
+        setMysqlPoolForTesting({
+          query: executeQuery,
+          getConnection: async () => ({
+            beginTransaction: async () => {},
+            query: executeQuery,
+            commit: async () => {
+              committed = true;
+            },
+            rollback: async () => {
+              rolledBack = true;
+            },
+            release: () => {
+              released = true;
+            },
+          }),
+        } as any);
+
+        const res = await handleApiRequest(
+          new Request("http://localhost:3000/api/admin/record-admob-earning", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              userId: targetCreator,
+              amount: 210.5,
+              reportMonth: "2026-12",
+            }),
+          }),
+          prodEnv,
+        );
+
+        assert.ok(res);
+        assert.equal(res.status, 500, `affectedRows=0 at ${failStage} must return HTTP 500`);
+        assert.equal(rolledBack, true, `affectedRows=0 at ${failStage} must roll back`);
+        assert.equal(committed, false, `affectedRows=0 at ${failStage} must not commit`);
+        assert.equal(released, true, `affectedRows=0 at ${failStage} must release connection`);
+        if (failStage !== "wallet") {
+          assert.equal(walletAttempts, 0, `${failStage} failure must not proceed to wallet write`);
+        }
+      }
+
+      // 13e. PHP static parity assertions
+      const phpSource = fs.readFileSync(
+        path.resolve(process.cwd(), "api/admin/record-admob-earning.php"),
+        "utf-8",
+      );
+      assert.ok(
+        phpSource.includes("is_finite($parsedAmount)") &&
+          phpSource.includes("abs(($parsedAmount * 100) - $scaledAmount) > 1e-6"),
+        "PHP AdMob handler must enforce finite 2-decimal amount precision",
+      );
+      assert.ok(
+        phpSource.includes("is_finite($impNum) || $impNum < 0 || floor($impNum) !== $impNum") &&
+          phpSource.includes("!is_finite($ecpmNum) || $ecpmNum < 0"),
+        "PHP AdMob handler must enforce finite non-negative impressions and ecpm",
+      );
+      assert.ok(
+        phpSource.includes("$stmtLedger->rowCount() < 1") &&
+          phpSource.includes("$stmtStmt->rowCount() < 1") &&
+          phpSource.includes("$stmtWallet->rowCount() < 1"),
+        "PHP AdMob handler must verify rowCount() >= 1 on ledger, statement, and wallet writes",
+      );
+    } finally {
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+      for (const k of dbEnvKeys) {
+        if (envSnapshot[k] === undefined) delete process.env[k];
+        else process.env[k] = envSnapshot[k];
+      }
+      if (storeExisted && storeSnapshot !== null) {
+        const dir = path.dirname(storePath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+      } else if (!storeExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+    }
+  });
+
+  it("14. GET Database Error Handling, Safe Responses & Production Fail-Closed Guards", async () => {
+    const dbEnvKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "DB_HOST",
+      "DB_PORT",
+      "DB_NAME",
+      "DB_USER",
+      "DB_PASSWORD",
+      "MYSQL_HOST",
+      "MYSQL_PORT",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "MYSQL_PASSWORD",
+    ] as const;
+    const envSnapshot: Record<string, string | undefined> = {};
+    for (const k of dbEnvKeys) {
+      envSnapshot[k] = process.env[k];
+    }
+
+    const prodEnv = { APP_ENV: "production", NODE_ENV: "production" };
+    const sessionQuery = async (sql: string) => {
+      if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
+        return [
+          [
+            {
+              id: "a0000000-0000-0000-0000-000000000001",
+              user_id: "FT102857",
+              name: "FaceTube Administrator",
+              email: "admin@facetube.com",
+              role: "admin",
+              referral_code: "FTVIP",
+            },
+          ],
+        ];
+      }
+      return [[]];
+    };
+
+    const origConsoleError = console.error;
+    const origReadFileSync = fs.readFileSync;
+    const loggedErrors: unknown[] = [];
+
+    try {
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+
+      // 14a. Successful GET response format preserved
+      const mockStatements = [
+        {
+          id: 1,
+          statement_id: "STMT-ADMOB-202612-FT483921",
+          user_id: targetCreator,
+          report_month: "2026-12",
+          gross_amount: 425.75,
+          net_amount: 425.75,
+          impressions: 12000,
+          ecpm: 35.48,
+          app_id: null,
+          transaction_id: "TX_ADMOB_FT483921_202612",
+          verified_by: "FT102857",
+          status: "finalized",
+          created_at: "2026-12-01 00:00:00",
+        },
+      ];
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) return sessionQuery(sql);
+          if (sql.includes("FROM admob_monthly_statements")) return [mockStatements];
+          return [[]];
+        },
+      } as any);
+
+      const okRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }),
+        prodEnv,
+      );
+      assert.equal(okRes?.status, 200);
+      const okBody = (await okRes?.json()) as any;
+      assert.equal(okBody.success, true);
+      assert.equal(okBody.count, 1);
+      assert.deepEqual(okBody.statements, mockStatements);
+
+      console.error = (...args: unknown[]) => {
+        loggedErrors.push(args);
+      };
+
+      // 14b. Connection failure -> 503 with safe redacted message
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) return sessionQuery(sql);
+          const err: any = new Error(
+            "PROTOCOL_CONNECTION_LOST mysql://admin:secretpass@10.1.2.3:3306/prod_db",
+          );
+          err.code = "PROTOCOL_CONNECTION_LOST";
+          err.errno = 2013;
+          throw err;
+        },
+      } as any);
+
+      const connErrRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }),
+        prodEnv,
+      );
+      assert.equal(connErrRes?.status, 503);
+      const connErrBody = (await connErrRes?.json()) as any;
+      assert.equal(connErrBody.success, false);
+      assert.equal(
+        String(connErrBody.error || "").includes("secretpass") ||
+          String(connErrBody.error || "").includes("10.1.2.3") ||
+          String(connErrBody.error || "").includes("mysql://"),
+        false,
+        "Production 503 must not expose credentials or connection strings",
+      );
+
+      // 14c. Missing required table or unexpected SQL error -> 500 (never 200 empty array) with safe message
+      for (const dbFailure of [
+        {
+          label: "missing required admob_monthly_statements",
+          code: "ER_NO_SUCH_TABLE",
+          errno: 1146,
+          message: "Table 'prod_db.admob_monthly_statements' doesn't exist",
+        },
+        {
+          label: "unexpected query error",
+          code: "ER_SYNTAX_ERROR",
+          errno: 1064,
+          message: "You have an error in your SQL syntax near secret_internal_col",
+        },
+      ]) {
+        setMysqlPoolForTesting({
+          query: async (sql: string) => {
+            if (sql.includes("FROM sessions s")) return sessionQuery(sql);
+            const err: any = new Error(dbFailure.message);
+            err.code = dbFailure.code;
+            err.errno = dbFailure.errno;
+            throw err;
+          },
+        } as any);
+
+        const failRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/admin/record-admob-earning", {
+            headers: { Authorization: `Bearer ${adminToken}` },
+          }),
+          prodEnv,
+        );
+        assert.equal(failRes?.status, 500, `${dbFailure.label} must return 500`);
+        const failBody = (await failRes?.json()) as any;
+        assert.equal(failBody.success, false);
+        assert.equal(
+          String(failBody.error || "").includes("prod_db") ||
+            String(failBody.error || "").includes("SQL syntax") ||
+            String(failBody.error || "").includes("secret_internal_col"),
+          false,
+          `${dbFailure.label}: production 500 must not leak internal DB error details`,
+        );
+      }
+
+      assert.ok(loggedErrors.length >= 3, "Detailed GET DB errors must be logged server-side");
+
+      // 14d. Production GET without MySQL pool fails closed with 503 and zero local-store fallback
+      setMysqlPoolForTesting(null);
+      for (const k of dbEnvKeys) {
+        if (k !== "NODE_ENV" && k !== "APP_ENV") delete process.env[k];
+      }
+
+      let storeReads = 0;
+      fs.readFileSync = ((p: fs.PathOrFileDescriptor, options?: any) => {
+        if (typeof p === "string" && path.resolve(p) === storePath) {
+          storeReads += 1;
+        }
+        return origReadFileSync(p, options);
+      }) as typeof fs.readFileSync;
+
+      const noPoolRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/record-admob-earning", {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }),
+        prodEnv,
+      );
+      assert.equal(noPoolRes?.status, 503);
+      const noPoolBody = (await noPoolRes?.json()) as any;
+      assert.equal(noPoolBody.success, false);
+      assert.match(noPoolBody.error || "", /database connection unavailable/i);
+      assert.equal(storeReads, 0, "Production GET must never fall back to local JSON store");
+
+      // 14e. PHP static parity checks for AdMob GET
+      const phpSource = origReadFileSync(
+        path.resolve(process.cwd(), "api/admin/record-admob-earning.php"),
+        "utf-8",
+      );
+      assert.ok(
+        phpSource.includes("error_log('[record-admob-earning.php][GET]") &&
+          phpSource.includes("503") &&
+          phpSource.includes("500") &&
+          !phpSource.includes("Database error loading AdMob statements: ' . $e->getMessage()"),
+        "PHP AdMob GET must log errors server-side and return safe 503/500 responses without leaking $e->getMessage()",
+      );
+    } finally {
+      console.error = origConsoleError;
+      fs.readFileSync = origReadFileSync;
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+      for (const k of dbEnvKeys) {
+        if (envSnapshot[k] === undefined) delete process.env[k];
+        else process.env[k] = envSnapshot[k];
+      }
+    }
+  });
+
+  it("15. Task 5J-V4-H PHP AdMob POST Error-Handling Safety (Auth DB 503/500, Tx User Lookup, Safe Rollback & Redacted Responses)", () => {
+    const admobPhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api/admin/record-admob-earning.php"),
+      "utf-8",
+    );
+
+    // 1. Auth DB failure distinguished from 401
+    assert.ok(
+      admobPhp.includes("getAuthUser($pdo, true)") &&
+        admobPhp.includes("[record-admob-earning.php][AUTH]"),
+      "PHP AdMob must distinguish auth DB failures (503/500) from unauthenticated 401",
+    );
+
+    // 2. Target-user lookup inside beginTransaction() & try/catch with 404 rollback
+    const beginTxIdx = admobPhp.indexOf("$pdo->beginTransaction();");
+    const userLookupIdx = admobPhp.indexOf("FROM users WHERE UPPER(user_id) = UPPER(?)");
+    assert.ok(
+      beginTxIdx !== -1 && userLookupIdx > beginTxIdx,
+      "Users lookup must execute inside beginTransaction()",
+    );
+    const missingUserIdx = admobPhp.indexOf("if (!$targetUser)");
+    assert.ok(missingUserIdx > userLookupIdx);
+    const missingUserBlock = admobPhp.slice(missingUserIdx, missingUserIdx + 220);
+    assert.ok(
+      missingUserBlock.includes("$safeRollback($pdo);") && missingUserBlock.includes("404"),
+      "Missing target user must safely roll back and return 404",
+    );
+
+    // 3. Safe rollback, Throwable catch, and strict 1062 duplicate classification
+    assert.ok(
+      admobPhp.includes("$safeRollback = static function (PDO $conn): void") &&
+        admobPhp.includes("if ($conn->inTransaction())") &&
+        admobPhp.includes("catch (Throwable $_rollbackErr)"),
+      "PHP AdMob POST must guard rollback with inTransaction() and absorb rollback failures",
+    );
+    assert.ok(
+      admobPhp.includes("} catch (Throwable $e) {") &&
+        admobPhp.includes("if ($mysqlErrno === 1062)"),
+      "PHP AdMob POST must catch Throwable and classify duplicates strictly on errno 1062",
+    );
+
+    // 4. Sanitized POST responses + server-side logging + 503/500 mapping
+    assert.ok(
+      !admobPhp.includes("Database error recording AdMob earnings: ' . $e->getMessage()"),
+      "PHP AdMob POST must never leak raw $e->getMessage() in JSON responses",
+    );
+    assert.ok(
+      admobPhp.includes(
+        "error_log('[record-admob-earning.php][POST] Transaction error: ' . $e->getMessage())",
+      ) &&
+        admobPhp.includes("$isConnectionUnavailable($e)") &&
+        admobPhp.includes("503") &&
+        admobPhp.includes("500"),
+      "PHP AdMob POST must log DB errors server-side and return safe 503/500 responses",
+    );
+
+    // 5. V4-D / V4-E preservation
+    assert.ok(
+      admobPhp.includes("$txId = 'TX_ADMOB_' . $cleanUserId . '_' . $cleanMonth;") &&
+        admobPhp.includes("abs(($parsedAmount * 100) - $scaledAmount) > 1e-6") &&
+        admobPhp.includes("$stmtLedger->rowCount() < 1") &&
+        admobPhp.includes("$stmtStmt->rowCount() < 1") &&
+        admobPhp.includes("$stmtWallet->rowCount() < 1"),
+      "Existing V4-D deterministic TX ID and V4-E precision/rowCount validations must remain intact",
+    );
   });
 });

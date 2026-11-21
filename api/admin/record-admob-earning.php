@@ -21,8 +21,44 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST' && $_SERVER['REQUEST_METHOD'] !== 'GET
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
 }
 
+$isConnectionUnavailable = static function (Throwable $e): bool {
+    if (function_exists('isDatabaseConnectionUnavailableError')) {
+        return isDatabaseConnectionUnavailableError($e);
+    }
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 2002, 2003, 2005, 2006, 2013], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+};
+
+$safeRollback = static function (PDO $conn): void {
+    try {
+        if ($conn->inTransaction()) {
+            $conn->rollBack();
+        }
+    } catch (Throwable $_rollbackErr) {
+        // Ignore rollback failure so the original error response is preserved
+    }
+};
+
 $pdo = getDatabaseConnection();
-$authUser = getAuthUser($pdo);
+try {
+    $authUser = getAuthUser($pdo, true);
+} catch (Throwable $e) {
+    error_log('[record-admob-earning.php][AUTH] Database error: ' . $e->getMessage());
+    if ($isConnectionUnavailable($e)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database connection unavailable during authentication check.'
+        ], 503);
+    }
+    jsonResponse([
+        'success' => false,
+        'error' => 'Database error during authentication check.'
+    ], 500);
+}
 
 if (!$authUser) {
     jsonResponse([
@@ -40,7 +76,6 @@ if (strtolower($authUser['role'] ?? '') !== 'admin') {
 
 // Handle GET: Reporting on monthly AdMob statements
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    $statements = [];
     try {
         $stmt = $pdo->query('
             SELECT id, statement_id, user_id, report_month, gross_amount, net_amount,
@@ -48,9 +83,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             FROM admob_monthly_statements
             ORDER BY report_month DESC, created_at DESC
         ');
-        $statements = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
-    } catch (Exception $e) {
-        $statements = [];
+        if ($stmt === false) {
+            throw new RuntimeException('Failed to query admob_monthly_statements.');
+        }
+        $statements = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        error_log('[record-admob-earning.php][GET] Database error: ' . $e->getMessage());
+        if ($isConnectionUnavailable($e)) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Database connection unavailable while loading AdMob statements.'
+            ], 503);
+        }
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database error loading AdMob statements.'
+        ], 500);
     }
     jsonResponse([
         'success' => true,
@@ -62,10 +110,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 $input = getRequestPayload();
 
 $targetUserId = trim((string)($input['userId'] ?? ($input['user_id'] ?? '')));
-$amount = floatval($input['amount'] ?? 0);
+$rawAmount = $input['amount'] ?? null;
 $rawMonth = trim((string)($input['reportMonth'] ?? ($input['report_month'] ?? date('Y-m'))));
-$impressions = intval($input['impressions'] ?? 0);
-$ecpm = floatval($input['ecpm'] ?? 0);
+$rawImpressions = $input['impressions'] ?? null;
+$rawEcpm = $input['ecpm'] ?? null;
 $description = trim((string)($input['description'] ?? ''));
 
 $rawAppEnv = getenv('APP_ENV');
@@ -96,11 +144,102 @@ if (empty($targetUserId)) {
     ], 400);
 }
 
-if ($amount <= 0) {
+$parsedAmount = null;
+if ($rawAmount === null || is_bool($rawAmount) || is_array($rawAmount) || is_object($rawAmount)) {
     jsonResponse([
         'success' => false,
-        'error' => 'Verified AdMob earnings amount must be strictly greater than 0.'
+        'error' => 'Verified AdMob earnings amount must be a finite number strictly greater than 0.'
     ], 400);
+}
+if (is_string($rawAmount)) {
+    $trimmedAmount = trim($rawAmount);
+    if ($trimmedAmount === '' || !preg_match('/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/', $trimmedAmount)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Verified AdMob earnings amount must be a finite number strictly greater than 0.'
+        ], 400);
+    }
+    $parsedAmount = (float)$trimmedAmount;
+} elseif (is_int($rawAmount) || is_float($rawAmount)) {
+    $parsedAmount = (float)$rawAmount;
+} else {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Verified AdMob earnings amount must be a finite number strictly greater than 0.'
+    ], 400);
+}
+
+if (!is_finite($parsedAmount) || $parsedAmount <= 0) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Verified AdMob earnings amount must be a finite number strictly greater than 0.'
+    ], 400);
+}
+
+if ($parsedAmount > 999999999999.99) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Verified AdMob earnings amount exceeds maximum supported wallet precision.'
+    ], 400);
+}
+
+$scaledAmount = round($parsedAmount * 100);
+if ($scaledAmount < 1 || abs(($parsedAmount * 100) - $scaledAmount) > 1e-6) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Verified AdMob earnings amount supports at most 2 decimal places (minimum ₹0.01).'
+    ], 400);
+}
+$amount = $scaledAmount / 100;
+
+$impressions = 0;
+if ($rawImpressions !== null && (!is_string($rawImpressions) || trim($rawImpressions) !== '')) {
+    if (is_bool($rawImpressions) || is_array($rawImpressions) || is_object($rawImpressions)) {
+        jsonResponse(['success' => false, 'error' => 'AdMob impressions must be a finite non-negative integer.'], 400);
+    }
+    if (is_string($rawImpressions)) {
+        $trimmedImp = trim($rawImpressions);
+        if (!preg_match('/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/', $trimmedImp)) {
+            jsonResponse(['success' => false, 'error' => 'AdMob impressions must be a finite non-negative integer.'], 400);
+        }
+        $impNum = (float)$trimmedImp;
+    } elseif (is_int($rawImpressions) || is_float($rawImpressions)) {
+        $impNum = (float)$rawImpressions;
+    } else {
+        jsonResponse(['success' => false, 'error' => 'AdMob impressions must be a finite non-negative integer.'], 400);
+    }
+    if (!is_finite($impNum) || $impNum < 0 || floor($impNum) !== $impNum) {
+        jsonResponse(['success' => false, 'error' => 'AdMob impressions must be a finite non-negative integer.'], 400);
+    }
+    if ($impNum > 4294967295) {
+        jsonResponse(['success' => false, 'error' => 'AdMob impressions exceeds maximum supported range.'], 400);
+    }
+    $impressions = (int)$impNum;
+}
+
+$ecpm = 0.0;
+if ($rawEcpm !== null && (!is_string($rawEcpm) || trim($rawEcpm) !== '')) {
+    if (is_bool($rawEcpm) || is_array($rawEcpm) || is_object($rawEcpm)) {
+        jsonResponse(['success' => false, 'error' => 'AdMob ecpm must be a finite non-negative number.'], 400);
+    }
+    if (is_string($rawEcpm)) {
+        $trimmedEcpm = trim($rawEcpm);
+        if (!preg_match('/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/', $trimmedEcpm)) {
+            jsonResponse(['success' => false, 'error' => 'AdMob ecpm must be a finite non-negative number.'], 400);
+        }
+        $ecpmNum = (float)$trimmedEcpm;
+    } elseif (is_int($rawEcpm) || is_float($rawEcpm)) {
+        $ecpmNum = (float)$rawEcpm;
+    } else {
+        jsonResponse(['success' => false, 'error' => 'AdMob ecpm must be a finite non-negative number.'], 400);
+    }
+    if (!is_finite($ecpmNum) || $ecpmNum < 0) {
+        jsonResponse(['success' => false, 'error' => 'AdMob ecpm must be a finite non-negative number.'], 400);
+    }
+    if ($ecpmNum > 999999.9999) {
+        jsonResponse(['success' => false, 'error' => 'AdMob ecpm exceeds maximum supported range.'], 400);
+    }
+    $ecpm = $ecpmNum;
 }
 
 // Normalize and validate reporting month (format: YYYY-MM)
@@ -137,29 +276,34 @@ if ($resolvedAppId === '') {
     $appId = $resolvedAppId;
 }
 
-// Verify target user exists
-$stmtUser = $pdo->prepare('SELECT id, user_id, name, email FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1');
-$stmtUser->execute([$targetUserId]);
-$targetUser = $stmtUser->fetch();
-
-if (!$targetUser) {
-    jsonResponse([
-        'success' => false,
-        'error' => "User ID '{$targetUserId}' not found in database."
-    ], 404);
-}
-
-$canonicalUserId = $targetUser['user_id'];
-$cleanUserId = preg_replace('/[^0-9A-Z]/', '', strtoupper($canonicalUserId));
-
-// Generate transaction and statement IDs
-$txId = 'TX-ADMOB-' . $cleanMonth . '-' . substr(bin2hex(random_bytes(6)), 0, 10);
-$statementId = 'STMT-ADMOB-' . $cleanMonth . '-' . $cleanUserId;
-$defaultDesc = "Google AdMob Finalized Statement ({$normalizedMonth}) - Android Native App";
-$finalDesc = !empty($description) ? $description : $defaultDesc;
+$canonicalUserId = strtoupper($targetUserId);
 
 try {
     $pdo->beginTransaction();
+
+    // Verify target user exists inside safe transaction handling
+    $stmtUser = $pdo->prepare('SELECT id, user_id, name, email FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1');
+    if ($stmtUser === false || $stmtUser->execute([$targetUserId]) === false) {
+        throw new RuntimeException('Failed to look up target user.');
+    }
+    $targetUser = $stmtUser->fetch();
+
+    if (!$targetUser) {
+        $safeRollback($pdo);
+        jsonResponse([
+            'success' => false,
+            'error' => "User ID '{$targetUserId}' not found in database."
+        ], 404);
+    }
+
+    $canonicalUserId = $targetUser['user_id'];
+    $cleanUserId = preg_replace('/[^0-9A-Z]/', '', strtoupper($canonicalUserId));
+
+    // Generate deterministic transaction and statement IDs
+    $txId = 'TX_ADMOB_' . $cleanUserId . '_' . $cleanMonth;
+    $statementId = 'STMT-ADMOB-' . $cleanMonth . '-' . $cleanUserId;
+    $defaultDesc = "Google AdMob Finalized Statement ({$normalizedMonth}) - Android Native App";
+    $finalDesc = !empty($description) ? $description : $defaultDesc;
 
     // 1. Race-safe Anti-Duplication Check inside transaction
     $stmtDup = $pdo->prepare('
@@ -169,15 +313,38 @@ try {
         LIMIT 1
         FOR UPDATE
     ');
-    $stmtDup->execute([$canonicalUserId, $normalizedMonth]);
+    if ($stmtDup === false || $stmtDup->execute([$canonicalUserId, $normalizedMonth]) === false) {
+        throw new RuntimeException('Failed to query admob_monthly_statements.');
+    }
     $existingStatement = $stmtDup->fetch();
 
     if ($existingStatement) {
-        $pdo->rollBack();
+        $safeRollback($pdo);
         jsonResponse([
             'success' => false,
             'error' => "AdMob statement already finalized for creator '{$canonicalUserId}' in month '{$normalizedMonth}'. Duplicate credits blocked.",
             'existingStatement' => $existingStatement,
+        ], 409);
+    }
+
+    // 1b. Race-safe Anti-Duplication Check on income_ledger by deterministic transaction ID
+    $stmtLedgerDup = $pdo->prepare('
+        SELECT id, transaction_id
+        FROM income_ledger
+        WHERE transaction_id = ?
+        LIMIT 1
+        FOR UPDATE
+    ');
+    if ($stmtLedgerDup === false || $stmtLedgerDup->execute([$txId]) === false) {
+        throw new RuntimeException('Failed to query income_ledger for AdMob duplicates.');
+    }
+    $existingLedger = $stmtLedgerDup->fetch();
+
+    if ($existingLedger) {
+        $safeRollback($pdo);
+        jsonResponse([
+            'success' => false,
+            'error' => "AdMob statement already finalized for creator '{$canonicalUserId}' in month '{$normalizedMonth}'. Duplicate credits blocked.",
         ], 409);
     }
 
@@ -189,7 +356,7 @@ try {
             status, special_tag, description, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())
     ');
-    $stmtLedger->execute([
+    if ($stmtLedger === false || $stmtLedger->execute([
         $ledgerId,
         $txId,
         $canonicalUserId,
@@ -198,7 +365,12 @@ try {
         'settled',
         'ADMOB_FINALIZED_STATEMENT',
         $finalDesc,
-    ]);
+    ]) === false) {
+        throw new RuntimeException('Failed to record AdMob income ledger entry.');
+    }
+    if ($stmtLedger->rowCount() < 1) {
+        throw new RuntimeException('Failed to record AdMob income ledger entry.');
+    }
 
     // 3. Insert into admob_monthly_statements (atomic with ledger and wallet)
     $stmtStmt = $pdo->prepare('
@@ -207,7 +379,7 @@ try {
             impressions, ecpm, app_id, ledger_id, transaction_id, verified_by, status, notes
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ');
-    $stmtStmt->execute([
+    if ($stmtStmt === false || $stmtStmt->execute([
         $statementId,
         $canonicalUserId,
         $normalizedMonth,
@@ -221,7 +393,12 @@ try {
         $authUser['user_id'] ?? 'ADMIN',
         'finalized',
         $finalDesc,
-    ]);
+    ]) === false) {
+        throw new RuntimeException('Failed to persist AdMob monthly statement record.');
+    }
+    if ($stmtStmt->rowCount() < 1) {
+        throw new RuntimeException('Failed to persist AdMob monthly statement record.');
+    }
 
     // 4. Atomically credit creator wallet_balances
     $stmtWallet = $pdo->prepare('
@@ -233,18 +410,23 @@ try {
             admob_income = admob_income + VALUES(admob_income),
             updated_at = NOW()
     ');
-    $stmtWallet->execute([
+    if ($stmtWallet === false || $stmtWallet->execute([
         $canonicalUserId,
         $amount,
         $amount,
         $amount,
-    ]);
+    ]) === false) {
+        throw new RuntimeException('Failed to credit creator wallet for AdMob.');
+    }
+    if ($stmtWallet->rowCount() < 1) {
+        throw new RuntimeException('Failed to credit creator wallet for AdMob.');
+    }
 
     $pdo->commit();
 
     jsonResponse([
         'success' => true,
-        'message' => "Successfully credited ₹{$amount} Google AdMob earnings to creator {$canonicalUserId}.",
+        'message' => 'Successfully credited ₹' . number_format($amount, 2) . " Google AdMob earnings to creator {$canonicalUserId}.",
         'transactionId' => $txId,
         'statementId' => $statementId,
         'userId' => $canonicalUserId,
@@ -253,10 +435,8 @@ try {
         'incomeType' => 'admob_income',
         'creditedAt' => date('Y-m-d H:i:s'),
     ], 201);
-} catch (Exception $e) {
-    if ($pdo->inTransaction()) {
-        $pdo->rollBack();
-    }
+} catch (Throwable $e) {
+    $safeRollback($pdo);
     $mysqlErrno = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
     if ($mysqlErrno === 1062) {
         jsonResponse([
@@ -264,8 +444,15 @@ try {
             'error' => "AdMob statement already finalized for creator '{$canonicalUserId}' in month '{$normalizedMonth}'. Duplicate credits blocked."
         ], 409);
     }
+    error_log('[record-admob-earning.php][POST] Transaction error: ' . $e->getMessage());
+    if ($isConnectionUnavailable($e)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database connection unavailable while recording AdMob earnings.'
+        ], 503);
+    }
     jsonResponse([
         'success' => false,
-        'error' => 'Database error recording AdMob earnings: ' . $e->getMessage()
+        'error' => 'Database error recording AdMob earnings.'
     ], 500);
 }

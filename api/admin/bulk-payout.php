@@ -114,6 +114,19 @@ try {
 
 $fatalHttpCode = 500;
 
+function isMissingSchemaObjectException(PDOException $e): bool {
+    $sqlState = (string)($e->getCode() ?? '');
+    $driverCode = isset($e->errorInfo[1]) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return $sqlState === '42S02'
+        || $sqlState === '42S22'
+        || $driverCode === 1146
+        || $driverCode === 1054
+        || stripos($msg, "doesn't exist") !== false
+        || stripos($msg, 'unknown column') !== false
+        || stripos($msg, 'unknown table') !== false;
+}
+
 foreach ($chunks as $chunkIndex => $chunk) {
     $chunkBegun = false;
     try {
@@ -148,7 +161,11 @@ foreach ($chunks as $chunkIndex => $chunk) {
                     $stmtCheck->execute([$txId]);
                     $existingTx = $stmtCheck->fetch();
                 } catch (PDOException $eCheck) {
-                    // Table might not exist or error, attempt income_ledger
+                    if (!isMissingSchemaObjectException($eCheck)) {
+                        $fatalHttpCode = 500;
+                        throw $eCheck;
+                    }
+                    // Table might not exist, attempt income_ledger
                 }
 
                 if (!$existingTx) {
@@ -160,15 +177,15 @@ foreach ($chunks as $chunkIndex => $chunk) {
                             $tableName = 'income_ledger';
                         }
                     } catch (PDOException $eLedgerCols) {
-                        try {
-                            $stmtCheckLedger = $pdo->prepare('SELECT id, transaction_id, user_id, amount, status FROM income_ledger WHERE transaction_id = ? OR id = ? FOR UPDATE');
-                            $stmtCheckLedger->execute([$txId, $txId]);
-                            $existingTx = $stmtCheckLedger->fetch();
-                            if ($existingTx) {
-                                $tableName = 'income_ledger';
-                            }
-                        } catch (PDOException $_eLedgerFallback) {
-                            // Ignore
+                        if (!isMissingSchemaObjectException($eLedgerCols)) {
+                            $fatalHttpCode = 500;
+                            throw $eLedgerCols;
+                        }
+                        $stmtCheckLedger = $pdo->prepare('SELECT id, transaction_id, user_id, amount, status FROM income_ledger WHERE transaction_id = ? OR id = ? FOR UPDATE');
+                        $stmtCheckLedger->execute([$txId, $txId]);
+                        $existingTx = $stmtCheckLedger->fetch();
+                        if ($existingTx) {
+                            $tableName = 'income_ledger';
                         }
                     }
                 }
@@ -215,6 +232,10 @@ foreach ($chunks as $chunkIndex => $chunk) {
                         WHERE id = ?
                     ');
                     $stmtUpdate->execute([$batchId, $itemPayoutMethod, $txId]);
+                    if ($stmtUpdate->rowCount() < 1) {
+                        $fatalHttpCode = 500;
+                        throw new RuntimeException("Failed to persist payout status update for transaction '{$txId}'.", 500);
+                    }
                 } else {
                     try {
                         $stmtUpdate = $pdo->prepare('
@@ -224,12 +245,20 @@ foreach ($chunks as $chunkIndex => $chunk) {
                         ');
                         $stmtUpdate->execute([$batchId, $itemPayoutMethod, $txId, $txId]);
                     } catch (PDOException $eUpLedger) {
+                        if (!isMissingSchemaObjectException($eUpLedger)) {
+                            $fatalHttpCode = 500;
+                            throw $eUpLedger;
+                        }
                         $stmtUpdate = $pdo->prepare('
                             UPDATE income_ledger
                             SET status = "settled"
                             WHERE transaction_id = ? OR id = ?
                         ');
                         $stmtUpdate->execute([$txId, $txId]);
+                    }
+                    if ($stmtUpdate->rowCount() < 1) {
+                        $fatalHttpCode = 500;
+                        throw new RuntimeException("Failed to persist payout status update for ledger transaction '{$txId}'.", 500);
                     }
                 }
 
@@ -255,8 +284,11 @@ foreach ($chunks as $chunkIndex => $chunk) {
                     $stmtCheckDirect = $pdo->prepare('SELECT id, user_id, amount, status FROM wallet_transactions WHERE id = ? AND batch_id = ?');
                     $stmtCheckDirect->execute([$deterministicTxId, $batchId]);
                     $alreadyDirect = $stmtCheckDirect->fetch();
-                } catch (PDOException $_eDirectCheck) {
-                    // Ignore
+                } catch (PDOException $eDirectCheck) {
+                    if (!isMissingSchemaObjectException($eDirectCheck)) {
+                        $fatalHttpCode = 500;
+                        throw $eDirectCheck;
+                    }
                 }
 
                 if (!$alreadyDirect) {
@@ -264,8 +296,11 @@ foreach ($chunks as $chunkIndex => $chunk) {
                         $stmtCheckDirectLedger = $pdo->prepare('SELECT id, transaction_id, user_id, amount, status, batch_id FROM income_ledger WHERE (id = ? OR transaction_id = ?) AND batch_id = ?');
                         $stmtCheckDirectLedger->execute([$deterministicTxId, $deterministicTxId, $batchId]);
                         $alreadyDirect = $stmtCheckDirectLedger->fetch();
-                    } catch (PDOException $_eDirectLedger) {
-                        // Ignore
+                    } catch (PDOException $eDirectLedger) {
+                        if (!isMissingSchemaObjectException($eDirectLedger)) {
+                            $fatalHttpCode = 500;
+                            throw $eDirectLedger;
+                        }
                     }
                 }
 
@@ -298,13 +333,19 @@ foreach ($chunks as $chunkIndex => $chunk) {
                 }
 
                 $txId = $deterministicTxId;
+                $insertedRows = 0;
                 try {
                     $stmtInsert = $pdo->prepare('
                         INSERT INTO wallet_transactions (id, user_id, batch_id, type, amount, status, payout_method, beneficiary_details, created_at)
                         VALUES (?, ?, ?, "withdrawal", ?, "completed", ?, ?, NOW())
                     ');
                     $stmtInsert->execute([$txId, $userId, $batchId, $amount, $itemPayoutMethod, $itemBeneficiaryMasked]);
+                    $insertedRows = $stmtInsert->rowCount();
                 } catch (PDOException $eIns) {
+                    if (!isMissingSchemaObjectException($eIns)) {
+                        $fatalHttpCode = 500;
+                        throw $eIns;
+                    }
                     try {
                         $stmtLedger = $pdo->prepare('
                             INSERT INTO income_ledger (id, transaction_id, user_id, batch_id, income_type, amount, status, payout_method, beneficiary_details, description, created_at)
@@ -320,13 +361,23 @@ foreach ($chunks as $chunkIndex => $chunk) {
                             $itemBeneficiaryMasked,
                             "Direct bulk payout disbursement (Batch {$batchId})"
                         ]);
+                        $insertedRows = $stmtLedger->rowCount();
                     } catch (PDOException $eLedgerNew) {
+                        if (!isMissingSchemaObjectException($eLedgerNew)) {
+                            $fatalHttpCode = 500;
+                            throw $eLedgerNew;
+                        }
                         $stmtLedger = $pdo->prepare('
                             INSERT INTO income_ledger (id, transaction_id, user_id, income_type, amount, status, description, created_at)
                             VALUES (?, ?, ?, "withdrawal", ?, "settled", ?, NOW())
                         ');
                         $stmtLedger->execute([$txId, $txId, $userId, $amount, "Direct bulk payout disbursement (Batch {$batchId})"]);
+                        $insertedRows = $stmtLedger->rowCount();
                     }
+                }
+                if ($insertedRows < 1) {
+                    $fatalHttpCode = 500;
+                    throw new RuntimeException("Failed to persist direct payout transaction record '{$txId}'.", 500);
                 }
 
                 // Deduct exactly once for new direct payout
@@ -338,6 +389,10 @@ foreach ($chunks as $chunkIndex => $chunk) {
                     WHERE UPPER(user_id) = UPPER(?)
                 ');
                 $stmtWallet->execute([$amount, $amount, $userId]);
+                if ($stmtWallet->rowCount() < 1) {
+                    $fatalHttpCode = 500;
+                    throw new RuntimeException("Failed to persist wallet balance deduction for user '{$userId}'.", 500);
+                }
 
                 $chunkProcessed[] = [
                     'transaction_id' => $txId,

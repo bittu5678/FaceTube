@@ -132,7 +132,16 @@ function getBearerToken() {
     return null;
 }
 
-function getAuthUser($pdo) {
+function isDatabaseConnectionUnavailableError(Throwable $e): bool {
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 2002, 2003, 2005, 2006, 2013], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+}
+
+function getAuthUser($pdo, bool $rethrowDbError = false) {
     $token = getBearerToken();
     if (!$token) {
         return null;
@@ -146,7 +155,12 @@ function getAuthUser($pdo) {
             WHERE s.token = ? AND s.expires_at > NOW()
             LIMIT 1
         ');
-        $stmt->execute([trim($token)]);
+        if ($stmt === false) {
+            throw new RuntimeException('Failed to prepare authentication session query.');
+        }
+        if ($stmt->execute([trim($token)]) === false) {
+            throw new RuntimeException('Failed to execute authentication session query.');
+        }
         $user = $stmt->fetch();
         if (!$user) {
             return null;
@@ -155,7 +169,11 @@ function getAuthUser($pdo) {
             $user['channel_logo_url'] = toAbsoluteMediaUrl($user['channel_logo_url'], 'logos');
         }
         return $user;
-    } catch (Exception $e) {
+    } catch (Throwable $e) {
+        error_log('[response.php][getAuthUser] Session lookup database error: ' . $e->getMessage());
+        if ($rethrowDbError) {
+            throw $e;
+        }
         return null;
     }
 }
