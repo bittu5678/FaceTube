@@ -12,6 +12,22 @@ import {
 } from "./api-handler.ts";
 import { setMysqlPoolForTesting } from "./mysql.ts";
 import nitroServerEntry from "../server.ts";
+import {
+  classifyCameraError,
+  classifyScreenShareError,
+  detectScreenShareSupport,
+  inferFacingModeFromCamera,
+  selectCameraCandidate,
+  startScreenShareSafely,
+  stopScreenShareSafely,
+  switchCameraWithFallback,
+  switchVideoDeviceSafely,
+  type CameraDeviceLike,
+  type ScreenShareParticipantAdapter,
+  type ScreenSharePublicationLike,
+  type ScreenShareTrackLike,
+  type VideoTrackAdapter,
+} from "../components/live/live-camera-utils.ts";
 
 describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () => {
   let adminToken = "";
@@ -4282,6 +4298,880 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
       });
       assert.equal(viewerOptionalTableMissing.status, 200);
       assert.equal(viewerOptionalTableMissing.body.success, true);
+    });
+  });
+
+  describe("10. Task 12: LiveKitBroadcasterStudio Front/Back Camera Switching & Lifecycle Tests (Static + Unit Simulation)", () => {
+    function createSimulatedVideoTrack(initial: {
+      deviceId: string;
+      facingMode: "user" | "environment";
+      label: string;
+      isMuted?: boolean;
+      onRestart: (
+        options: Record<string, unknown>,
+      ) =>
+        | Promise<{ deviceId: string; facingMode?: "user" | "environment"; label: string }>
+        | { deviceId: string; facingMode?: "user" | "environment"; label: string };
+    }) {
+      let current = {
+        deviceId: initial.deviceId,
+        facingMode: initial.facingMode as "user" | "environment" | undefined,
+        label: initial.label,
+      };
+      let trackIdCounter = 1;
+      const trackHistory: Array<{
+        id: number;
+        deviceId: string;
+        stopped: boolean;
+      }> = [{ id: trackIdCounter, deviceId: current.deviceId, stopped: false }];
+
+      const restartCalls: Array<Record<string, unknown>> = [];
+      const setDeviceIdCalls: unknown[] = [];
+
+      const track: VideoTrackAdapter = {
+        isMuted: initial.isMuted ?? false,
+        mediaStreamTrack: {
+          getSettings: () => ({
+            deviceId: current.deviceId,
+            ...(current.facingMode ? { facingMode: current.facingMode } : {}),
+          }),
+          get label() {
+            return current.label;
+          },
+          get readyState() {
+            const latest = trackHistory[trackHistory.length - 1];
+            return latest && !latest.stopped ? "live" : "ended";
+          },
+        },
+        async restartTrack(options: Record<string, unknown>) {
+          restartCalls.push(options);
+          // Mirror LiveKit LocalTrack.restart(): old MediaStreamTrack is stopped before new acquisition
+          const prev = trackHistory[trackHistory.length - 1];
+          if (prev) prev.stopped = true;
+
+          const next = await initial.onRestart(options);
+          current = {
+            deviceId: next.deviceId,
+            facingMode: next.facingMode,
+            label: next.label,
+          };
+          trackIdCounter += 1;
+          trackHistory.push({ id: trackIdCounter, deviceId: current.deviceId, stopped: false });
+        },
+        async setDeviceId(deviceId: ConstrainDOMString) {
+          setDeviceIdCalls.push(deviceId);
+          return true;
+        },
+      };
+
+      return {
+        track,
+        restartCalls,
+        setDeviceIdCalls,
+        getHistory: () => trackHistory,
+        getActiveCount: () => trackHistory.filter((t) => !t.stopped).length,
+      };
+    }
+
+    it("[Static] 1. LiveKitBroadcasterStudio isolates broadcast room lifecycle from facingMode/device changes and delegates switching cleanly", () => {
+      const studioSource = fs.readFileSync(
+        path.resolve(process.cwd(), "src/components/live/LiveKitBroadcasterStudio.tsx"),
+        "utf-8",
+      );
+
+      // startBroadcasting must NOT depend on facingMode, selectedCameraId, or selectedMicId
+      const startCbMatch = studioSource.match(
+        /const startBroadcasting = useCallback\([\s\S]*?\n\s*\}, \[([^\]]*)\]\);/,
+      );
+      assert.ok(startCbMatch, "startBroadcasting useCallback dependency list must exist");
+      const startDeps = startCbMatch[1] ?? "";
+      assert.doesNotMatch(startDeps, /\bfacingMode\b/);
+      assert.doesNotMatch(startDeps, /\bselectedCameraId\b/);
+      assert.doesNotMatch(startDeps, /\bselectedMicId\b/);
+
+      // Must NOT combine exact selectedCameraId with facingMode in initial createLocalTracks
+      assert.match(
+        studioSource,
+        /activeCameraId\s*\?\s*\{\s*deviceId:\s*\{\s*exact:\s*activeCameraId\s*\}\s*\}\s*:\s*\{\s*facingMode:\s*facingModeRef\.current\s*\}/,
+      );
+
+      // Cancellation & cleanup guards against leaked tracks/rooms
+      assert.match(studioSource, /sessionRunIdRef\.current\s*!==\s*runId/);
+      assert.match(studioSource, /isSwitchingCameraRef\.current/);
+      assert.match(studioSource, /switchCameraWithFallback\(/);
+      assert.match(studioSource, /switchVideoDeviceSafely\(/);
+      assert.match(studioSource, /disabled=\{isSwitchingCamera \|\| isInitializing\}/);
+    });
+
+    it("[Unit Simulation] 2. Switches front -> back -> front cleanly on multi-camera mobile devices and stops previous tracks without leaks", async () => {
+      const cameras: CameraDeviceLike[] = [
+        { deviceId: "cam-front", kind: "videoinput", label: "camera2 1, facing front" },
+        { deviceId: "cam-back-wide", kind: "videoinput", label: "Ultra Wide Back Camera" },
+        { deviceId: "cam-back-main", kind: "videoinput", label: "camera2 0, facing back" },
+      ];
+
+      // selectCameraCandidate prefers primary rear camera over ultra-wide
+      const preferredRear = selectCameraCandidate(cameras, "environment", "cam-front");
+      assert.equal(preferredRear.device?.deviceId, "cam-back-main");
+      assert.equal(preferredRear.matchedByLabel, true);
+
+      const sim = createSimulatedVideoTrack({
+        deviceId: "cam-front",
+        facingMode: "user",
+        label: "camera2 1, facing front",
+        onRestart: async (opts) => {
+          const fm = opts["facingMode"] as { exact?: string } | string | undefined;
+          const exactMode = typeof fm === "object" ? fm.exact : fm;
+          if (exactMode === "environment") {
+            return {
+              deviceId: "cam-back-main",
+              facingMode: "environment",
+              label: "camera2 0, facing back",
+            };
+          }
+          return {
+            deviceId: "cam-front",
+            facingMode: "user",
+            label: "camera2 1, facing front",
+          };
+        },
+      });
+
+      // Front -> Back
+      const toBack = await switchCameraWithFallback({
+        videoTrack: sim.track,
+        targetMode: "environment",
+        previousMode: "user",
+        previousDeviceId: "cam-front",
+        resolution: { width: 1280, height: 720, frameRate: 30 },
+        enumerateCameras: async () => cameras,
+      });
+
+      assert.equal(toBack.success, true);
+      assert.equal(toBack.facingMode, "environment");
+      assert.equal(toBack.deviceId, "cam-back-main");
+      assert.equal(sim.getActiveCount(), 1, "Previous front track must be stopped (no duplicates)");
+      assert.equal(sim.getHistory()[0]?.stopped, true);
+      assert.equal(sim.getHistory()[1]?.stopped, false);
+
+      // Back -> Front
+      const toFront = await switchCameraWithFallback({
+        videoTrack: sim.track,
+        targetMode: "user",
+        previousMode: "environment",
+        previousDeviceId: "cam-back-main",
+        resolution: { width: 1280, height: 720, frameRate: 30 },
+        enumerateCameras: async () => cameras,
+      });
+
+      assert.equal(toFront.success, true);
+      assert.equal(toFront.facingMode, "user");
+      assert.equal(toFront.deviceId, "cam-front");
+      assert.equal(sim.getActiveCount(), 1, "Previous rear track must be stopped (no duplicates)");
+      assert.equal(sim.getHistory()[1]?.stopped, true);
+      assert.equal(sim.getHistory()[2]?.stopped, false);
+    });
+
+    it("[Unit Simulation] 3. Falls back to explicit deviceId when facingMode:exact fails or driver silently keeps front camera", async () => {
+      const cameras: CameraDeviceLike[] = [
+        { deviceId: "cam-front", kind: "videoinput", label: "Front Camera" },
+        { deviceId: "cam-back", kind: "videoinput", label: "Back Camera" },
+      ];
+
+      // Case A: WebView throws OverconstrainedError on facingMode: { exact: "environment" }
+      const simOverconstrained = createSimulatedVideoTrack({
+        deviceId: "cam-front",
+        facingMode: "user",
+        label: "Front Camera",
+        onRestart: async (opts) => {
+          const dev = opts["deviceId"] as { exact?: string } | undefined;
+          if (!dev?.exact) {
+            throw Object.assign(new Error("Overconstrained"), { name: "OverconstrainedError" });
+          }
+          return {
+            deviceId: dev.exact,
+            facingMode: dev.exact === "cam-back" ? "environment" : "user",
+            label: dev.exact === "cam-back" ? "Back Camera" : "Front Camera",
+          };
+        },
+      });
+
+      const resA = await switchCameraWithFallback({
+        videoTrack: simOverconstrained.track,
+        targetMode: "environment",
+        previousMode: "user",
+        previousDeviceId: "cam-front",
+        enumerateCameras: async () => cameras,
+      });
+      assert.equal(resA.success, true);
+      assert.equal(resA.deviceId, "cam-back");
+      assert.equal(resA.facingMode, "environment");
+      assert.equal(simOverconstrained.restartCalls.length, 2);
+      assert.equal(simOverconstrained.getActiveCount(), 1);
+
+      // Case B: Driver ignores facingMode: { exact: "environment" } and silently stays on cam-front
+      const simSilentNoOp = createSimulatedVideoTrack({
+        deviceId: "cam-front",
+        facingMode: "user",
+        label: "Front Camera",
+        onRestart: async (opts) => {
+          const dev = opts["deviceId"] as { exact?: string } | undefined;
+          if (dev?.exact === "cam-back") {
+            return {
+              deviceId: "cam-back",
+              facingMode: "environment",
+              label: "Back Camera",
+            };
+          }
+          // Silently returned front camera despite environment request
+          return {
+            deviceId: "cam-front",
+            facingMode: "user",
+            label: "Front Camera",
+          };
+        },
+      });
+
+      const resB = await switchCameraWithFallback({
+        videoTrack: simSilentNoOp.track,
+        targetMode: "environment",
+        previousMode: "user",
+        previousDeviceId: "cam-front",
+        enumerateCameras: async () => cameras,
+      });
+      assert.equal(resB.success, true);
+      assert.equal(resB.deviceId, "cam-back");
+      assert.equal(resB.facingMode, "environment");
+      assert.equal(simSilentNoOp.restartCalls.length, 2);
+      assert.equal(simSilentNoOp.getActiveCount(), 1);
+    });
+
+    it("[Unit Simulation] 4. Handles single-camera desktop (unavailable back camera) cleanly without stopping active camera", async () => {
+      const desktopCameras: CameraDeviceLike[] = [
+        { deviceId: "desktop-webcam-1", kind: "videoinput", label: "FaceTime HD Camera" },
+      ];
+
+      const simDesktop = createSimulatedVideoTrack({
+        deviceId: "desktop-webcam-1",
+        facingMode: "user",
+        label: "FaceTime HD Camera",
+        onRestart: async () => ({
+          deviceId: "desktop-webcam-1",
+          facingMode: "user",
+          label: "FaceTime HD Camera",
+        }),
+      });
+
+      const unavailableRes = await switchCameraWithFallback({
+        videoTrack: simDesktop.track,
+        targetMode: "environment",
+        previousMode: "user",
+        previousDeviceId: "desktop-webcam-1",
+        enumerateCameras: async () => desktopCameras,
+      });
+
+      assert.equal(unavailableRes.success, false);
+      assert.equal(unavailableRes.reason, "unavailable");
+      assert.equal(unavailableRes.facingMode, "user");
+      assert.equal(unavailableRes.deviceId, "desktop-webcam-1");
+      assert.match(unavailableRes.message, /back camera is not available/i);
+      assert.equal(
+        simDesktop.restartCalls.length,
+        0,
+        "Must not stop/restart active desktop camera when no back camera exists",
+      );
+      assert.equal(simDesktop.getActiveCount(), 1);
+    });
+
+    it("[Unit Simulation] 5. Handles camera permission denial, hardware busy failure with previous-camera recovery, and desktop device selector", async () => {
+      const cameras: CameraDeviceLike[] = [
+        { deviceId: "cam-front", kind: "videoinput", label: "Front Camera" },
+        { deviceId: "cam-back", kind: "videoinput", label: "Back Camera" },
+      ];
+
+      // Permission denied -> abort immediately, keep facingMode: "user"
+      const simDenied = createSimulatedVideoTrack({
+        deviceId: "cam-front",
+        facingMode: "user",
+        label: "Front Camera",
+        onRestart: async () => {
+          throw Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });
+        },
+      });
+      const deniedRes = await switchCameraWithFallback({
+        videoTrack: simDenied.track,
+        targetMode: "environment",
+        previousMode: "user",
+        previousDeviceId: "cam-front",
+        enumerateCameras: async () => cameras,
+      });
+      assert.equal(deniedRes.success, false);
+      assert.equal(deniedRes.reason, "permission");
+      assert.equal(deniedRes.facingMode, "user");
+      assert.equal(simDenied.restartCalls.length, 1);
+
+      // Hardware busy on back camera -> restores previous working front camera
+      const simBusy = createSimulatedVideoTrack({
+        deviceId: "cam-front",
+        facingMode: "user",
+        label: "Front Camera",
+        onRestart: async (opts) => {
+          const dev = opts["deviceId"] as { exact?: string } | undefined;
+          if (dev?.exact === "cam-front") {
+            return { deviceId: "cam-front", facingMode: "user", label: "Front Camera" };
+          }
+          throw Object.assign(new Error("Device in use"), { name: "NotReadableError" });
+        },
+      });
+      const busyRes = await switchCameraWithFallback({
+        videoTrack: simBusy.track,
+        targetMode: "environment",
+        previousMode: "user",
+        previousDeviceId: "cam-front",
+        enumerateCameras: async () => cameras,
+      });
+      assert.equal(busyRes.success, false);
+      assert.equal(busyRes.reason, "busy");
+      assert.equal(busyRes.restoredPrevious, true);
+      assert.equal(busyRes.facingMode, "user");
+      assert.equal(busyRes.deviceId, "cam-front");
+      assert.equal(simBusy.getActiveCount(), 1, "Previous front camera must be restored live");
+
+      // Desktop explicit device switching via Hardware Settings dropdown
+      const simDeviceSelect = createSimulatedVideoTrack({
+        deviceId: "usb-cam-1",
+        facingMode: "user",
+        label: "Logitech C920",
+        onRestart: async (opts) => {
+          const dev = opts["deviceId"] as { exact?: string } | undefined;
+          if (dev?.exact === "usb-cam-2") {
+            return { deviceId: "usb-cam-2", label: "Rear Studio Cam" };
+          }
+          return { deviceId: "usb-cam-1", facingMode: "user", label: "Logitech C920" };
+        },
+      });
+      const selectRes = await switchVideoDeviceSafely({
+        videoTrack: simDeviceSelect.track,
+        deviceId: "usb-cam-2",
+        previousDeviceId: "usb-cam-1",
+        previousMode: "user",
+        deviceLabel: "Rear Studio Cam",
+      });
+      assert.equal(selectRes.success, true);
+      assert.equal(selectRes.deviceId, "usb-cam-2");
+      assert.equal(selectRes.facingMode, "environment");
+      assert.equal(simDeviceSelect.getActiveCount(), 1);
+
+      // Paused camera switching queues deviceId without turning on hardware prematurely
+      const simMuted = createSimulatedVideoTrack({
+        deviceId: "cam-front",
+        facingMode: "user",
+        label: "Front Camera",
+        isMuted: true,
+        onRestart: async () => ({
+          deviceId: "cam-back",
+          facingMode: "environment",
+          label: "Back Camera",
+        }),
+      });
+      const mutedRes = await switchCameraWithFallback({
+        videoTrack: simMuted.track,
+        targetMode: "environment",
+        previousMode: "user",
+        previousDeviceId: "cam-front",
+        enumerateCameras: async () => cameras,
+      });
+      assert.equal(mutedRes.success, true);
+      assert.equal(mutedRes.deviceId, "cam-back");
+      assert.equal(mutedRes.facingMode, "environment");
+      assert.equal(simMuted.restartCalls.length, 0);
+      assert.equal(simMuted.setDeviceIdCalls.length, 1);
+
+      // Verify helper utilities directly
+      assert.equal(inferFacingModeFromCamera(null, "Back Camera", "user"), "environment");
+      assert.equal(
+        classifyCameraError(Object.assign(new Error("x"), { name: "NotFoundError" }), "environment")
+          .kind,
+        "unavailable",
+      );
+    });
+  });
+
+  describe("11. Task 13: FaceTube Live Desktop, Mobile Web & Android WebView Screen Sharing Tests (Static + Unit Simulation)", () => {
+    function createSimulatedLiveKitParticipant(options?: {
+      onEnable?: (
+        opts?: Record<string, unknown>,
+      ) => Promise<{ includeAudio?: boolean } | void> | { includeAudio?: boolean } | void;
+      onDisable?: () => Promise<void> | void;
+    }) {
+      const SCREEN_SHARE_SOURCE = "screen_share";
+      const SCREEN_AUDIO_SOURCE = "screen_share_audio";
+      const CAMERA_SOURCE = "camera";
+      const MIC_SOURCE = "microphone";
+
+      const publications = new Map<unknown, ScreenSharePublicationLike>();
+      const cameraTrack: ScreenShareTrackLike = {
+        kind: "video",
+        source: CAMERA_SOURCE,
+        isMuted: false,
+        mediaStreamTrack: { readyState: "live" },
+      };
+      const micTrack: ScreenShareTrackLike = {
+        kind: "audio",
+        source: MIC_SOURCE,
+        isMuted: false,
+        mediaStreamTrack: { readyState: "live" },
+      };
+      publications.set(CAMERA_SOURCE, { track: cameraTrack });
+      publications.set(MIC_SOURCE, { track: micTrack });
+
+      const enableCalls: Array<Record<string, unknown> | undefined> = [];
+      let disableCalls = 0;
+      let roomDisconnectCalls = 0;
+      const stoppedTracks: string[] = [];
+      const detachedTracks: string[] = [];
+      const unpublishedTracks: string[] = [];
+      const endedListeners: Array<() => void> = [];
+
+      const createTrack = (source: string, kind: "video" | "audio"): ScreenShareTrackLike => {
+        const state = { readyState: "live" };
+        const track: ScreenShareTrackLike = {
+          kind,
+          source,
+          isMuted: false,
+          mediaStreamTrack: {
+            get readyState() {
+              return state.readyState;
+            },
+            addEventListener(event, listener) {
+              if (event === "ended") endedListeners.push(listener);
+            },
+          },
+          detach() {
+            detachedTracks.push(source);
+          },
+          stop() {
+            if (state.readyState !== "ended") {
+              state.readyState = "ended";
+              stoppedTracks.push(source);
+            }
+          },
+        };
+        return track;
+      };
+
+      const participant: ScreenShareParticipantAdapter = {
+        getTrackPublication(source: unknown) {
+          return publications.get(source);
+        },
+        async setScreenShareEnabled(enabled: boolean, opts?: Record<string, unknown>) {
+          if (enabled) {
+            enableCalls.push(opts);
+            const outcome = (await options?.onEnable?.(opts)) ?? { includeAudio: true };
+            const videoTrack = createTrack(SCREEN_SHARE_SOURCE, "video");
+            const pub: ScreenSharePublicationLike = { track: videoTrack };
+            publications.set(SCREEN_SHARE_SOURCE, pub);
+            if (outcome && "includeAudio" in outcome && outcome.includeAudio !== false) {
+              publications.set(SCREEN_AUDIO_SOURCE, {
+                track: createTrack(SCREEN_AUDIO_SOURCE, "audio"),
+              });
+            }
+            return pub;
+          }
+
+          disableCalls += 1;
+          await options?.onDisable?.();
+          for (const src of [SCREEN_SHARE_SOURCE, SCREEN_AUDIO_SOURCE]) {
+            const pub = publications.get(src);
+            if (pub?.track) {
+              pub.track.stop?.();
+              pub.track.detach?.();
+              publications.delete(src);
+              unpublishedTracks.push(src);
+            }
+          }
+          return undefined;
+        },
+        async unpublishTrack(track: unknown) {
+          const typed = track as ScreenShareTrackLike | undefined;
+          if (typed?.source) {
+            unpublishedTracks.push(String(typed.source));
+            publications.delete(typed.source);
+          }
+        },
+      };
+
+      return {
+        SCREEN_SHARE_SOURCE,
+        SCREEN_AUDIO_SOURCE,
+        CAMERA_SOURCE,
+        MIC_SOURCE,
+        participant,
+        publications,
+        cameraTrack,
+        micTrack,
+        enableCalls,
+        getDisableCalls: () => disableCalls,
+        getRoomDisconnectCalls: () => roomDisconnectCalls,
+        simulateDisconnect: () => {
+          roomDisconnectCalls += 1;
+        },
+        triggerBrowserStopSharing: () => {
+          const screenPub = publications.get(SCREEN_SHARE_SOURCE);
+          screenPub?.track?.stop?.();
+          for (const fn of endedListeners) {
+            fn();
+          }
+        },
+        getStoppedTracks: () => stoppedTracks,
+        getDetachedTracks: () => detachedTracks,
+        getUnpublishedTracks: () => unpublishedTracks,
+      };
+    }
+
+    it("[Static] 1. LiveKitBroadcasterStudio and LiveKitViewerPlayer implement screen-share controls, room preservation, cleanup, and ScreenShare->Camera viewer fallback", () => {
+      const studioSource = fs.readFileSync(
+        path.resolve(process.cwd(), "src/components/live/LiveKitBroadcasterStudio.tsx"),
+        "utf-8",
+      );
+      const viewerSource = fs.readFileSync(
+        path.resolve(process.cwd(), "src/components/live/LiveKitViewerPlayer.tsx"),
+        "utf-8",
+      );
+
+      // Studio exposes Screen Share control, HUD indicator, un-mirrored preview, and cleanup lifecycle
+      assert.match(studioSource, /toggleScreenShare/);
+      assert.match(studioSource, /Share Screen/);
+      assert.match(studioSource, /Stop Share/);
+      assert.match(studioSource, /Sharing Screen/);
+      assert.match(studioSource, /detectScreenShareSupport\(/);
+      assert.match(studioSource, /startScreenShareSafely(?:<[^>]+>)?\(/);
+      assert.match(studioSource, /stopScreenShareSafely(?:<[^>]+>)?\(/);
+      assert.match(studioSource, /stopActiveScreenShareTrack\(/);
+      assert.match(studioSource, /restoreCameraAfterScreenShare/);
+      assert.match(studioSource, /RoomEvent\.LocalTrackUnpublished/);
+      assert.match(studioSource, /Track\.Source\.ScreenShare/);
+      assert.match(studioSource, /!isScreenSharing && facingMode === "user"/);
+
+      // Viewer prioritizes ScreenShare video while published and re-syncs to Camera upon unsubscribe
+      assert.match(viewerSource, /Track\.Source\.ScreenShare/);
+      assert.match(viewerSource, /Track\.Source\.Camera/);
+      assert.match(viewerSource, /syncRemoteMediaTracks/);
+      assert.match(viewerSource, /Track\.Source\.Microphone/);
+    });
+
+    it("[Unit Simulation] 2. Starts and stops screen share cleanly, publishing ScreenShare (+ audio) and releasing tracks without disconnecting LiveKit room", async () => {
+      const sim = createSimulatedLiveKitParticipant();
+      const supportEnv = {
+        mediaDevices: { getDisplayMedia: async () => ({}) },
+        userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        isSecureContext: true,
+        isNativeCapacitorAndroid: false,
+      };
+
+      const startRes = await startScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        screenAudioSource: sim.SCREEN_AUDIO_SOURCE,
+        supportEnv,
+      });
+
+      assert.equal(startRes.success, true);
+      assert.equal(startRes.active, true);
+      assert.equal(startRes.alreadyActive, false);
+      assert.ok(sim.publications.get(sim.SCREEN_SHARE_SOURCE)?.track);
+      assert.ok(sim.publications.get(sim.SCREEN_AUDIO_SOURCE)?.track);
+      assert.equal(sim.cameraTrack.mediaStreamTrack?.readyState, "live");
+      assert.equal(sim.micTrack.mediaStreamTrack?.readyState, "live");
+      assert.equal(sim.getRoomDisconnectCalls(), 0);
+
+      // Stop screen sharing
+      const stopRes = await stopScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        screenAudioSource: sim.SCREEN_AUDIO_SOURCE,
+      });
+
+      assert.equal(stopRes.success, true);
+      assert.equal(stopRes.active, false);
+      assert.equal(sim.getDisableCalls(), 1);
+      assert.equal(sim.publications.has(sim.SCREEN_SHARE_SOURCE), false);
+      assert.equal(sim.publications.has(sim.SCREEN_AUDIO_SOURCE), false);
+      assert.ok(sim.getStoppedTracks().includes(sim.SCREEN_SHARE_SOURCE));
+      assert.ok(sim.getStoppedTracks().includes(sim.SCREEN_AUDIO_SOURCE));
+      assert.equal(sim.cameraTrack.mediaStreamTrack?.readyState, "live");
+      assert.equal(sim.micTrack.mediaStreamTrack?.readyState, "live");
+      assert.equal(sim.getRoomDisconnectCalls(), 0);
+    });
+
+    it("[Unit Simulation] 3. Prevents duplicate screen tracks when already active and cleans up stale ended tracks before restarting", async () => {
+      const sim = createSimulatedLiveKitParticipant();
+      const supportEnv = {
+        mediaDevices: { getDisplayMedia: async () => ({}) },
+        userAgent: "Mozilla/5.0 (X11; Linux x86_64)",
+        isSecureContext: true,
+      };
+
+      const first = await startScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        screenAudioSource: sim.SCREEN_AUDIO_SOURCE,
+        supportEnv,
+      });
+      assert.equal(first.success, true);
+      assert.equal(sim.enableCalls.length, 1);
+
+      // Duplicate click while live -> does NOT invoke setScreenShareEnabled a second time
+      const duplicate = await startScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        screenAudioSource: sim.SCREEN_AUDIO_SOURCE,
+        supportEnv,
+      });
+      assert.equal(duplicate.success, true);
+      assert.equal(duplicate.alreadyActive, true);
+      assert.equal(sim.enableCalls.length, 1);
+
+      // Simulate browser ending the track without explicit UI click -> stale publication gets cleaned and restarted cleanly
+      sim.triggerBrowserStopSharing();
+      assert.equal(
+        sim.publications.get(sim.SCREEN_SHARE_SOURCE)?.track?.mediaStreamTrack?.readyState,
+        "ended",
+      );
+
+      const restarted = await startScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        screenAudioSource: sim.SCREEN_AUDIO_SOURCE,
+        supportEnv,
+      });
+      assert.equal(restarted.success, true);
+      assert.equal(restarted.alreadyActive, false);
+      assert.equal(sim.getDisableCalls(), 1);
+      assert.equal(sim.enableCalls.length, 2);
+      assert.equal(
+        sim.publications.get(sim.SCREEN_SHARE_SOURCE)?.track?.mediaStreamTrack?.readyState,
+        "live",
+      );
+    });
+
+    it("[Unit Simulation] 4. Retries without screen audio on constraint/support errors and cleans up if browser Stop Sharing ends track externally", async () => {
+      const sim = createSimulatedLiveKitParticipant({
+        onEnable: async (opts) => {
+          if (opts?.["audio"] === true) {
+            throw Object.assign(new Error("Audio capture not supported on mobile tab share"), {
+              name: "NotSupportedError",
+            });
+          }
+          return { includeAudio: false };
+        },
+      });
+      const supportEnv = {
+        mediaDevices: { getDisplayMedia: async () => ({}) },
+        userAgent:
+          "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/128.0.0.0 Mobile",
+        isSecureContext: true,
+      };
+
+      const res = await startScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        screenAudioSource: sim.SCREEN_AUDIO_SOURCE,
+        supportEnv,
+      });
+
+      assert.equal(res.success, true);
+      assert.equal(res.active, true);
+      assert.equal(sim.enableCalls.length, 2);
+      assert.equal(sim.enableCalls[0]?.["audio"], true);
+      assert.equal(sim.enableCalls[1]?.["audio"], false);
+      assert.ok(sim.publications.get(sim.SCREEN_SHARE_SOURCE)?.track);
+
+      // Simulate external stop and verify stopScreenShareSafely removes publication cleanly
+      sim.triggerBrowserStopSharing();
+      const cleanupRes = await stopScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        screenAudioSource: sim.SCREEN_AUDIO_SOURCE,
+      });
+      assert.equal(cleanupRes.success, true);
+      assert.equal(sim.publications.has(sim.SCREEN_SHARE_SOURCE), false);
+      assert.equal(sim.getRoomDisconnectCalls(), 0);
+    });
+
+    it("[Unit Simulation] 5. Handles user cancellation (AbortError) and permission denial (NotAllowedError) gracefully without dropping camera or mic", async () => {
+      const cancelSim = createSimulatedLiveKitParticipant({
+        onEnable: async () => {
+          throw Object.assign(new Error("User cancelled screen picker"), { name: "AbortError" });
+        },
+      });
+      const supportEnv = {
+        mediaDevices: { getDisplayMedia: async () => ({}) },
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        isSecureContext: true,
+      };
+
+      const cancelRes = await startScreenShareSafely({
+        participant: cancelSim.participant,
+        screenShareSource: cancelSim.SCREEN_SHARE_SOURCE,
+        supportEnv,
+      });
+      assert.equal(cancelRes.success, false);
+      assert.equal(cancelRes.active, false);
+      assert.equal(cancelRes.reason, "cancelled");
+      assert.equal(cancelSim.enableCalls.length, 1, "Must not retry after user cancellation");
+      assert.equal(cancelSim.cameraTrack.mediaStreamTrack?.readyState, "live");
+      assert.equal(cancelSim.micTrack.mediaStreamTrack?.readyState, "live");
+      assert.equal(cancelSim.getRoomDisconnectCalls(), 0);
+
+      const deniedSim = createSimulatedLiveKitParticipant({
+        onEnable: async () => {
+          throw Object.assign(new Error("Permission denied by system"), {
+            name: "NotAllowedError",
+          });
+        },
+      });
+      const deniedRes = await startScreenShareSafely({
+        participant: deniedSim.participant,
+        screenShareSource: deniedSim.SCREEN_SHARE_SOURCE,
+        supportEnv,
+      });
+      assert.equal(deniedRes.success, false);
+      assert.equal(deniedRes.active, false);
+      assert.equal(deniedRes.reason, "permission");
+      assert.equal(deniedSim.enableCalls.length, 1, "Must not retry after permission denial");
+      assert.equal(deniedSim.cameraTrack.mediaStreamTrack?.readyState, "live");
+      assert.equal(deniedSim.micTrack.mediaStreamTrack?.readyState, "live");
+      assert.equal(deniedSim.getRoomDisconnectCalls(), 0);
+
+      assert.equal(
+        classifyScreenShareError(Object.assign(new Error("Busy"), { name: "NotReadableError" }))
+          .kind,
+        "failed",
+      );
+    });
+
+    it("[Unit Simulation] 6. Accurately detects supported browsers, unsupported mobile WebViews, insecure HTTP contexts, and native Android Capacitor WebView", async () => {
+      // Supported desktop / mobile web browser
+      const supported = detectScreenShareSupport({
+        mediaDevices: { getDisplayMedia: async () => ({}) },
+        userAgent: "Mozilla/5.0 (Linux; Android 14) Chrome/126.0.0.0 Mobile",
+        isSecureContext: true,
+      });
+      assert.equal(supported.supported, true);
+      assert.equal(supported.reason, "supported");
+
+      // Insecure non-HTTPS context
+      const insecure = detectScreenShareSupport({
+        mediaDevices: { getDisplayMedia: async () => ({}) },
+        userAgent: "Mozilla/5.0",
+        isSecureContext: false,
+      });
+      assert.equal(insecure.supported, false);
+      assert.equal(insecure.reason, "insecure-context");
+
+      // Native Capacitor Android WebView (FaceTubeAndroidApp/1.0) without native MediaProjection bridge
+      const androidApp = detectScreenShareSupport({
+        mediaDevices: {},
+        userAgent:
+          "Mozilla/5.0 (Linux; Android 14; wv) AppleWebKit/537.36 Chrome/126.0.0.0 Mobile FaceTubeAndroidApp/1.0",
+        isSecureContext: true,
+      });
+      assert.equal(androidApp.supported, false);
+      assert.equal(androidApp.isNativeAndroidWebView, true);
+      assert.equal(androidApp.reason, "native-android-unsupported");
+
+      // Regular unsupported mobile browser (e.g. iOS WebView / older mobile Safari)
+      const mobileBrowserUnsupported = detectScreenShareSupport({
+        mediaDevices: {},
+        userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile",
+        isSecureContext: true,
+      });
+      assert.equal(mobileBrowserUnsupported.supported, false);
+      assert.equal(mobileBrowserUnsupported.isNativeAndroidWebView, false);
+      assert.equal(mobileBrowserUnsupported.reason, "unsupported-browser");
+
+      // Calling startScreenShareSafely inside unsupported Android WebView fails cleanly without throwing
+      const sim = createSimulatedLiveKitParticipant();
+      const attempt = await startScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        supportEnv: {
+          mediaDevices: {},
+          userAgent: "FaceTubeAndroidApp/1.0",
+          isSecureContext: true,
+        },
+      });
+      assert.equal(attempt.success, false);
+      assert.equal(attempt.reason, "unsupported");
+      assert.equal(sim.enableCalls.length, 0);
+      assert.equal(sim.getRoomDisconnectCalls(), 0);
+    });
+
+    it("[Unit Simulation] 7. Keeps camera switching (Front/Back) and microphone active while screen sharing is ongoing", async () => {
+      const sim = createSimulatedLiveKitParticipant();
+      await startScreenShareSafely({
+        participant: sim.participant,
+        screenShareSource: sim.SCREEN_SHARE_SOURCE,
+        supportEnv: {
+          mediaDevices: { getDisplayMedia: async () => ({}) },
+          userAgent: "Mozilla/5.0 (Linux; Android 14) Chrome/128.0.0.0 Mobile",
+          isSecureContext: true,
+        },
+      });
+
+      const cameras: CameraDeviceLike[] = [
+        { deviceId: "cam-front", kind: "videoinput", label: "Front Camera" },
+        { deviceId: "cam-back", kind: "videoinput", label: "Back Camera" },
+      ];
+      let camState = {
+        deviceId: "cam-front",
+        facingMode: "user" as "user" | "environment",
+        label: "Front Camera",
+        restarts: 0,
+      };
+      const camTrack: VideoTrackAdapter = {
+        isMuted: false,
+        mediaStreamTrack: {
+          getSettings: () => ({
+            deviceId: camState.deviceId,
+            facingMode: camState.facingMode,
+          }),
+          get label() {
+            return camState.label;
+          },
+          get readyState() {
+            return "live";
+          },
+        },
+        async restartTrack() {
+          camState = {
+            deviceId: "cam-back",
+            facingMode: "environment",
+            label: "Back Camera",
+            restarts: camState.restarts + 1,
+          };
+        },
+      };
+
+      const flipRes = await switchCameraWithFallback({
+        videoTrack: camTrack,
+        targetMode: "environment",
+        previousMode: "user",
+        previousDeviceId: "cam-front",
+        enumerateCameras: async () => cameras,
+      });
+
+      assert.equal(flipRes.success, true);
+      assert.equal(flipRes.facingMode, "environment");
+      assert.equal(flipRes.deviceId, "cam-back");
+      assert.equal(camState.restarts, 1);
+      // Screen share and mic remain live throughout camera flip
+      assert.equal(
+        sim.publications.get(sim.SCREEN_SHARE_SOURCE)?.track?.mediaStreamTrack?.readyState,
+        "live",
+      );
+      assert.equal(sim.micTrack.mediaStreamTrack?.readyState, "live");
     });
   });
 });

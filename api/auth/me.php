@@ -7,6 +7,12 @@
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../response.php';
 
+$suppliedBearerToken = getBearerToken();
+
+if ($suppliedBearerToken === null || trim($suppliedBearerToken) === '') {
+    jsonResponse(['authenticated' => false, 'user' => null], 200);
+}
+
 $isConnectionUnavailable = static function (Throwable $e): bool {
     if (function_exists('isDatabaseConnectionUnavailableError')) {
         return isDatabaseConnectionUnavailableError($e);
@@ -20,11 +26,6 @@ $isConnectionUnavailable = static function (Throwable $e): bool {
 };
 
 $pdo = getDatabaseConnection();
-$suppliedBearerToken = getBearerToken();
-
-if ($suppliedBearerToken === null) {
-    jsonResponse(['authenticated' => false, 'user' => null], 200);
-}
 
 $user = null;
 try {

@@ -114,24 +114,85 @@ export function LiveKitViewerPlayer({
       });
       roomRef.current = room;
 
+      const syncRemoteMediaTracks = () => {
+        let screenShareTrack: RemoteTrack | null = null;
+        let cameraTrack: RemoteTrack | null = null;
+        let fallbackVideoTrack: RemoteTrack | null = null;
+        let micAudioTrack: RemoteTrack | null = null;
+        let fallbackAudioTrack: RemoteTrack | null = null;
+
+        for (const participant of room.remoteParticipants.values()) {
+          for (const pub of participant.trackPublications.values()) {
+            if (!pub.isSubscribed || !pub.track) continue;
+            if (pub.track.kind === Track.Kind.Video) {
+              if (pub.source === Track.Source.ScreenShare && !screenShareTrack) {
+                screenShareTrack = pub.track;
+              } else if (pub.source === Track.Source.Camera && !cameraTrack) {
+                cameraTrack = pub.track;
+              } else if (!fallbackVideoTrack) {
+                fallbackVideoTrack = pub.track;
+              }
+            } else if (pub.track.kind === Track.Kind.Audio) {
+              if (pub.source === Track.Source.Microphone && !micAudioTrack) {
+                micAudioTrack = pub.track;
+              } else if (!fallbackAudioTrack) {
+                fallbackAudioTrack = pub.track;
+              }
+            }
+          }
+        }
+
+        const nextVideoTrack = screenShareTrack ?? cameraTrack ?? fallbackVideoTrack;
+        if (activeVideoTrackRef.current !== nextVideoTrack) {
+          if (activeVideoTrackRef.current) {
+            try {
+              if (videoRef.current) {
+                activeVideoTrackRef.current.detach(videoRef.current);
+              } else {
+                activeVideoTrackRef.current.detach();
+              }
+            } catch (_e) {
+              // Ignore
+            }
+          }
+          activeVideoTrackRef.current = nextVideoTrack;
+          if (nextVideoTrack && videoRef.current) {
+            nextVideoTrack.attach(videoRef.current);
+          }
+        }
+        setHasRemoteVideo(Boolean(nextVideoTrack));
+
+        const nextAudioTrack = micAudioTrack ?? fallbackAudioTrack;
+        if (activeAudioTrackRef.current !== nextAudioTrack) {
+          if (activeAudioTrackRef.current) {
+            try {
+              if (audioRef.current) {
+                activeAudioTrackRef.current.detach(audioRef.current);
+              } else {
+                activeAudioTrackRef.current.detach();
+              }
+            } catch (_e) {
+              // Ignore
+            }
+          }
+          activeAudioTrackRef.current = nextAudioTrack;
+          if (nextAudioTrack && audioRef.current) {
+            nextAudioTrack.attach(audioRef.current);
+          }
+        }
+        setHasRemoteAudio(Boolean(nextAudioTrack));
+      };
+
       // Track Connection State Changes
       room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
         setConnectionState(state);
       });
 
-      // Handle Remote Track Subscriptions
+      // Handle Remote Track Subscriptions (prioritize ScreenShare while active, fall back to Camera)
       room.on(
         RoomEvent.TrackSubscribed,
-        (track: RemoteTrack, _publication: any, _participant: RemoteParticipant) => {
-          if (track.kind === Track.Kind.Video && videoRef.current) {
-            activeVideoTrackRef.current = track;
-            track.attach(videoRef.current);
-            setHasRemoteVideo(true);
-          } else if (track.kind === Track.Kind.Audio && audioRef.current) {
-            activeAudioTrackRef.current = track;
-            track.attach(audioRef.current);
-            setHasRemoteAudio(true);
-          }
+        (_track: RemoteTrack, _publication: unknown, _participant: RemoteParticipant) => {
+          syncRemoteMediaTracks();
         },
       );
 
@@ -142,17 +203,19 @@ export function LiveKitViewerPlayer({
         } catch (_e) {
           // Ignore
         }
-        if (track.kind === Track.Kind.Video) {
-          setHasRemoteVideo(false);
+        if (activeVideoTrackRef.current === track) {
           activeVideoTrackRef.current = null;
-        } else if (track.kind === Track.Kind.Audio) {
-          setHasRemoteAudio(false);
+        }
+        if (activeAudioTrackRef.current === track) {
           activeAudioTrackRef.current = null;
         }
+        syncRemoteMediaTracks();
       });
 
       // Handle Disconnections
       room.on(RoomEvent.Disconnected, () => {
+        activeVideoTrackRef.current = null;
+        activeAudioTrackRef.current = null;
         setConnectionState(ConnectionState.Disconnected);
         setHasRemoteVideo(false);
         setHasRemoteAudio(false);
@@ -162,21 +225,7 @@ export function LiveKitViewerPlayer({
       await room.connect(tokenRes.url, tokenRes.token);
 
       // Attach any tracks that were already published before this viewer connected
-      for (const participant of room.remoteParticipants.values()) {
-        for (const pub of participant.trackPublications.values()) {
-          if (pub.isSubscribed && pub.track) {
-            if (pub.track.kind === Track.Kind.Video && videoRef.current) {
-              activeVideoTrackRef.current = pub.track;
-              pub.track.attach(videoRef.current);
-              setHasRemoteVideo(true);
-            } else if (pub.track.kind === Track.Kind.Audio && audioRef.current) {
-              activeAudioTrackRef.current = pub.track;
-              pub.track.attach(audioRef.current);
-              setHasRemoteAudio(true);
-            }
-          }
-        }
-      }
+      syncRemoteMediaTracks();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       setErrorMessage(msg);

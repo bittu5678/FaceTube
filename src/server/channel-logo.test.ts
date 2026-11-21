@@ -846,7 +846,9 @@ describe("FaceTube Task 5B: Channel Logo End-to-End Tests", () => {
         path.resolve(process.cwd(), "api/users/profile.php"),
         "utf-8",
       );
-      assert.match(profilePhp, /requireAuthUser\s*\(\$pdo/);
+      assert.match(profilePhp, /getAuthUser\s*\(\s*\$pdo\s*,\s*true\s*\)/);
+      assert.match(profilePhp, /401/);
+      assert.match(profilePhp, /403/);
       assert.match(profilePhp, /validateProfileMediaUrl/);
       assert.match(profilePhp, /sanitizePublicProfile/);
       assert.match(profilePhp, /500/);
@@ -2970,6 +2972,1527 @@ describe("FaceTube Task 5B: Channel Logo End-to-End Tests", () => {
         }
         resetInMemoryStore();
       }
+    });
+  });
+
+  describe("12. Task 5J-V4-T: PHP api/users/profile.php GET Fail-Closed & Privacy Tests (Static + TS Simulation)", () => {
+    interface PhpUserRow {
+      id: string;
+      user_id: string;
+      name: string;
+      mobile: string;
+      email: string;
+      role: string;
+      referral_code: string;
+      avatar_url: string | null;
+      channel_logo_url: string | null;
+      channel_name: string | null;
+      channel_description: string | null;
+      created_at: string;
+    }
+
+    function loadProfilePhpSources() {
+      const profilePhp = fs.readFileSync(
+        path.resolve(process.cwd(), "api/users/profile.php"),
+        "utf-8",
+      );
+      const responsePhp = fs.readFileSync(path.resolve(process.cwd(), "api/response.php"), "utf-8");
+      return { profilePhp, responsePhp };
+    }
+
+    // TypeScript simulation harness mirroring api/users/profile.php GET control flow
+    // (static/simulation coverage only — does not invoke a live PHP runtime).
+    function createProfileGetHarness(options: {
+      method?: string;
+      query?: { userId?: unknown; user_id?: unknown; identifier?: unknown };
+      bearerToken?: string | null;
+      dbConnectError?: { status: 500 | 503; error: string };
+      authBehavior?:
+        | { kind: "none" }
+        | { kind: "invalid" }
+        | { kind: "user"; user: PhpUserRow }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+      profileLookupBehavior?:
+        | { kind: "rows"; rows: PhpUserRow[] }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+    }) {
+      const { responsePhp } = loadProfilePhpSources();
+      const fnStart = responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+      const fnBlock = responsePhp.slice(fnStart, fnStart + 900);
+      const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+      const driverCodes = (codeMatch?.[1] || "")
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => !Number.isNaN(n));
+      const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+      const msgRegex = new RegExp(regexMatch?.[1] || "", "i");
+
+      const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
+        sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+      const readStringField = (val: unknown, fallback = "") => {
+        if (typeof val === "string" || typeof val === "number") {
+          return String(val).trim();
+        }
+        return fallback;
+      };
+
+      const toAbsLogo = (val: string | null) => {
+        if (!val || val.trim() === "") return val;
+        if (/^https?:\/\//i.test(val.trim())) return val.trim();
+        const clean = val.trim().replace(/^\/+/, "");
+        if (clean.startsWith("uploads/")) return `https://api.facetube.online/${clean}`;
+        return `https://api.facetube.online/uploads/logos/${clean}`;
+      };
+
+      const sanitizePublicProfile = (row: PhpUserRow) => ({
+        id: row.id,
+        user_id: row.user_id,
+        name: row.name,
+        avatar_url: row.avatar_url ?? null,
+        channel_logo_url: row.channel_logo_url ?? null,
+        channel_name: row.channel_name ?? null,
+        channel_description: row.channel_description ?? null,
+        created_at: row.created_at,
+      });
+
+      const serverLogs: string[] = [];
+      let rollbackCount = 0;
+      let profileQueryExecuted = false;
+      const safeRollback = () => {
+        rollbackCount += 1;
+      };
+
+      const method = options.method ?? "GET";
+      if (method !== "GET" && method !== "POST") {
+        return {
+          status: 405,
+          body: { success: false, error: "Method Not Allowed" },
+          serverLogs,
+          rollbackCount,
+          profileQueryExecuted,
+        };
+      }
+
+      if (options.dbConnectError) {
+        return {
+          status: options.dbConnectError.status,
+          body: { success: false, error: options.dbConnectError.error },
+          serverLogs,
+          rollbackCount,
+          profileQueryExecuted,
+        };
+      }
+
+      const q = options.query ?? {};
+      const raw = readStringField(q.userId ?? q.user_id ?? q.identifier ?? "");
+      const suppliedBearerToken = options.bearerToken ?? null;
+
+      let authUser: PhpUserRow | null = null;
+      const authBehavior = options.authBehavior ?? { kind: "none" };
+      try {
+        if (suppliedBearerToken !== null && suppliedBearerToken.trim() !== "") {
+          if (authBehavior.kind === "user") {
+            authUser = authBehavior.user;
+          } else if (authBehavior.kind === "db_error") {
+            throw authBehavior;
+          } else {
+            authUser = null;
+          }
+        } else if (authBehavior.kind === "db_error") {
+          // Even if triggered internally, verify catch behavior
+          authUser = null;
+        }
+      } catch (e: unknown) {
+        safeRollback();
+        const err = e as {
+          sqlState?: string;
+          driverCode?: number;
+          message?: string;
+          isRuntime?: boolean;
+        };
+        serverLogs.push(`[users/profile.php][AUTH] Database error: ${err.message || ""}`);
+        if (
+          !err.isRuntime &&
+          isConnUnavailable(err.sqlState || "", err.driverCode || 0, err.message || "")
+        ) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable during authentication check.",
+            },
+            serverLogs,
+            rollbackCount,
+            profileQueryExecuted,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            error: "Database error during authentication check.",
+          },
+          serverLogs,
+          rollbackCount,
+          profileQueryExecuted,
+        };
+      }
+
+      if (
+        suppliedBearerToken !== null &&
+        suppliedBearerToken.trim() !== "" &&
+        (!authUser || !authUser.user_id)
+      ) {
+        return {
+          status: 401,
+          body: {
+            success: false,
+            error: "Invalid or expired authentication session. Please log in again.",
+          },
+          serverLogs,
+          rollbackCount,
+          profileQueryExecuted,
+        };
+      }
+
+      if (raw === "") {
+        if (authUser) {
+          return {
+            status: 200,
+            body: { success: true, profile: authUser },
+            serverLogs,
+            rollbackCount,
+            profileQueryExecuted,
+          };
+        }
+        return {
+          status: 400,
+          body: { success: false, error: "User identifier required." },
+          serverLogs,
+          rollbackCount,
+          profileQueryExecuted,
+        };
+      }
+
+      try {
+        profileQueryExecuted = true;
+        const lookup = options.profileLookupBehavior ?? { kind: "rows", rows: [] };
+        if (lookup.kind === "db_error") {
+          throw lookup;
+        }
+        const match = lookup.rows.find(
+          (r) =>
+            r.user_id.toUpperCase() === raw.toUpperCase() ||
+            r.email.toLowerCase() === raw.toLowerCase() ||
+            r.id === raw,
+        );
+        if (!match) {
+          return {
+            status: 404,
+            body: { success: false, error: "Profile not found." },
+            serverLogs,
+            rollbackCount,
+            profileQueryExecuted,
+          };
+        }
+
+        const hydrated: PhpUserRow = {
+          ...match,
+          channel_logo_url: match.channel_logo_url
+            ? (toAbsLogo(match.channel_logo_url) ?? null)
+            : match.channel_logo_url,
+        };
+
+        const authRole = (authUser?.role || "").trim().toLowerCase();
+        const authPublicId = (authUser?.user_id || "").trim();
+        const authInternalId = (authUser?.id || "").trim();
+        const targetPublicId = (hydrated.user_id || "").trim();
+        const targetInternalId = (hydrated.id || "").trim();
+
+        const isSelfOrAdmin = Boolean(
+          authUser &&
+          (authRole === "admin" ||
+            (authPublicId !== "" &&
+              targetPublicId !== "" &&
+              authPublicId.toLowerCase() === targetPublicId.toLowerCase()) ||
+            (authInternalId !== "" &&
+              targetInternalId !== "" &&
+              authInternalId.toLowerCase() === targetInternalId.toLowerCase())),
+        );
+
+        return {
+          status: 200,
+          body: {
+            success: true,
+            profile: isSelfOrAdmin ? hydrated : sanitizePublicProfile(hydrated),
+          },
+          serverLogs,
+          rollbackCount,
+          profileQueryExecuted,
+        };
+      } catch (e: unknown) {
+        safeRollback();
+        const err = e as {
+          sqlState?: string;
+          driverCode?: number;
+          message?: string;
+          isRuntime?: boolean;
+        };
+        serverLogs.push(`[users/profile.php][GET] Database error: ${err.message || ""}`);
+        if (
+          !err.isRuntime &&
+          isConnUnavailable(err.sqlState || "", err.driverCode || 0, err.message || "")
+        ) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable while loading profile.",
+            },
+            serverLogs,
+            rollbackCount,
+            profileQueryExecuted,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            error: "Failed to load profile due to a server error.",
+          },
+          serverLogs,
+          rollbackCount,
+          profileQueryExecuted,
+        };
+      }
+    }
+
+    const aliceRow: PhpUserRow = {
+      id: "uuid-alice-1",
+      user_id: "FT111111",
+      name: "Alice Creator",
+      mobile: "+1 555-111-1111",
+      email: "alice@facetube.online",
+      role: "user",
+      referral_code: "ALICE50",
+      avatar_url: null,
+      channel_logo_url: "/uploads/logos/alice.png",
+      channel_name: "Alice Channel",
+      channel_description: "Creator channel bio",
+      created_at: "2026-10-01T00:00:00Z",
+    };
+
+    const bobRow: PhpUserRow = {
+      id: "uuid-bob-2",
+      user_id: "FT222222",
+      name: "Bob Creator",
+      mobile: "+1 555-222-2222",
+      email: "bob@facetube.online",
+      role: "user",
+      referral_code: "BOB99",
+      avatar_url: "https://cdn.example.com/bob-avatar.png",
+      channel_logo_url: "/uploads/logos/bob.png",
+      channel_name: "Bob Studio",
+      channel_description: "Bob studio description",
+      created_at: "2026-10-05T00:00:00Z",
+    };
+
+    const adminRow: PhpUserRow = {
+      id: "uuid-admin-9",
+      user_id: "FT900001",
+      name: "Platform Admin",
+      mobile: "+1 555-999-0000",
+      email: "admin@facetube.online",
+      role: "admin",
+      referral_code: "ADM01",
+      avatar_url: null,
+      channel_logo_url: null,
+      channel_name: "FaceTube Admin",
+      channel_description: null,
+      created_at: "2026-09-01T00:00:00Z",
+    };
+
+    it("[Static] 1. api/users/profile.php GET enforces fail-closed getAuthUser($pdo, true), 401 non-downgrade, and sanitized 503/500 responses", () => {
+      const { profilePhp, responsePhp } = loadProfilePhpSources();
+
+      // Method guard runs before DB initialization
+      const methodIdx = profilePhp.indexOf("$method = $_SERVER['REQUEST_METHOD']");
+      const dbIdx = profilePhp.indexOf("$pdo = getDatabaseConnection()");
+      assert.ok(methodIdx !== -1 && dbIdx !== -1 && methodIdx < dbIdx);
+
+      // GET branch isolates auth DB errors via getAuthUser($pdo, true) + catch (Throwable $e)
+      const getStart = profilePhp.indexOf("if ($method === 'GET')");
+      const postStart = profilePhp.indexOf("elseif ($method === 'POST')");
+      assert.ok(getStart !== -1 && postStart !== -1 && postStart > getStart);
+      const getSection = profilePhp.slice(getStart, postStart);
+
+      assert.match(getSection, /\$suppliedBearerToken\s*=\s*getBearerToken\(\)/);
+      assert.match(getSection, /getAuthUser\s*\(\s*\$pdo\s*,\s*true\s*\)/);
+      assert.doesNotMatch(getSection, /getAuthUser\s*\(\s*\$pdo\s*\)/);
+      assert.match(getSection, /catch\s*\(\s*Throwable\s+\$e\s*\)/);
+      assert.doesNotMatch(getSection, /catch\s*\(\s*PDOException\s+\$e\s*\)/);
+      assert.match(getSection, /\$safeRollback\s*\(\s*\$pdo\s*\)/);
+      assert.match(getSection, /error_log\s*\(/);
+      assert.match(getSection, /503/);
+      assert.match(getSection, /500/);
+      assert.match(getSection, /401/);
+
+      // Invalid/expired token check runs before empty($raw)/$raw === '' and before profile SELECT
+      const tokenRejectIdx = getSection.indexOf("Invalid or expired authentication session");
+      const emptyRawIdx = getSection.indexOf("if ($raw === '')");
+      const selectUsersIdx = getSection.indexOf("FROM users");
+      assert.ok(
+        tokenRejectIdx !== -1 &&
+          emptyRawIdx !== -1 &&
+          selectUsersIdx !== -1 &&
+          tokenRejectIdx < emptyRawIdx &&
+          emptyRawIdx < selectUsersIdx,
+      );
+
+      // No raw exception message leakage in GET jsonResponse calls
+      assert.doesNotMatch(getSection, /jsonResponse\([^;]*\$e->getMessage\(\)/);
+      // Checks prepare/execute return values explicitly and uses FETCH_ASSOC
+      assert.match(getSection, /\$stmt\s*===\s*false/);
+      assert.match(getSection, /\$stmt->execute\([^)]*\)\s*===\s*false/);
+      assert.match(getSection, /PDO::FETCH_ASSOC/);
+      // Prevents empty-string self-match bypass in ownership calculation
+      assert.match(getSection, /\$authPublicId\s*!==\s*''\s*&&\s*\$targetPublicId\s*!==\s*''/);
+      // No demo/JSON fallback in production PHP endpoint
+      assert.doesNotMatch(profilePhp, /FT102857/);
+      assert.doesNotMatch(profilePhp, /facetube_store\.json/);
+      assert.match(responsePhp, /function getAuthUser\(\$pdo,\s*bool \$rethrowDbError = false\)/);
+    });
+
+    it("[TS Simulation] 2. Preserves legitimate public profile lookup without PII and requires identifier when anonymous", () => {
+      const pubRes = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: null,
+        profileLookupBehavior: { kind: "rows", rows: [aliceRow, bobRow] },
+      });
+      assert.equal(pubRes.status, 200);
+      assert.equal(pubRes.body.success, true);
+      const profile = (pubRes.body as { profile: Partial<PhpUserRow> }).profile;
+      assert.equal(profile.user_id, "FT222222");
+      assert.equal(profile.name, "Bob Creator");
+      assert.equal(profile.channel_name, "Bob Studio");
+      assert.equal(profile.channel_description, "Bob studio description");
+      assert.equal(profile.channel_logo_url, "https://api.facetube.online/uploads/logos/bob.png");
+      assert.equal(profile.email, undefined);
+      assert.equal(profile.mobile, undefined);
+      assert.equal(profile.referral_code, undefined);
+      assert.equal(profile.role, undefined);
+
+      const missingIdRes = createProfileGetHarness({
+        query: {},
+        bearerToken: null,
+      });
+      assert.equal(missingIdRes.status, 400);
+      assert.equal(missingIdRes.body.error, "User identifier required.");
+    });
+
+    it("[TS Simulation] 3. Preserves authenticated self/admin lookup and enforces private profile ownership restrictions", () => {
+      // Self without query parameter
+      const selfNoId = createProfileGetHarness({
+        query: {},
+        bearerToken: "tok-alice",
+        authBehavior: { kind: "user", user: aliceRow },
+      });
+      assert.equal(selfNoId.status, 200);
+      assert.equal(
+        (selfNoId.body as { profile: PhpUserRow }).profile.email,
+        "alice@facetube.online",
+      );
+      assert.equal((selfNoId.body as { profile: PhpUserRow }).profile.referral_code, "ALICE50");
+
+      // Self with lowercase query identifier
+      const selfWithId = createProfileGetHarness({
+        query: { user_id: "ft111111" },
+        bearerToken: "tok-alice",
+        authBehavior: { kind: "user", user: aliceRow },
+        profileLookupBehavior: { kind: "rows", rows: [aliceRow, bobRow] },
+      });
+      assert.equal(selfWithId.status, 200);
+      assert.equal((selfWithId.body as { profile: PhpUserRow }).profile.mobile, "+1 555-111-1111");
+
+      // Non-admin User A querying User B gets only sanitized public profile (no PII)
+      const crossUser = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: "tok-alice",
+        authBehavior: { kind: "user", user: aliceRow },
+        profileLookupBehavior: { kind: "rows", rows: [aliceRow, bobRow] },
+      });
+      assert.equal(crossUser.status, 200);
+      const bobPublic = (crossUser.body as { profile: Partial<PhpUserRow> }).profile;
+      assert.equal(bobPublic.user_id, "FT222222");
+      assert.equal(bobPublic.email, undefined);
+      assert.equal(bobPublic.mobile, undefined);
+      assert.equal(bobPublic.referral_code, undefined);
+      assert.equal(bobPublic.role, undefined);
+
+      // Admin querying User B receives full profile
+      const adminCross = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: "tok-admin",
+        authBehavior: { kind: "user", user: adminRow },
+        profileLookupBehavior: { kind: "rows", rows: [aliceRow, bobRow] },
+      });
+      assert.equal(adminCross.status, 200);
+      assert.equal(
+        (adminCross.body as { profile: PhpUserRow }).profile.email,
+        "bob@facetube.online",
+      );
+
+      // Unknown target returns 404
+      const notFound = createProfileGetHarness({
+        query: { user_id: "FT000000" },
+        bearerToken: null,
+        profileLookupBehavior: { kind: "rows", rows: [aliceRow] },
+      });
+      assert.equal(notFound.status, 404);
+    });
+
+    it("[TS Simulation] 4. Rejects invalid or expired supplied Bearer token with 401 instead of downgrading to anonymous public access", () => {
+      const withTarget = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: "expired-or-tampered-token-123",
+        authBehavior: { kind: "invalid" },
+        profileLookupBehavior: { kind: "rows", rows: [bobRow] },
+      });
+      assert.equal(withTarget.status, 401);
+      assert.equal(withTarget.body.success, false);
+      assert.equal(withTarget.profileQueryExecuted, false);
+      assert.equal((withTarget.body as { profile?: unknown }).profile, undefined);
+
+      const withoutTarget = createProfileGetHarness({
+        query: {},
+        bearerToken: "expired-or-tampered-token-123",
+        authBehavior: { kind: "invalid" },
+      });
+      assert.equal(withoutTarget.status, 401);
+      assert.equal(withoutTarget.profileQueryExecuted, false);
+    });
+
+    it("[TS Simulation] 5. Fails closed with HTTP 503 on database connection failures during connect, auth, or profile lookup", () => {
+      const connect503 = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: null,
+        dbConnectError: {
+          status: 503,
+          error: "Database connection failed. Please try again later.",
+        },
+      });
+      assert.equal(connect503.status, 503);
+
+      // Auth DB outage MUST NOT downgrade to anonymous public 200 even when ?user_id is present
+      const authConn503 = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: "tok-alice",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "HY000",
+          driverCode: 1203,
+          message:
+            "SQLSTATE[HY000] [1203] User u123 already has more than 'max_user_connections' active connections",
+        },
+        profileLookupBehavior: { kind: "rows", rows: [bobRow] },
+      });
+      assert.equal(authConn503.status, 503);
+      assert.equal(authConn503.profileQueryExecuted, false);
+      assert.equal(authConn503.rollbackCount, 1);
+      assert.equal(authConn503.serverLogs.length, 1);
+      assert.doesNotMatch(JSON.stringify(authConn503.body), /max_user_connections|u123|SQLSTATE/i);
+
+      const lookupConn503 = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: null,
+        profileLookupBehavior: {
+          kind: "db_error",
+          sqlState: "08S01",
+          driverCode: 2006,
+          message: "SQLSTATE[08S01]: Communication link failure: MySQL server has gone away",
+        },
+      });
+      assert.equal(lookupConn503.status, 503);
+      assert.equal(lookupConn503.rollbackCount, 1);
+      assert.equal(lookupConn503.serverLogs.length, 1);
+      assert.doesNotMatch(JSON.stringify(lookupConn503.body), /SQLSTATE|08S01|gone away/i);
+    });
+
+    it("[TS Simulation] 6. Returns sanitized HTTP 500 on unexpected query/runtime errors without leaking SQL, tokens, or falling back to public profile", () => {
+      const authQuery500 = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: "secret-bearer-token-xyz",
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42S02",
+          driverCode: 1146,
+          message:
+            "SQLSTATE[42S02]: Base table or view not found: 1146 Table 'u999_facetube.sessions' doesn't exist",
+        },
+        profileLookupBehavior: { kind: "rows", rows: [bobRow] },
+      });
+      assert.equal(authQuery500.status, 500);
+      assert.equal(authQuery500.profileQueryExecuted, false);
+      assert.equal(authQuery500.rollbackCount, 1);
+      assert.equal(authQuery500.serverLogs.length, 1);
+      const authBodyStr = JSON.stringify(authQuery500.body);
+      assert.doesNotMatch(
+        authBodyStr,
+        /SQLSTATE|u999_facetube|sessions|1146|secret-bearer-token-xyz/i,
+      );
+
+      const lookupQuery500 = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: null,
+        profileLookupBehavior: {
+          kind: "db_error",
+          sqlState: "HY000",
+          driverCode: 0,
+          message: "Failed to prepare profile lookup query on host db.internal.facetube.",
+          isRuntime: true,
+        },
+      });
+      assert.equal(lookupQuery500.status, 500);
+      assert.equal(lookupQuery500.rollbackCount, 1);
+      assert.equal(lookupQuery500.serverLogs.length, 1);
+      const lookupBodyStr = JSON.stringify(lookupQuery500.body);
+      assert.doesNotMatch(lookupBodyStr, /db\.internal\.facetube|prepare profile/i);
+    });
+
+    it("[TS Simulation] 7. Blocks client user ID spoofing across query params, array params, and corrupt empty-ID edge cases", () => {
+      // Non-admin Alice spoofing ?userId=FT900001, ?user_id=FT900001, or ?identifier=admin@facetube.online
+      for (const query of [
+        { userId: "FT900001" },
+        { user_id: "FT900001" },
+        { identifier: "admin@facetube.online" },
+      ]) {
+        const spoofRes = createProfileGetHarness({
+          query,
+          bearerToken: "tok-alice",
+          authBehavior: { kind: "user", user: aliceRow },
+          profileLookupBehavior: { kind: "rows", rows: [aliceRow, adminRow] },
+        });
+        assert.equal(spoofRes.status, 200);
+        const profile = (spoofRes.body as { profile: Partial<PhpUserRow> }).profile;
+        assert.equal(profile.user_id, "FT900001");
+        assert.equal(profile.email, undefined);
+        assert.equal(profile.mobile, undefined);
+        assert.equal(profile.referral_code, undefined);
+        assert.equal(profile.role, undefined);
+      }
+
+      // Array query parameter cannot cause TypeError or bypass identifier check
+      const arrayParamRes = createProfileGetHarness({
+        query: { user_id: ["FT222222"] },
+        bearerToken: null,
+      });
+      assert.equal(arrayParamRes.status, 400);
+
+      // Corrupt empty internal id on target row cannot match empty auth internal id
+      const emptyIdCorruptTarget: PhpUserRow = {
+        ...bobRow,
+        id: "",
+      };
+      const emptyIdAuthAlice: PhpUserRow = {
+        ...aliceRow,
+        id: "",
+      };
+      const emptyIdCheck = createProfileGetHarness({
+        query: { user_id: "FT222222" },
+        bearerToken: "tok-alice",
+        authBehavior: { kind: "user", user: emptyIdAuthAlice },
+        profileLookupBehavior: { kind: "rows", rows: [emptyIdCorruptTarget] },
+      });
+      assert.equal(emptyIdCheck.status, 200);
+      assert.equal(
+        (emptyIdCheck.body as { profile: Partial<PhpUserRow> }).profile.email,
+        undefined,
+      );
+    });
+  });
+
+  describe("13. Task 5J-V4-U: PHP api/users/profile.php POST Auth & DB Fail-Closed Tests (Static + TS Simulation)", () => {
+    interface PhpPostUserRow {
+      id: string;
+      user_id: string;
+      name: string;
+      mobile: string;
+      email: string;
+      role: string;
+      referral_code: string;
+      avatar_url: string | null;
+      channel_logo_url: string | null;
+      channel_name: string | null;
+      channel_description: string | null;
+      created_at: string;
+    }
+
+    function loadProfilePostSources() {
+      const profilePhp = fs.readFileSync(
+        path.resolve(process.cwd(), "api/users/profile.php"),
+        "utf-8",
+      );
+      const responsePhp = fs.readFileSync(path.resolve(process.cwd(), "api/response.php"), "utf-8");
+      return { profilePhp, responsePhp };
+    }
+
+    // TypeScript simulation harness mirroring api/users/profile.php POST control flow
+    // (static/simulation coverage only — does not invoke a live PHP runtime).
+    function createProfilePostHarness(options: {
+      bearerToken?: string | null;
+      body?: Record<string, unknown>;
+      inTransaction?: boolean;
+      dbConnectError?: { status: 500 | 503; error: string };
+      authBehavior?:
+        | { kind: "none" }
+        | { kind: "invalid" }
+        | { kind: "user"; user: PhpPostUserRow }
+        | {
+            kind: "db_error";
+            sqlState: string;
+            driverCode: number;
+            message: string;
+            isRuntime?: boolean;
+          };
+      dbRows?: PhpPostUserRow[];
+      updateError?: {
+        sqlState: string;
+        driverCode: number;
+        message: string;
+        isRuntime?: boolean;
+      };
+      fetchUpdatedError?: {
+        sqlState: string;
+        driverCode: number;
+        message: string;
+        isRuntime?: boolean;
+      };
+      simulateMissingAfterAffected?: boolean;
+    }) {
+      const { responsePhp } = loadProfilePostSources();
+      const fnStart = responsePhp.indexOf("function isDatabaseConnectionUnavailableError(");
+      const fnBlock = responsePhp.slice(fnStart, fnStart + 900);
+      const codeMatch = fnBlock.match(/in_array\(\$driverCode,\s*\[([^\]]+)\],\s*true\)/);
+      const driverCodes = (codeMatch?.[1] || "")
+        .split(",")
+        .map((s) => Number(s.trim()))
+        .filter((n) => !Number.isNaN(n));
+      const regexMatch = fnBlock.match(/preg_match\('\/([^']+)\/i',\s*\$msg\)/);
+      const msgRegex = new RegExp(regexMatch?.[1] || "", "i");
+
+      const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
+        sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
+
+      const readStringField = (val: unknown, fallback = "") => {
+        if (typeof val === "string" || typeof val === "number") {
+          return String(val).trim();
+        }
+        return fallback;
+      };
+
+      const validateProfileMediaUrl = (
+        rawValue: unknown,
+        fieldName: "channel_logo_url" | "avatar_url",
+      ): [boolean, string | null, string | null] => {
+        if (rawValue === null) return [true, null, null];
+        if (typeof rawValue !== "string") return [false, null, `Invalid ${fieldName} format.`];
+        const trimmed = rawValue.trim();
+        if (trimmed === "") {
+          return [true, fieldName === "channel_logo_url" ? null : "", null];
+        }
+        if (trimmed.length > 500) {
+          return [false, null, `${fieldName} must be 500 characters or fewer.`];
+        }
+        const hasControlChar = [...trimmed].some((ch) => {
+          const code = ch.charCodeAt(0);
+          return code < 32 || code === 127;
+        });
+        if (hasControlChar || /[\s\\]/.test(trimmed)) {
+          return [false, null, `Invalid ${fieldName} URL format.`];
+        }
+        if (trimmed.startsWith("/uploads/")) {
+          if (
+            trimmed.includes("..") ||
+            trimmed.length <= "/uploads/".length ||
+            !/^\/uploads\/[A-Za-z0-9._\-/]+$/.test(trimmed)
+          ) {
+            return [false, null, `Invalid ${fieldName} path.`];
+          }
+          return [true, trimmed, null];
+        }
+        if (/^https?:\/\//i.test(trimmed)) {
+          try {
+            const parsed = new URL(trimmed);
+            if (
+              (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+              Boolean(parsed.hostname)
+            ) {
+              return [true, trimmed, null];
+            }
+          } catch {
+            // Invalid URL
+          }
+        }
+        return [
+          false,
+          null,
+          `Invalid ${fieldName}: must be an HTTP/HTTPS URL or approved /uploads/ path.`,
+        ];
+      };
+
+      const validateChannelDescription = (
+        rawValue: unknown,
+      ): [boolean, string | null, string | null] => {
+        if (rawValue === null) return [true, null, null];
+        if (typeof rawValue !== "string")
+          return [false, null, "Invalid channel_description format."];
+        const normalized = rawValue.replace(/\r\n?/g, "\n");
+        const hasDisallowedControl = [...normalized].some((ch) => {
+          const code = ch.charCodeAt(0);
+          return (code < 32 && code !== 9 && code !== 10) || code === 127;
+        });
+        if (hasDisallowedControl) {
+          return [false, null, "Channel description contains invalid control characters."];
+        }
+        const trimmed = normalized.trim();
+        if (trimmed === "") return [true, null, null];
+        if (trimmed.length > 1000) {
+          return [false, null, "Channel description must be 1000 characters or fewer."];
+        }
+        if (
+          /<\/?[a-zA-Z!/?]/.test(trimmed) ||
+          /\b(?:javascript|vbscript)\s*:/i.test(trimmed) ||
+          /data\s*:\s*text\/html/i.test(trimmed) ||
+          /\bon[a-z]+\s*=/i.test(trimmed)
+        ) {
+          return [
+            false,
+            null,
+            "Channel description must be plain text without HTML tags or scripts.",
+          ];
+        }
+        return [true, trimmed, null];
+      };
+
+      const toAbsLogo = (val: string | null) => {
+        if (!val || val.trim() === "") return val;
+        if (/^https?:\/\//i.test(val.trim())) return val.trim();
+        const clean = val.trim().replace(/^\/+/, "");
+        if (clean.startsWith("uploads/")) return `https://api.facetube.online/${clean}`;
+        return `https://api.facetube.online/uploads/logos/${clean}`;
+      };
+
+      const serverLogs: string[] = [];
+      let rollbackExecuted = false;
+      let updateSqlExecuted = false;
+      const updatedFields: string[] = [];
+      let targetUserIdUsed: string | null = null;
+      const inTransaction = options.inTransaction ?? false;
+
+      const safeRollback = () => {
+        if (inTransaction) {
+          rollbackExecuted = true;
+        }
+      };
+
+      if (options.dbConnectError) {
+        return {
+          status: options.dbConnectError.status,
+          body: { success: false, error: options.dbConnectError.error },
+          serverLogs,
+          rollbackExecuted,
+          updateSqlExecuted,
+          updatedFields,
+          targetUserIdUsed,
+        };
+      }
+
+      let authUser: PhpPostUserRow | null = null;
+      const token = options.bearerToken ?? null;
+      const authBehavior = options.authBehavior ?? { kind: "none" };
+      try {
+        if (token !== null && token.trim() !== "") {
+          if (authBehavior.kind === "user") {
+            authUser = authBehavior.user;
+          } else if (authBehavior.kind === "db_error") {
+            throw authBehavior;
+          } else {
+            authUser = null;
+          }
+        }
+      } catch (e: unknown) {
+        safeRollback();
+        const err = e as {
+          sqlState?: string;
+          driverCode?: number;
+          message?: string;
+          isRuntime?: boolean;
+        };
+        serverLogs.push(`[users/profile.php][POST][AUTH] Database error: ${err.message || ""}`);
+        if (
+          !err.isRuntime &&
+          isConnUnavailable(err.sqlState || "", err.driverCode || 0, err.message || "")
+        ) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable during authentication check.",
+            },
+            serverLogs,
+            rollbackExecuted,
+            updateSqlExecuted,
+            updatedFields,
+            targetUserIdUsed,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            error: "Database error during authentication check.",
+          },
+          serverLogs,
+          rollbackExecuted,
+          updateSqlExecuted,
+          updatedFields,
+          targetUserIdUsed,
+        };
+      }
+
+      if (!authUser || !authUser.user_id) {
+        return {
+          status: 401,
+          body: {
+            success: false,
+            error: "Authentication required. Please provide a valid Bearer session token.",
+          },
+          serverLogs,
+          rollbackExecuted,
+          updateSqlExecuted,
+          updatedFields,
+          targetUserIdUsed,
+        };
+      }
+
+      const input = options.body ?? {};
+      const requestedUserId = readStringField(
+        input["userId"] ?? input["user_id"] ?? input["id"] ?? "",
+      );
+      const authPublicId = authUser.user_id.trim();
+      const authInternalId = (authUser.id || "").trim();
+
+      let userId: string;
+      if (requestedUserId === "") {
+        userId = authPublicId;
+      } else if (
+        requestedUserId.toLowerCase() === authPublicId.toLowerCase() ||
+        (authInternalId !== "" && requestedUserId.toLowerCase() === authInternalId.toLowerCase())
+      ) {
+        userId = authPublicId;
+      } else {
+        const isAdmin = (authUser.role || "").trim().toLowerCase() === "admin";
+        if (!isAdmin) {
+          return {
+            status: 403,
+            body: {
+              success: false,
+              error: "Unauthorized: Cross-user access is restricted to verified administrators.",
+            },
+            serverLogs,
+            rollbackExecuted,
+            updateSqlExecuted,
+            updatedFields,
+            targetUserIdUsed,
+          };
+        }
+        userId = requestedUserId;
+      }
+      targetUserIdUsed = userId;
+
+      const nextPatch: Partial<PhpPostUserRow> = {};
+
+      if (Object.prototype.hasOwnProperty.call(input, "name")) {
+        const cleanName = readStringField(input["name"]);
+        if (cleanName.length >= 2) {
+          updatedFields.push("name");
+          nextPatch.name = cleanName;
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(input, "mobile")) {
+        const cleanMobile = readStringField(input["mobile"]);
+        if (cleanMobile.length >= 7) {
+          updatedFields.push("mobile");
+          nextPatch.mobile = cleanMobile;
+        }
+      }
+
+      if (
+        Object.prototype.hasOwnProperty.call(input, "channel_logo_url") ||
+        Object.prototype.hasOwnProperty.call(input, "channelLogoUrl")
+      ) {
+        const rawLogo = Object.prototype.hasOwnProperty.call(input, "channel_logo_url")
+          ? input["channel_logo_url"]
+          : input["channelLogoUrl"];
+        const [ok, cleanLogo, err] = validateProfileMediaUrl(rawLogo, "channel_logo_url");
+        if (!ok) {
+          return {
+            status: 400,
+            body: { success: false, error: err },
+            serverLogs,
+            rollbackExecuted,
+            updateSqlExecuted,
+            updatedFields,
+            targetUserIdUsed,
+          };
+        }
+        updatedFields.push("channel_logo_url");
+        nextPatch.channel_logo_url = cleanLogo;
+      }
+
+      if (
+        Object.prototype.hasOwnProperty.call(input, "channel_name") ||
+        Object.prototype.hasOwnProperty.call(input, "channelName")
+      ) {
+        const rawChannelName = Object.prototype.hasOwnProperty.call(input, "channel_name")
+          ? input["channel_name"]
+          : input["channelName"];
+        if (rawChannelName === null) {
+          updatedFields.push("channel_name");
+          nextPatch.channel_name = null;
+        } else if (typeof rawChannelName !== "string") {
+          return {
+            status: 400,
+            body: { success: false, error: "Invalid channel_name format." },
+            serverLogs,
+            rollbackExecuted,
+            updateSqlExecuted,
+            updatedFields,
+            targetUserIdUsed,
+          };
+        } else {
+          const trimmedChannelName = rawChannelName.trim();
+          if (trimmedChannelName.length > 255) {
+            return {
+              status: 400,
+              body: { success: false, error: "Channel name must be 255 characters or fewer." },
+              serverLogs,
+              rollbackExecuted,
+              updateSqlExecuted,
+              updatedFields,
+              targetUserIdUsed,
+            };
+          }
+          updatedFields.push("channel_name");
+          nextPatch.channel_name = trimmedChannelName;
+        }
+      }
+
+      if (
+        Object.prototype.hasOwnProperty.call(input, "channel_description") ||
+        Object.prototype.hasOwnProperty.call(input, "channelDescription")
+      ) {
+        const rawDescription = Object.prototype.hasOwnProperty.call(input, "channel_description")
+          ? input["channel_description"]
+          : input["channelDescription"];
+        const [ok, cleanDescription, err] = validateChannelDescription(rawDescription);
+        if (!ok) {
+          return {
+            status: 400,
+            body: { success: false, error: err },
+            serverLogs,
+            rollbackExecuted,
+            updateSqlExecuted,
+            updatedFields,
+            targetUserIdUsed,
+          };
+        }
+        updatedFields.push("channel_description");
+        nextPatch.channel_description = cleanDescription;
+      }
+
+      if (
+        Object.prototype.hasOwnProperty.call(input, "avatar_url") ||
+        Object.prototype.hasOwnProperty.call(input, "avatarUrl")
+      ) {
+        const rawAvatar = Object.prototype.hasOwnProperty.call(input, "avatar_url")
+          ? input["avatar_url"]
+          : input["avatarUrl"];
+        const [ok, cleanAvatar, err] = validateProfileMediaUrl(rawAvatar, "avatar_url");
+        if (!ok) {
+          return {
+            status: 400,
+            body: { success: false, error: err },
+            serverLogs,
+            rollbackExecuted,
+            updateSqlExecuted,
+            updatedFields,
+            targetUserIdUsed,
+          };
+        }
+        updatedFields.push("avatar_url");
+        nextPatch.avatar_url = cleanAvatar;
+      }
+
+      if (updatedFields.length === 0) {
+        return {
+          status: 400,
+          body: { success: false, error: "No valid fields provided to update." },
+          serverLogs,
+          rollbackExecuted,
+          updateSqlExecuted,
+          updatedFields,
+          targetUserIdUsed,
+        };
+      }
+
+      try {
+        updateSqlExecuted = true;
+        if (options.updateError) {
+          throw options.updateError;
+        }
+
+        const rows = options.dbRows ?? [authUser];
+        const idx = rows.findIndex(
+          (r) => r.id === userId || r.user_id.toUpperCase() === userId.toUpperCase(),
+        );
+        const affectedRows = idx >= 0 ? 1 : 0;
+
+        if (options.fetchUpdatedError) {
+          throw options.fetchUpdatedError;
+        }
+
+        const updatedRow =
+          idx >= 0 && !options.simulateMissingAfterAffected ? { ...rows[idx], ...nextPatch } : null;
+
+        if (!updatedRow) {
+          if (affectedRows === 0) {
+            return {
+              status: 404,
+              body: { success: false, error: "User not found." },
+              serverLogs,
+              rollbackExecuted,
+              updateSqlExecuted,
+              updatedFields,
+              targetUserIdUsed,
+            };
+          }
+          throw {
+            sqlState: "HY000",
+            driverCode: 0,
+            message: "Updated user profile could not be retrieved.",
+            isRuntime: true,
+          };
+        }
+
+        if (updatedRow.channel_logo_url) {
+          updatedRow.channel_logo_url = toAbsLogo(updatedRow.channel_logo_url) ?? null;
+        }
+
+        return {
+          status: 200,
+          body: {
+            success: true,
+            profile: updatedRow,
+            message: "Profile updated successfully.",
+          },
+          serverLogs,
+          rollbackExecuted,
+          updateSqlExecuted,
+          updatedFields,
+          targetUserIdUsed,
+        };
+      } catch (e: unknown) {
+        safeRollback();
+        const err = e as {
+          sqlState?: string;
+          driverCode?: number;
+          message?: string;
+          isRuntime?: boolean;
+        };
+        serverLogs.push(`[users/profile.php][POST] Database error: ${err.message || ""}`);
+        if (
+          !err.isRuntime &&
+          isConnUnavailable(err.sqlState || "", err.driverCode || 0, err.message || "")
+        ) {
+          return {
+            status: 503,
+            body: {
+              success: false,
+              error: "Database connection unavailable while updating profile.",
+            },
+            serverLogs,
+            rollbackExecuted,
+            updateSqlExecuted,
+            updatedFields,
+            targetUserIdUsed,
+          };
+        }
+        return {
+          status: 500,
+          body: {
+            success: false,
+            error: "Failed to update profile due to a server error.",
+          },
+          serverLogs,
+          rollbackExecuted,
+          updateSqlExecuted,
+          updatedFields,
+          targetUserIdUsed,
+        };
+      }
+    }
+
+    const alicePostRow: PhpPostUserRow = {
+      id: "uuid-alice-1",
+      user_id: "FT111111",
+      name: "Alice Creator",
+      mobile: "+1 555-111-1111",
+      email: "alice@facetube.online",
+      role: "user",
+      referral_code: "ALICE50",
+      avatar_url: null,
+      channel_logo_url: "/uploads/logos/alice.png",
+      channel_name: "Alice Channel",
+      channel_description: "Creator channel bio",
+      created_at: "2026-10-01T00:00:00Z",
+    };
+
+    const bobPostRow: PhpPostUserRow = {
+      id: "uuid-bob-2",
+      user_id: "FT222222",
+      name: "Bob Creator",
+      mobile: "+1 555-222-2222",
+      email: "bob@facetube.online",
+      role: "user",
+      referral_code: "BOB99",
+      avatar_url: null,
+      channel_logo_url: null,
+      channel_name: "Bob Studio",
+      channel_description: null,
+      created_at: "2026-10-05T00:00:00Z",
+    };
+
+    const adminPostRow: PhpPostUserRow = {
+      id: "uuid-admin-9",
+      user_id: "FT900001",
+      name: "Platform Admin",
+      mobile: "+1 555-999-0000",
+      email: "admin@facetube.online",
+      role: "admin",
+      referral_code: "ADM01",
+      avatar_url: null,
+      channel_logo_url: null,
+      channel_name: "FaceTube Admin",
+      channel_description: null,
+      created_at: "2026-09-01T00:00:00Z",
+    };
+
+    it("[Static] 1. api/users/profile.php POST removes unguarded getAuthUser($pdo), uses getAuthUser($pdo, true), checks prepare/execute/rowCount, and sanitizes 503/500 errors", () => {
+      const { profilePhp } = loadProfilePostSources();
+
+      const postStart = profilePhp.indexOf("elseif ($method === 'POST')");
+      assert.ok(postStart !== -1);
+      const postSection = profilePhp.slice(postStart);
+
+      // Auth check runs before payload reading, uses getAuthUser($pdo, true) inside try/catch (Throwable)
+      const authPos = postSection.indexOf("getAuthUser($pdo, true)");
+      const payloadPos = postSection.indexOf("getRequestPayload()");
+      assert.ok(authPos !== -1 && payloadPos !== -1 && authPos < payloadPos);
+
+      // No unguarded getAuthUser($pdo) or requireAuthUser() fallback in POST or GET
+      assert.doesNotMatch(profilePhp, /getAuthUser\s*\(\s*\$pdo\s*\)/);
+      assert.doesNotMatch(profilePhp, /requireAuthUser\s*\(/);
+
+      // Uses Throwable, safeRollback only when inTransaction(), error_log, 503 & sanitized 500
+      assert.match(postSection, /catch\s*\(\s*Throwable\s+\$e\s*\)/);
+      assert.doesNotMatch(postSection, /catch\s*\(\s*PDOException\s+\$e\s*\)/);
+      assert.match(postSection, /\$safeRollback\s*\(\s*\$pdo\s*\)/);
+      assert.match(
+        profilePhp,
+        /if\s*\(\s*\$conn->inTransaction\(\)\s*\)\s*\{\s*\$conn->rollBack\(\)/,
+      );
+      assert.match(postSection, /error_log\s*\(/);
+      assert.match(postSection, /503/);
+      assert.match(postSection, /500/);
+      assert.match(postSection, /401/);
+      assert.match(postSection, /403/);
+      assert.match(postSection, /404/);
+
+      // Checks prepare/execute return values, rowCount(), FETCH_ASSOC, and never leaks $e->getMessage()
+      assert.match(postSection, /\$stmt\s*===\s*false/);
+      assert.match(postSection, /\$stmt->execute\(\$params\)\s*===\s*false/);
+      assert.match(postSection, /\$stmt->rowCount\(\)/);
+      assert.match(postSection, /\$stmtGet\s*===\s*false/);
+      assert.match(postSection, /\$stmtGet->execute\(\[\$userId,\s*\$userId\]\)\s*===\s*false/);
+      assert.match(postSection, /PDO::FETCH_ASSOC/);
+      assert.doesNotMatch(postSection, /jsonResponse\([^;]*\$e->getMessage\(\)/);
+      assert.doesNotMatch(profilePhp, /FT102857/);
+      assert.doesNotMatch(profilePhp, /facetube_store\.json/);
+    });
+
+    it("[TS Simulation] 2. Performs authenticated profile update deriving target user from session and preserving branding/response contract", () => {
+      // Self update without client userId
+      const selfRes = createProfilePostHarness({
+        bearerToken: "tok-alice",
+        authBehavior: { kind: "user", user: alicePostRow },
+        body: {
+          name: "Alice Updated",
+          mobile: "+1 555-888-7777",
+          channel_logo_url: "/uploads/logos/alice_new.png",
+          channel_name: "Alice Tech Studio",
+          channel_description: "Updated plain-text channel bio",
+          avatar_url: "https://cdn.example.com/alice-avatar.png",
+        },
+        dbRows: [alicePostRow, bobPostRow],
+      });
+      assert.equal(selfRes.status, 200);
+      assert.equal(selfRes.targetUserIdUsed, "FT111111");
+      assert.equal(selfRes.updateSqlExecuted, true);
+      const resBody = selfRes.body as {
+        success: boolean;
+        message: string;
+        profile: PhpPostUserRow;
+      };
+      assert.equal(resBody.success, true);
+      assert.equal(resBody.message, "Profile updated successfully.");
+      assert.equal(resBody.profile.name, "Alice Updated");
+      assert.equal(resBody.profile.mobile, "+1 555-888-7777");
+      assert.equal(
+        resBody.profile.channel_logo_url,
+        "https://api.facetube.online/uploads/logos/alice_new.png",
+      );
+      assert.equal(resBody.profile.channel_name, "Alice Tech Studio");
+      assert.equal(resBody.profile.channel_description, "Updated plain-text channel bio");
+      assert.equal(resBody.profile.avatar_url, "https://cdn.example.com/alice-avatar.png");
+
+      // Self update supplying own uppercase UUID resolves cleanly to canonical auth user_id
+      const selfUuidRes = createProfilePostHarness({
+        bearerToken: "tok-alice",
+        authBehavior: { kind: "user", user: alicePostRow },
+        body: {
+          userId: "UUID-ALICE-1",
+          channelLogoUrl: null,
+        },
+        dbRows: [alicePostRow],
+      });
+      assert.equal(selfUuidRes.status, 200);
+      assert.equal(selfUuidRes.targetUserIdUsed, "FT111111");
+      assert.equal(
+        (selfUuidRes.body as { profile: PhpPostUserRow }).profile.channel_logo_url,
+        null,
+      );
+    });
+
+    it("[TS Simulation] 3. Rejects missing, invalid, or expired session with HTTP 401 before any SQL update", () => {
+      const noToken = createProfilePostHarness({
+        bearerToken: null,
+        body: { userId: "FT111111", name: "Hacked Name" },
+        dbRows: [alicePostRow],
+      });
+      assert.equal(noToken.status, 401);
+      assert.equal(noToken.updateSqlExecuted, false);
+
+      const expiredToken = createProfilePostHarness({
+        bearerToken: "expired-session-tok",
+        authBehavior: { kind: "invalid" },
+        body: { name: "Hacked Name" },
+        dbRows: [alicePostRow],
+      });
+      assert.equal(expiredToken.status, 401);
+      assert.equal(expiredToken.updateSqlExecuted, false);
+    });
+
+    it("[TS Simulation] 4. Returns HTTP 503 on DB connection failures and rolls back only when transaction is active", () => {
+      const connect503 = createProfilePostHarness({
+        bearerToken: "tok-alice",
+        dbConnectError: { status: 503, error: "Database connection unavailable." },
+        body: { name: "Alice" },
+      });
+      assert.equal(connect503.status, 503);
+      assert.equal(connect503.updateSqlExecuted, false);
+
+      // Auth DB connection failure MUST return 503 (never treated as 401 unauthenticated)
+      const authConn503NoTx = createProfilePostHarness({
+        bearerToken: "tok-alice",
+        inTransaction: false,
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "HY000",
+          driverCode: 1203,
+          message: "SQLSTATE[HY000] [1203] User u123 already has more than 'max_user_connections'",
+        },
+        body: { name: "Alice Updated" },
+      });
+      assert.equal(authConn503NoTx.status, 503);
+      assert.equal(authConn503NoTx.updateSqlExecuted, false);
+      assert.equal(authConn503NoTx.rollbackExecuted, false);
+      assert.equal(authConn503NoTx.serverLogs.length, 1);
+      assert.doesNotMatch(JSON.stringify(authConn503NoTx.body), /max_user_connections|u123|1203/i);
+
+      const updateConn503WithTx = createProfilePostHarness({
+        bearerToken: "tok-alice",
+        inTransaction: true,
+        authBehavior: { kind: "user", user: alicePostRow },
+        body: { name: "Alice Updated" },
+        updateError: {
+          sqlState: "08S01",
+          driverCode: 2006,
+          message: "SQLSTATE[08S01]: MySQL server has gone away",
+        },
+      });
+      assert.equal(updateConn503WithTx.status, 503);
+      assert.equal(updateConn503WithTx.rollbackExecuted, true);
+      assert.equal(updateConn503WithTx.serverLogs.length, 1);
+      assert.doesNotMatch(JSON.stringify(updateConn503WithTx.body), /SQLSTATE|08S01|gone away/i);
+    });
+
+    it("[TS Simulation] 5. Returns sanitized HTTP 500 on unexpected DB/runtime failures without leaking raw SQL, hostnames, or tokens", () => {
+      const authRuntime500 = createProfilePostHarness({
+        bearerToken: "secret-post-token-999",
+        inTransaction: false,
+        authBehavior: {
+          kind: "db_error",
+          sqlState: "42S02",
+          driverCode: 1146,
+          message: "SQLSTATE[42S02]: 1146 Table 'u888_facetube.sessions' doesn't exist",
+        },
+        body: { name: "Alice Updated" },
+      });
+      assert.equal(authRuntime500.status, 500);
+      assert.equal(authRuntime500.updateSqlExecuted, false);
+      assert.equal(authRuntime500.rollbackExecuted, false);
+      assert.equal(authRuntime500.serverLogs.length, 1);
+      assert.doesNotMatch(
+        JSON.stringify(authRuntime500.body),
+        /SQLSTATE|1146|u888_facetube|sessions|secret-post-token-999/i,
+      );
+
+      const update500 = createProfilePostHarness({
+        bearerToken: "tok-alice",
+        inTransaction: true,
+        authBehavior: { kind: "user", user: alicePostRow },
+        body: { name: "Alice Updated" },
+        updateError: {
+          sqlState: "HY000",
+          driverCode: 0,
+          message: "Failed to prepare profile update query on db-primary.internal.",
+          isRuntime: true,
+        },
+      });
+      assert.equal(update500.status, 500);
+      assert.equal(update500.rollbackExecuted, true);
+      assert.equal(update500.serverLogs.length, 1);
+      assert.doesNotMatch(JSON.stringify(update500.body), /db-primary\.internal|prepare profile/i);
+
+      const missingAfterUpdate500 = createProfilePostHarness({
+        bearerToken: "tok-alice",
+        inTransaction: true,
+        authBehavior: { kind: "user", user: alicePostRow },
+        body: { name: "Alice Updated" },
+        dbRows: [alicePostRow],
+        simulateMissingAfterAffected: true,
+      });
+      assert.equal(missingAfterUpdate500.status, 500);
+      assert.equal(missingAfterUpdate500.rollbackExecuted, true);
+      assert.doesNotMatch(
+        JSON.stringify(missingAfterUpdate500.body),
+        /Updated user profile could not be retrieved/i,
+      );
+    });
+
+    it("[TS Simulation] 6. Blocks client-supplied userId/id spoofing and non-allowlisted fields while preserving existing validation rules", () => {
+      // Non-admin User A trying to update User B via userId, user_id, or id -> 403
+      for (const body of [
+        { userId: "FT222222", name: "Tampered Bob" },
+        { user_id: "FT222222", name: "Tampered Bob" },
+        { id: "uuid-bob-2", name: "Tampered Bob" },
+      ]) {
+        const crossRes = createProfilePostHarness({
+          bearerToken: "tok-alice",
+          authBehavior: { kind: "user", user: alicePostRow },
+          body,
+          dbRows: [alicePostRow, bobPostRow],
+        });
+        assert.equal(crossRes.status, 403);
+        assert.equal(crossRes.updateSqlExecuted, false);
+      }
+
+      // Non-allowed fields (role, referral_code, email) are ignored; role stays "user"
+      const allowedOnlyRes = createProfilePostHarness({
+        bearerToken: "tok-alice",
+        authBehavior: { kind: "user", user: alicePostRow },
+        body: {
+          name: "Alice Valid",
+          role: "admin",
+          referral_code: "HACK99",
+          email: "evil@attacker.test",
+        },
+        dbRows: [alicePostRow],
+      });
+      assert.equal(allowedOnlyRes.status, 200);
+      assert.deepEqual(allowedOnlyRes.updatedFields, ["name"]);
+      const aliceAfter = (allowedOnlyRes.body as { profile: PhpPostUserRow }).profile;
+      assert.equal(aliceAfter.role, "user");
+      assert.equal(aliceAfter.referral_code, "ALICE50");
+      assert.equal(aliceAfter.email, "alice@facetube.online");
+
+      // Validation errors preserved (400)
+      assert.equal(
+        createProfilePostHarness({
+          bearerToken: "tok-alice",
+          authBehavior: { kind: "user", user: alicePostRow },
+          body: { channel_logo_url: "javascript:alert(1)" },
+        }).status,
+        400,
+      );
+      assert.equal(
+        createProfilePostHarness({
+          bearerToken: "tok-alice",
+          authBehavior: { kind: "user", user: alicePostRow },
+          body: { channel_description: "<script>alert(1)</script>" },
+        }).status,
+        400,
+      );
+      assert.equal(
+        createProfilePostHarness({
+          bearerToken: "tok-alice",
+          authBehavior: { kind: "user", user: alicePostRow },
+          body: { channel_name: ["invalid"] },
+        }).status,
+        400,
+      );
+      assert.equal(
+        createProfilePostHarness({
+          bearerToken: "tok-alice",
+          authBehavior: { kind: "user", user: alicePostRow },
+          body: { name: "A" },
+        }).status,
+        400,
+      );
+
+      // Admin cross-user update on nonexistent user returns 404 (rowCount === 0 and no row)
+      const adminNotFound = createProfilePostHarness({
+        bearerToken: "tok-admin",
+        authBehavior: { kind: "user", user: adminPostRow },
+        body: { userId: "FT000000", channel_name: "Ghost" },
+        dbRows: [alicePostRow, adminPostRow],
+      });
+      assert.equal(adminNotFound.status, 404);
     });
   });
 });

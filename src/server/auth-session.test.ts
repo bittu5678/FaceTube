@@ -2903,7 +2903,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
     });
   });
 
-  describe("9. Task 5J-V4-S: PHP api/auth/me.php Authentication Fail-Closed Safety", () => {
+  describe("9. Task 5J-V4-S & 5J-V4-S1: PHP api/auth/me.php Fail-Closed Safety & Anonymous DB Optimization (Static + TS Simulation)", () => {
     interface MeAuthUser {
       id: string;
       user_id: string;
@@ -2927,6 +2927,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
         user: MeAuthUser | null;
         error?: string;
       };
+      dbConnectionInitialized: boolean;
       sessionQueryExecuted: boolean;
       serverLogs: string[];
     }
@@ -2937,9 +2938,12 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       return { mePhp, responsePhp };
     }
 
+    // TypeScript simulation harness mirroring api/auth/me.php control flow
+    // (static/simulation coverage only — does not invoke a live PHP runtime).
     function createAuthMeHarness(options: {
       bearerToken: string | null;
       queryUserId?: string;
+      dbConnectError?: { status: 500 | 503; error: string };
       authBehavior:
         | { kind: "none" }
         | { kind: "invalid" }
@@ -2966,16 +2970,36 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       const isConnUnavailable = (sqlState: string, driverCode: number, msg: string) =>
         sqlState.startsWith("08") || driverCodes.includes(driverCode) || msgRegex.test(msg);
 
+      let dbConnectionInitialized = false;
       let sessionQueryExecuted = false;
       const serverLogs: string[] = [];
 
       // Client-supplied user_id (e.g. ?user_id=...) is ignored by api/auth/me.php
       void options.queryUserId;
 
+      // 1) Anonymous check runs before getDatabaseConnection()
       if (options.bearerToken === null || options.bearerToken.trim() === "") {
         return {
           status: 200,
           body: { authenticated: false, user: null },
+          dbConnectionInitialized,
+          sessionQueryExecuted,
+          serverLogs,
+        };
+      }
+
+      // 2) Initialize PDO only when a Bearer token is supplied
+      dbConnectionInitialized = true;
+      if (options.dbConnectError) {
+        return {
+          status: options.dbConnectError.status,
+          body: {
+            success: false,
+            authenticated: false,
+            user: null,
+            error: options.dbConnectError.error,
+          },
+          dbConnectionInitialized,
           sessionQueryExecuted,
           serverLogs,
         };
@@ -3014,6 +3038,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
               user: null,
               error: "Database connection unavailable during authentication check.",
             },
+            dbConnectionInitialized,
             sessionQueryExecuted,
             serverLogs,
           };
@@ -3026,6 +3051,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
             user: null,
             error: "Database error during authentication check.",
           },
+          dbConnectionInitialized,
           sessionQueryExecuted,
           serverLogs,
         };
@@ -3035,6 +3061,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
         return {
           status: 200,
           body: { authenticated: false, user: null },
+          dbConnectionInitialized,
           sessionQueryExecuted,
           serverLogs,
         };
@@ -3043,12 +3070,13 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       return {
         status: 200,
         body: { authenticated: true, user },
+        dbConnectionInitialized,
         sessionQueryExecuted,
         serverLogs,
       };
     }
 
-    it("1. Preserves static fail-closed contract in api/auth/me.php without trusting client user IDs", () => {
+    it("1. [Static] Preserves fail-closed contract in api/auth/me.php and ensures anonymous early return precedes getDatabaseConnection()", () => {
       const { mePhp } = loadMePhpSources();
 
       assert.match(mePhp, /getDatabaseConnection\(\)/);
@@ -3062,19 +3090,41 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       assert.doesNotMatch(mePhp, /\$_GET|\$_POST|getRequestPayload\(/);
       assert.doesNotMatch(mePhp, /FT102857|facetube_store\.json/);
       assert.doesNotMatch(mePhp, /jsonResponse\([^\n]*\$e->getMessage\(\)/);
+
+      // Verify anonymous token check and HTTP 200 return appear strictly before getDatabaseConnection()
+      const bearerPos = mePhp.indexOf("getBearerToken()");
+      const anonGuardMatch = mePhp.match(
+        /if\s*\(\s*\$suppliedBearerToken\s*===\s*null[\s\S]*?\)\s*\{\s*jsonResponse\(\s*\[\s*'authenticated'\s*=>\s*false\s*,\s*'user'\s*=>\s*null\s*\]\s*,\s*200\s*\)\s*;\s*\}/,
+      );
+      assert.ok(anonGuardMatch, "Anonymous early-return block must exist in api/auth/me.php");
+      const anonGuardEndPos = (anonGuardMatch.index ?? -1) + anonGuardMatch[0].length;
+      const dbConnPos = mePhp.indexOf("getDatabaseConnection()");
+      const authUserPos = mePhp.indexOf("getAuthUser($pdo, true)");
+
+      assert.ok(bearerPos > 0 && dbConnPos > 0 && authUserPos > 0);
+      assert.ok(
+        bearerPos < anonGuardEndPos && anonGuardEndPos < dbConnPos,
+        "Anonymous Bearer token check and 200 response must run strictly before getDatabaseConnection()",
+      );
+      assert.ok(
+        dbConnPos < authUserPos,
+        "getDatabaseConnection() must run before getAuthUser($pdo, true) when a token is supplied",
+      );
     });
 
-    it("2. Handles no credentials, valid session, invalid/expired token, and client-supplied user ID impersonation attempts", () => {
-      // 1) No credentials -> existing unauthenticated response preserved (200)
+    it("2. [TS Simulation] Skips DB initialization for anonymous requests, handles valid/expired tokens, and blocks user_id spoofing", () => {
+      // 1) No credentials -> immediate 200 without DB initialization even if DB is unavailable
       const noCreds = createAuthMeHarness({
         bearerToken: null,
+        dbConnectError: { status: 503, error: "Database connection unavailable." },
         authBehavior: { kind: "none" },
       });
       assert.equal(noCreds.status, 200);
       assert.deepEqual(noCreds.body, { authenticated: false, user: null });
+      assert.equal(noCreds.dbConnectionInitialized, false);
       assert.equal(noCreds.sessionQueryExecuted, false);
 
-      // 2) Valid session -> existing authenticated response structure and user fields preserved
+      // 2) Valid session -> initializes DB, queries session, preserves authenticated user fields
       const alexUser: MeAuthUser = {
         id: "uuid-483921",
         user_id: "FT483921",
@@ -3096,24 +3146,29 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       assert.equal(validSession.status, 200);
       assert.equal(validSession.body.authenticated, true);
       assert.deepEqual(validSession.body.user, alexUser);
+      assert.equal(validSession.dbConnectionInitialized, true);
       assert.equal(validSession.sessionQueryExecuted, true);
 
-      // 3) Invalid / expired token -> not authenticated
+      // 3) Invalid / expired token -> DB queried, returns 200 not authenticated
       const expiredToken = createAuthMeHarness({
         bearerToken: "tok_expired_5js",
         authBehavior: { kind: "invalid" },
       });
       assert.equal(expiredToken.status, 200);
       assert.deepEqual(expiredToken.body, { authenticated: false, user: null });
+      assert.equal(expiredToken.dbConnectionInitialized, true);
       assert.equal(expiredToken.sessionQueryExecuted, true);
 
-      // Empty Bearer credential -> not authenticated
+      // Empty/whitespace Bearer credential -> anonymous branch, no DB initialization
       const emptyToken = createAuthMeHarness({
         bearerToken: "   ",
+        dbConnectError: { status: 503, error: "Database connection unavailable." },
         authBehavior: { kind: "none" },
       });
       assert.equal(emptyToken.status, 200);
       assert.deepEqual(emptyToken.body, { authenticated: false, user: null });
+      assert.equal(emptyToken.dbConnectionInitialized, false);
+      assert.equal(emptyToken.sessionQueryExecuted, false);
 
       // 4) Client-supplied user_id cannot impersonate another account (anonymous or authenticated)
       const unauthSpoof = createAuthMeHarness({
@@ -3123,6 +3178,8 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       });
       assert.equal(unauthSpoof.status, 200);
       assert.deepEqual(unauthSpoof.body, { authenticated: false, user: null });
+      assert.equal(unauthSpoof.dbConnectionInitialized, false);
+      assert.equal(unauthSpoof.sessionQueryExecuted, false);
 
       const authSpoof = createAuthMeHarness({
         bearerToken: "tok_valid_alex_5js",
@@ -3132,9 +3189,11 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       assert.equal(authSpoof.status, 200);
       assert.equal(authSpoof.body.authenticated, true);
       assert.equal(authSpoof.body.user?.user_id, "FT483921");
+      assert.equal(authSpoof.dbConnectionInitialized, true);
+      assert.equal(authSpoof.sessionQueryExecuted, true);
     });
 
-    it("3. Returns HTTP 503 on auth DB connection failures and sanitized HTTP 500 on unexpected DB/runtime failures", () => {
+    it("3. [TS Simulation] Returns HTTP 503 on auth DB connection failures and sanitized HTTP 500 on unexpected DB/runtime failures when token is supplied", () => {
       // MySQL 1203 ER_TOO_MANY_USER_CONNECTIONS -> 503 (never 200 authenticated:false)
       const db1203 = createAuthMeHarness({
         bearerToken: "tok_secret_session_1203",
@@ -3150,6 +3209,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       assert.equal(db1203.body.success, false);
       assert.equal(db1203.body.authenticated, false);
       assert.equal(db1203.body.user, null);
+      assert.equal(db1203.dbConnectionInitialized, true);
       assert.equal(db1203.sessionQueryExecuted, true);
       assert.ok(db1203.serverLogs.some((l) => l.includes("max_user_connections")));
       const db1203Serialized = JSON.stringify(db1203.body);
@@ -3170,6 +3230,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       });
       assert.equal(db2002.status, 503);
       assert.equal(db2002.body.authenticated, false);
+      assert.equal(db2002.dbConnectionInitialized, true);
       assert.doesNotMatch(JSON.stringify(db2002.body), /mysql\.internal|SQLSTATE|tok_secret/);
 
       // Unexpected DB error (e.g. 1146 missing sessions table) -> sanitized 500
@@ -3186,6 +3247,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       assert.equal(db1146.body.success, false);
       assert.equal(db1146.body.authenticated, false);
       assert.equal(db1146.body.user, null);
+      assert.equal(db1146.dbConnectionInitialized, true);
       assert.ok(db1146.serverLogs.some((l) => l.includes("facetube_prod.sessions")));
       assert.doesNotMatch(
         JSON.stringify(db1146.body),
@@ -3205,6 +3267,7 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       });
       assert.equal(runtimeErr.status, 500);
       assert.equal(runtimeErr.body.authenticated, false);
+      assert.equal(runtimeErr.dbConnectionInitialized, true);
       assert.doesNotMatch(JSON.stringify(runtimeErr.body), /secret_host|prepare|tok_secret/);
     });
   });

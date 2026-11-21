@@ -88,12 +88,72 @@ function sanitizePublicProfile($row) {
     ];
 }
 
+$method = $_SERVER['REQUEST_METHOD'] ?? '';
+if ($method !== 'GET' && $method !== 'POST') {
+    jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
+}
+
+$isConnectionUnavailable = static function (Throwable $e): bool {
+    if (function_exists('isDatabaseConnectionUnavailableError')) {
+        return isDatabaseConnectionUnavailableError($e);
+    }
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 1042, 1053, 1129, 1203, 1927, 2002, 2003, 2005, 2006, 2013, 2026], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+};
+
+$safeRollback = static function (PDO $conn): void {
+    try {
+        if ($conn->inTransaction()) {
+            $conn->rollBack();
+        }
+    } catch (Throwable $_rollbackErr) {
+        error_log('[users/profile.php][ROLLBACK] Rollback failed: ' . $_rollbackErr->getMessage());
+    }
+};
+
+$readStringField = static function ($val, string $default = ''): string {
+    if (is_string($val) || is_int($val) || is_float($val)) {
+        return trim((string)$val);
+    }
+    return $default;
+};
+
 $pdo = getDatabaseConnection();
 
-if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    $raw = trim($_GET['userId'] ?? ($_GET['user_id'] ?? ($_GET['identifier'] ?? '')));
-    $authUser = getAuthUser($pdo);
-    if (empty($raw)) {
+if ($method === 'GET') {
+    $raw = $readStringField($_GET['userId'] ?? ($_GET['user_id'] ?? ($_GET['identifier'] ?? '')));
+    $suppliedBearerToken = getBearerToken();
+
+    try {
+        $authUser = getAuthUser($pdo, true);
+    } catch (Throwable $e) {
+        $safeRollback($pdo);
+        error_log('[users/profile.php][AUTH] Database error: ' . $e->getMessage());
+        if ($isConnectionUnavailable($e)) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Database connection unavailable during authentication check.'
+            ], 503);
+        }
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database error during authentication check.'
+        ], 500);
+    }
+
+    // Never silently downgrade an invalid or expired supplied Bearer token to anonymous access
+    if ($suppliedBearerToken !== null && trim($suppliedBearerToken) !== '' && (!$authUser || empty($authUser['user_id']))) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Invalid or expired authentication session. Please log in again.'
+        ], 401);
+    }
+
+    if ($raw === '') {
         if ($authUser) {
             jsonResponse(['success' => true, 'profile' => $authUser]);
         }
@@ -107,8 +167,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             WHERE UPPER(user_id) = UPPER(?) OR LOWER(email) = LOWER(?) OR id = ?
             LIMIT 1
         ');
-        $stmt->execute([$raw, $raw, $raw]);
-        $profile = $stmt->fetch();
+        if ($stmt === false) {
+            throw new RuntimeException('Failed to prepare profile lookup query.');
+        }
+        if ($stmt->execute([$raw, $raw, $raw]) === false) {
+            throw new RuntimeException('Failed to execute profile lookup query.');
+        }
+        $profile = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$profile) {
             jsonResponse(['success' => false, 'error' => 'Profile not found.'], 404);
@@ -118,40 +183,101 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $profile['channel_logo_url'] = toAbsoluteMediaUrl($profile['channel_logo_url'], 'logos');
         }
 
+        $authRole = strtolower(trim((string)($authUser['role'] ?? '')));
+        $authPublicId = trim((string)($authUser['user_id'] ?? ''));
+        $authInternalId = trim((string)($authUser['id'] ?? ''));
+        $targetPublicId = trim((string)($profile['user_id'] ?? ''));
+        $targetInternalId = trim((string)($profile['id'] ?? ''));
+
         $isSelfOrAdmin = $authUser && (
-            strtolower($authUser['role'] ?? '') === 'admin' ||
-            strcasecmp((string)($authUser['user_id'] ?? ''), (string)($profile['user_id'] ?? '')) === 0 ||
-            (string)($authUser['id'] ?? '') === (string)($profile['id'] ?? '')
+            $authRole === 'admin' ||
+            ($authPublicId !== '' && $targetPublicId !== '' && strcasecmp($authPublicId, $targetPublicId) === 0) ||
+            ($authInternalId !== '' && $targetInternalId !== '' && strcasecmp($authInternalId, $targetInternalId) === 0)
         );
 
         jsonResponse([
             'success' => true,
             'profile' => $isSelfOrAdmin ? $profile : sanitizePublicProfile($profile)
         ]);
-    } catch (PDOException $e) {
-        jsonResponse(['success' => false, 'error' => 'Database error: ' . $e->getMessage()], 500);
+    } catch (Throwable $e) {
+        $safeRollback($pdo);
+        error_log('[users/profile.php][GET] Database error: ' . $e->getMessage());
+        if ($isConnectionUnavailable($e)) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Database connection unavailable while loading profile.'
+            ], 503);
+        }
+        jsonResponse([
+            'success' => false,
+            'error' => 'Failed to load profile due to a server error.'
+        ], 500);
     }
-} elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
+} elseif ($method === 'POST') {
+    try {
+        $authUser = getAuthUser($pdo, true);
+    } catch (Throwable $e) {
+        $safeRollback($pdo);
+        error_log('[users/profile.php][POST][AUTH] Database error: ' . $e->getMessage());
+        if ($isConnectionUnavailable($e)) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Database connection unavailable during authentication check.'
+            ], 503);
+        }
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database error during authentication check.'
+        ], 500);
+    }
+
+    if (!$authUser || empty($authUser['user_id'])) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Authentication required. Please provide a valid Bearer session token.'
+        ], 401);
+    }
+
     $input = getRequestPayload();
-    $requestedUserId = trim((string)($input['userId'] ?? ($input['user_id'] ?? ($input['id'] ?? ''))));
-    $authCheck = getAuthUser($pdo);
-    if ($authCheck && $requestedUserId !== '' && (string)$requestedUserId === (string)($authCheck['id'] ?? '')) {
-        $requestedUserId = (string)$authCheck['user_id'];
+    $requestedUserId = $readStringField($input['userId'] ?? ($input['user_id'] ?? ($input['id'] ?? '')));
+    $authPublicId = trim((string)$authUser['user_id']);
+    $authInternalId = trim((string)($authUser['id'] ?? ''));
+
+    if ($requestedUserId === '') {
+        $userId = $authPublicId;
+    } elseif (
+        strcasecmp($requestedUserId, $authPublicId) === 0 ||
+        ($authInternalId !== '' && strcasecmp($requestedUserId, $authInternalId) === 0)
+    ) {
+        $userId = $authPublicId;
+    } else {
+        $isAdmin = isset($authUser['role']) && strtolower(trim((string)$authUser['role'])) === 'admin';
+        if (!$isAdmin) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Unauthorized: Cross-user access is restricted to verified administrators.'
+            ], 403);
+        }
+        $userId = $requestedUserId;
     }
-    [$authUser, $effectiveUserId] = requireAuthUser($pdo, $requestedUserId !== '' ? $requestedUserId : null);
-    $userId = $effectiveUserId ?: $authUser['id'];
 
     $updates = [];
     $params = [];
 
-    if (isset($input['name']) && strlen(trim((string)$input['name'])) >= 2) {
-        $updates[] = 'name = ?';
-        $params[] = trim((string)$input['name']);
+    if (array_key_exists('name', $input)) {
+        $cleanName = $readStringField($input['name']);
+        if (strlen($cleanName) >= 2) {
+            $updates[] = 'name = ?';
+            $params[] = $cleanName;
+        }
     }
 
-    if (isset($input['mobile']) && strlen(trim((string)$input['mobile'])) >= 7) {
-        $updates[] = 'mobile = ?';
-        $params[] = trim((string)$input['mobile']);
+    if (array_key_exists('mobile', $input)) {
+        $cleanMobile = $readStringField($input['mobile']);
+        if (strlen($cleanMobile) >= 7) {
+            $updates[] = 'mobile = ?';
+            $params[] = $cleanMobile;
+        }
     }
 
     if (array_key_exists('channel_logo_url', $input) || array_key_exists('channelLogoUrl', $input)) {
@@ -173,7 +299,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             jsonResponse(['success' => false, 'error' => 'Invalid channel_name format.'], 400);
         } else {
             $trimmedChannelName = trim($rawChannelName);
-            if (mb_strlen($trimmedChannelName) > 255) {
+            $nameLen = function_exists('mb_strlen')
+                ? mb_strlen($trimmedChannelName, 'UTF-8')
+                : strlen($trimmedChannelName);
+            if ($nameLen > 255) {
                 jsonResponse(['success' => false, 'error' => 'Channel name must be 255 characters or fewer.'], 400);
             }
             $updates[] = 'channel_name = ?';
@@ -213,7 +342,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     try {
         $sql = 'UPDATE users SET ' . implode(', ', $updates) . ', updated_at = NOW() WHERE id = ? OR UPPER(user_id) = UPPER(?)';
         $stmt = $pdo->prepare($sql);
-        $stmt->execute($params);
+        if ($stmt === false) {
+            throw new RuntimeException('Failed to prepare profile update query.');
+        }
+        if ($stmt->execute($params) === false) {
+            throw new RuntimeException('Failed to execute profile update query.');
+        }
+        $affectedRows = $stmt->rowCount();
 
         $stmtGet = $pdo->prepare('
             SELECT id, user_id, name, mobile, email, role, referral_code, avatar_url, channel_logo_url, channel_name, channel_description, created_at
@@ -221,11 +356,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             WHERE id = ? OR UPPER(user_id) = UPPER(?)
             LIMIT 1
         ');
-        $stmtGet->execute([$userId, $userId]);
-        $updatedProfile = $stmtGet->fetch();
+        if ($stmtGet === false) {
+            throw new RuntimeException('Failed to prepare updated profile lookup query.');
+        }
+        if ($stmtGet->execute([$userId, $userId]) === false) {
+            throw new RuntimeException('Failed to execute updated profile lookup query.');
+        }
+        $updatedProfile = $stmtGet->fetch(PDO::FETCH_ASSOC);
 
         if (!$updatedProfile) {
-            jsonResponse(['success' => false, 'error' => 'User not found.'], 404);
+            if ($affectedRows === 0) {
+                jsonResponse(['success' => false, 'error' => 'User not found.'], 404);
+            }
+            throw new RuntimeException('Updated user profile could not be retrieved.');
         }
 
         if (!empty($updatedProfile['channel_logo_url'])) {
@@ -237,8 +380,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             'profile' => $updatedProfile,
             'message' => 'Profile updated successfully.'
         ]);
-    } catch (PDOException $e) {
-        jsonResponse(['success' => false, 'error' => 'Database update failed: ' . $e->getMessage()], 500);
+    } catch (Throwable $e) {
+        $safeRollback($pdo);
+        error_log('[users/profile.php][POST] Database error: ' . $e->getMessage());
+        if ($isConnectionUnavailable($e)) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Database connection unavailable while updating profile.'
+            ], 503);
+        }
+        jsonResponse([
+            'success' => false,
+            'error' => 'Failed to update profile due to a server error.'
+        ], 500);
     }
 } else {
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
