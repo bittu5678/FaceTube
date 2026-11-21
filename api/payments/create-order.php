@@ -48,15 +48,25 @@ if (!empty($requestedUserId) && strcasecmp($requestedUserId, $authUser['user_id'
 
 // 2. Video Ownership & Authorization Check
 if (!empty($videoId)) {
-    $stmtVid = $pdo->prepare('SELECT id, user_id, video_type FROM uploaded_videos WHERE id = ? LIMIT 1');
-    $stmtVid->execute([$videoId]);
-    $vidRow = $stmtVid->fetch();
+    try {
+        $stmtVid = $pdo->prepare('SELECT id, user_id, video_type FROM uploaded_videos WHERE id = ? LIMIT 1');
+        $stmtVid->execute([$videoId]);
+        $vidRow = $stmtVid->fetch();
+    } catch (Throwable $eVid) {
+        error_log('[create-order.php] Video lookup error: ' . $eVid->getMessage());
+        jsonResponse(['success' => false, 'error' => 'Database error verifying video eligibility.'], 500);
+    }
     if ($vidRow) {
         $isOwner = strcasecmp($vidRow['user_id'], $effectiveUserId) === 0;
         $isAdmin = $authUser && isset($authUser['role']) && strtolower($authUser['role']) === 'admin';
         if (!$isOwner && !$isAdmin) {
             jsonResponse(['success' => false, 'error' => 'Unauthorized: You can only initiate payment or promotion for your own uploaded videos.'], 403);
         }
+        if ($purpose === 'premium_video_upload' && isset($vidRow['video_type']) && strtolower($vidRow['video_type']) === 'free') {
+            jsonResponse(['success' => false, 'error' => 'Free video uploads do not require payment.'], 400);
+        }
+    } elseif ($purpose === 'ads_promotion') {
+        jsonResponse(['success' => false, 'error' => 'Video not found for promotion.'], 404);
     }
 }
 
@@ -172,7 +182,7 @@ try {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "INR", "created", NOW())
         ON DUPLICATE KEY UPDATE updated_at = NOW()
     ');
-    $stmtPo->execute([
+    $inserted = $stmtPo->execute([
         $orderId,
         $effectiveUserId,
         $effectiveUserName,
@@ -182,8 +192,18 @@ try {
         $contentType ?: null,
         $amount
     ]);
-} catch (Exception $ePo) {
-    error_log('[create-order.php] Warning: Could not write payment_orders: ' . $ePo->getMessage());
+    if ($inserted === false) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Failed to persist payment order in database. Please try again.'
+        ], 500);
+    }
+} catch (Throwable $ePo) {
+    error_log('[create-order.php] Database error persisting payment_orders: ' . $ePo->getMessage());
+    jsonResponse([
+        'success' => false,
+        'error' => 'Failed to persist payment order in database. Please try again.'
+    ], 500);
 }
 
 // 6. Safe Public Response for Checkout

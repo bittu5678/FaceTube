@@ -2440,4 +2440,713 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
       assert.equal(process.env["NODE_ENV"], "production");
     });
   });
+
+  describe("8. Task 5J-U: Live Chat Production Safety & MySQL Persistence", () => {
+    const envKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "USE_REMOTE_PHP_API",
+      "DB_HOST",
+      "DB_NAME",
+      "DB_USER",
+      "FACETUBE_API_BASE_URL",
+      "API_BASE_URL",
+      "VITE_MEDIA_BASE_URL",
+    ] as const;
+    let envSnapshot: Record<string, string | undefined> = {};
+    let suiteStoreSnapshot: string | null = null;
+    let suiteStoreExisted = false;
+
+    interface MockChatRow {
+      id: string;
+      stream_id: string;
+      user_id: string;
+      user_name: string;
+      avatar_url: string | null;
+      message: string;
+      is_superchat: number;
+      superchat_amount: number;
+      created_at: string;
+      // Extra private columns a misconfigured query or row could carry to verify sanitization
+      email?: string;
+      mobile?: string;
+      password_hash?: string;
+      payment_id?: string;
+      order_id?: string;
+      token?: string;
+    }
+
+    function enableMockDbEnv(mockPool: unknown) {
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+      setMysqlPoolForTesting(mockPool as any);
+    }
+
+    function mockSessionUser(tokenParam: unknown) {
+      if (tokenParam === creatorToken) {
+        return [
+          {
+            id: "a0000000-0000-0000-0000-000000000002",
+            user_id: "FT483921",
+            name: "Alex Rivera",
+            mobile: "+1 555-014-8392",
+            email: "alex@facetube.com",
+            role: "user",
+            referral_code: "CREATOR50",
+            avatar_url: "/uploads/logos/alex_avatar.png",
+            channel_logo_url: "/uploads/logos/alex_logo.png",
+            channel_name: "Alex Studio",
+            channel_description: null,
+            created_at: "2026-11-01T00:00:00.000Z",
+          },
+        ];
+      }
+      if (tokenParam === viewerToken) {
+        return [
+          {
+            id: "a0000000-0000-0000-0000-000000000003",
+            user_id: "FT900431",
+            name: "Maya Lin",
+            mobile: "+1 555-019-2831",
+            email: "maya@facetube.com",
+            role: "user",
+            referral_code: "MAYA25",
+            avatar_url: null,
+            channel_logo_url: null,
+            channel_name: "Maya Studio",
+            channel_description: null,
+            created_at: "2026-11-01T00:00:00.000Z",
+          },
+        ];
+      }
+      return [];
+    }
+
+    beforeEach(() => {
+      envSnapshot = {};
+      for (const k of envKeys) {
+        envSnapshot[k] = process.env[k];
+      }
+      suiteStoreExisted = fs.existsSync(storePath);
+      suiteStoreSnapshot = suiteStoreExisted ? fs.readFileSync(storePath, "utf-8") : null;
+      delete process.env["USE_REMOTE_PHP_API"];
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+    });
+
+    afterEach(() => {
+      setMysqlPoolForTesting(null);
+      for (const k of envKeys) {
+        if (envSnapshot[k] !== undefined) {
+          process.env[k] = envSnapshot[k];
+        } else {
+          delete process.env[k];
+        }
+      }
+      if (suiteStoreExisted && suiteStoreSnapshot !== null) {
+        fs.writeFileSync(storePath, suiteStoreSnapshot, "utf-8");
+      } else if (!suiteStoreExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+      resetInMemoryStore();
+    });
+
+    it("1. Authenticated user sends a normal message persisted to MySQL and cannot spoof another user's identity or SuperChat", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      delete process.env["FACETUBE_API_BASE_URL"];
+      delete process.env["API_BASE_URL"];
+      delete process.env["VITE_MEDIA_BASE_URL"];
+
+      const persistedRows: MockChatRow[] = [];
+      let capturedInsertSql = "";
+      let capturedSelectSql = "";
+
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[] = []) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockSessionUser(params[0]), []];
+          }
+          if (/INSERT\s+INTO\s+live_chat_messages/i.test(sql)) {
+            capturedInsertSql = sql;
+            persistedRows.push({
+              id: String(params[0]),
+              stream_id: String(params[1]),
+              user_id: String(params[2]),
+              user_name: String(params[3]),
+              avatar_url: params[4] ? String(params[4]) : null,
+              message: String(params[5]),
+              is_superchat: Number(params[6]),
+              superchat_amount: Number(params[7]),
+              created_at: "2026-11-20T12:00:00.000Z",
+            });
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/FROM\s+live_chat_messages/i.test(sql)) {
+            capturedSelectSql = sql;
+            return [persistedRows.filter((r) => r.stream_id === String(params[0])), []];
+          }
+          return [[], []];
+        },
+      });
+
+      // Attempt to spoof Admin ID/name and fake a ₹5000 SuperChat using Alex's verified session
+      const postRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({
+            stream_id: "live_prod_chat_01",
+            user_id: "FT102857",
+            userId: "FT102857",
+            user_name: "FaceTube Administrator",
+            userName: "Admin",
+            avatar_url: "https://evil.example/spoof.png",
+            message: "Hello from creator chat!",
+            is_superchat: true,
+            isSuperchat: true,
+            superchat_amount: 5000,
+            superchatAmount: 5000,
+          }),
+        }),
+      );
+      assert.ok(postRes);
+      assert.equal(postRes.status, 201);
+      const postData = (await postRes.json()) as any;
+      assert.equal(postData.success, true);
+      assert.equal(postData.message.stream_id, "live_prod_chat_01");
+      assert.equal("user_id" in postData.message, false);
+      assert.equal(postData.message.user_id, undefined);
+      assert.equal(postData.message.user_name, "Alex Rivera");
+      assert.equal(
+        postData.message.avatar_url,
+        "https://api.facetube.online/uploads/logos/alex_avatar.png",
+      );
+      assert.equal(postData.message.message, "Hello from creator chat!");
+      assert.equal(postData.message.is_superchat, false);
+      assert.equal(postData.message.superchat_amount, 0);
+
+      // Verify MySQL row stored authoritative values & non-SuperChat internally
+      assert.match(capturedInsertSql, /INSERT\s+INTO\s+live_chat_messages/i);
+      assert.equal(persistedRows.length, 1);
+      assert.equal(persistedRows[0]!.user_id, "FT483921");
+      assert.equal(persistedRows[0]!.user_name, "Alex Rivera");
+      assert.equal(persistedRows[0]!.is_superchat, 0);
+      assert.equal(persistedRows[0]!.superchat_amount, 0);
+
+      // Verify GET reads directly from MySQL in production and omits user_id publicly
+      const getRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat?stream_id=live_prod_chat_01", {
+          method: "GET",
+        }),
+      );
+      assert.ok(getRes);
+      assert.equal(getRes.status, 200);
+      const getData = (await getRes.json()) as any;
+      assert.equal(getData.success, true);
+      assert.equal(getData.stream_id, "live_prod_chat_01");
+      assert.equal(getData.messages.length, 1);
+      assert.equal("user_id" in getData.messages[0], false);
+      assert.equal(getData.messages[0].user_id, undefined);
+      assert.equal(getData.messages[0].user_name, "Alex Rivera");
+      assert.equal(getData.messages[0].is_superchat, false);
+      assert.equal(getData.messages[0].superchat_amount, 0);
+      assert.doesNotMatch(capturedSelectSql, /\*/);
+      assert.doesNotMatch(capturedSelectSql, /\buser_id\b/);
+    });
+
+    it("2. Guest can send normal messages without login, gets server-generated guest identity, and cannot impersonate registered users/admins or fake SuperChat", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+
+      const persistedRows: MockChatRow[] = [];
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[] = []) => {
+          if (/INSERT\s+INTO\s+live_chat_messages/i.test(sql)) {
+            persistedRows.push({
+              id: String(params[0]),
+              stream_id: String(params[1]),
+              user_id: String(params[2]),
+              user_name: String(params[3]),
+              avatar_url: params[4] ? String(params[4]) : null,
+              message: String(params[5]),
+              is_superchat: Number(params[6]),
+              superchat_amount: Number(params[7]),
+              created_at: "2026-11-20T12:05:00.000Z",
+            });
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/FROM\s+live_chat_messages/i.test(sql)) {
+            return [persistedRows.filter((r) => r.stream_id === String(params[0])), []];
+          }
+          return [[], []];
+        },
+      });
+
+      const guestPostRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Forwarded-For": "203.0.113.42",
+            "User-Agent": "GuestBrowser/1.0",
+          },
+          body: JSON.stringify({
+            streamId: "live_prod_chat_02",
+            user_id: "FT102857",
+            user_name: "FaceTube Administrator",
+            userName: "Alex Rivera",
+            message: "Awesome live coding session!",
+            is_superchat: true,
+            superchat_amount: 9999,
+          }),
+        }),
+      );
+      assert.ok(guestPostRes);
+      assert.equal(guestPostRes.status, 201);
+      const guestPostData = (await guestPostRes.json()) as any;
+      assert.equal(guestPostData.success, true);
+      assert.equal("user_id" in guestPostData.message, false);
+      assert.equal(guestPostData.message.user_id, undefined);
+      assert.match(String(guestPostData.message.user_name), /^Viewer #[A-F0-9]{4}$/);
+      assert.notEqual(guestPostData.message.user_name, "FaceTube Administrator");
+      assert.notEqual(guestPostData.message.user_name, "Alex Rivera");
+      assert.equal(guestPostData.message.avatar_url, null);
+      assert.equal(guestPostData.message.is_superchat, false);
+      assert.equal(guestPostData.message.superchat_amount, 0);
+      assert.equal(persistedRows.length, 1);
+      assert.match(String(persistedRows[0]!.user_id), /^guest_[a-f0-9]{12}$/);
+      assert.notEqual(persistedRows[0]!.user_id, "FT102857");
+      assert.equal(persistedRows[0]!.is_superchat, 0);
+      assert.equal(persistedRows[0]!.superchat_amount, 0);
+
+      // Different guest session gets a distinct internal guest_<hash> identity without exposing user_id
+      const guest2PostRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Forwarded-For": "198.51.100.77",
+            "User-Agent": "AnotherBrowser/2.0",
+          },
+          body: JSON.stringify({
+            stream_id: "live_prod_chat_02",
+            message: "Second viewer saying hi!",
+          }),
+        }),
+      );
+      assert.equal(guest2PostRes?.status, 201);
+      const guest2Data = (await guest2PostRes!.json()) as any;
+      assert.equal("user_id" in guest2Data.message, false);
+      assert.equal(guest2Data.message.user_id, undefined);
+      assert.equal(persistedRows.length, 2);
+      assert.match(String(persistedRows[1]!.user_id), /^guest_[a-f0-9]{12}$/);
+      assert.notEqual(persistedRows[1]!.user_id, persistedRows[0]!.user_id);
+
+      // Verify GET also omits user_id for guest messages
+      const guestGetRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat?stream_id=live_prod_chat_02", {
+          method: "GET",
+        }),
+      );
+      assert.equal(guestGetRes?.status, 200);
+      const guestGetData = (await guestGetRes!.json()) as any;
+      assert.equal(guestGetData.messages.length, 2);
+      for (const msg of guestGetData.messages) {
+        assert.equal("user_id" in msg, false);
+        assert.equal(msg.user_id, undefined);
+      }
+    });
+
+    it("3. Production fails closed with 503 when MySQL pool is unavailable on GET and POST without reading or writing JSON store", async () => {
+      // Seed JSON store with chat message that must NEVER be read or modified in production
+      const baseStore = suiteStoreSnapshot ? JSON.parse(suiteStoreSnapshot) : {};
+      baseStore.liveChatMessages = [
+        {
+          id: "chat_json_leak_test",
+          stream_id: "live_prod_503",
+          user_id: "FT483921",
+          user_name: "JSON Leak User",
+          message: "Must never appear in production",
+          is_superchat: false,
+          superchat_amount: 0,
+          created_at: "2026-11-20T10:00:00.000Z",
+        },
+      ];
+      fs.writeFileSync(storePath, JSON.stringify(baseStore), "utf-8");
+      resetInMemoryStore();
+
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      delete process.env["DB_HOST"];
+      setMysqlPoolForTesting(null);
+
+      const getRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat?stream_id=live_prod_503", {
+          method: "GET",
+        }),
+      );
+      assert.equal(getRes?.status, 503);
+      const getData = (await getRes!.json()) as any;
+      assert.equal(getData.success, false);
+      assert.equal(getData.messages, undefined);
+
+      const postRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stream_id: "live_prod_503", message: "Should fail 503" }),
+        }),
+      );
+      assert.equal(postRes?.status, 503);
+      const postData = (await postRes!.json()) as any;
+      assert.equal(postData.success, false);
+      assert.equal(postData.message, undefined);
+
+      // Runtime env override via Nitro server entry also enforces 503 without mutating process.env
+      process.env["NODE_ENV"] = "test";
+      delete process.env["APP_ENV"];
+      const nitroRes = await nitroServerEntry.fetch(
+        new Request("http://localhost:3000/api/live/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stream_id: "live_prod_503", message: "Nitro prod 503" }),
+        }),
+        { APP_ENV: "production" },
+        undefined,
+      );
+      assert.equal(nitroRes.status, 503);
+      assert.equal(process.env["NODE_ENV"], "test");
+      assert.equal(process.env["APP_ENV"], undefined);
+
+      // Verify JSON store was not written to
+      const afterStore = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      assert.equal(afterStore.liveChatMessages.length, 1);
+    });
+
+    it("4. Production MySQL query/insert errors (and affectedRows=0) fail closed with 500 without JSON fallback or leaking internals", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+
+      const baseStore = suiteStoreSnapshot ? JSON.parse(suiteStoreSnapshot) : {};
+      baseStore.liveChatMessages = [
+        {
+          id: "chat_json_should_not_leak",
+          stream_id: "live_prod_500",
+          user_id: "FT483921",
+          user_name: "JSON Fallback Leak",
+          message: "Must not fall back to JSON",
+          created_at: "2026-11-20T10:00:00.000Z",
+        },
+      ];
+      fs.writeFileSync(storePath, JSON.stringify(baseStore), "utf-8");
+      resetInMemoryStore();
+
+      let mode: "throw" | "zero_rows" = "throw";
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[] = []) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockSessionUser(params[0]), []];
+          }
+          if (/FROM\s+live_chat_messages/i.test(sql)) {
+            throw new Error("ER_NO_SUCH_TABLE: secret-mysql.live_chat_messages missing");
+          }
+          if (/INSERT\s+INTO\s+live_chat_messages/i.test(sql)) {
+            if (mode === "zero_rows") {
+              return [{ affectedRows: 0 }, []];
+            }
+            throw new Error("ER_LOCK_WAIT_TIMEOUT: internal live_chat_messages deadlock");
+          }
+          return [[], []];
+        },
+      });
+
+      const getErrRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat?stream_id=live_prod_500", {
+          method: "GET",
+        }),
+      );
+      assert.equal(getErrRes?.status, 500);
+      const getErrData = (await getErrRes!.json()) as any;
+      assert.equal(getErrData.success, false);
+      assert.equal(getErrData.messages, undefined);
+      assert.doesNotMatch(String(getErrData.error || ""), /secret-mysql|ER_NO_SUCH_TABLE/);
+
+      const postErrRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({ stream_id: "live_prod_500", message: "Should fail 500" }),
+        }),
+      );
+      assert.equal(postErrRes?.status, 500);
+      const postErrData = (await postErrRes!.json()) as any;
+      assert.equal(postErrData.success, false);
+      assert.equal(postErrData.message, undefined);
+      assert.doesNotMatch(String(postErrData.error || ""), /ER_LOCK_WAIT_TIMEOUT|deadlock/);
+
+      mode = "zero_rows";
+      const zeroRowsRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ stream_id: "live_prod_500", message: "Zero rows insert" }),
+        }),
+      );
+      assert.equal(zeroRowsRes?.status, 500);
+      const zeroRowsData = (await zeroRowsRes!.json()) as any;
+      assert.equal(zeroRowsData.success, false);
+      assert.equal(zeroRowsData.message, undefined);
+
+      // JSON store must remain unmodified
+      const afterStore = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      assert.equal(afterStore.liveChatMessages.length, 1);
+    });
+
+    it("5. Development/test JSON fallback remains compatible while enforcing guest anti-impersonation and SuperChat blocking", async () => {
+      process.env["NODE_ENV"] = "test";
+      delete process.env["APP_ENV"];
+      delete process.env["DB_HOST"];
+      setMysqlPoolForTesting(null);
+
+      // Seed clean empty chat list for stream
+      const baseStore = suiteStoreSnapshot ? JSON.parse(suiteStoreSnapshot) : { users: [] };
+      baseStore.liveChatMessages = [];
+      fs.writeFileSync(storePath, JSON.stringify(baseStore), "utf-8");
+      resetInMemoryStore();
+
+      // Guest message in test mode
+      const guestRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Forwarded-For": "10.20.30.40",
+          },
+          body: JSON.stringify({
+            stream_id: "live_dev_chat_01",
+            user_name: "Admin",
+            message: "Dev guest chat message",
+            is_superchat: true,
+            superchat_amount: 500,
+          }),
+        }),
+      );
+      assert.equal(guestRes?.status, 201);
+      const guestData = (await guestRes!.json()) as any;
+      assert.equal("user_id" in guestData.message, false);
+      assert.match(String(guestData.message.user_name), /^Viewer #[A-F0-9]{4}$/);
+      assert.equal(guestData.message.is_superchat, false);
+      assert.equal(guestData.message.superchat_amount, 0);
+
+      // Authenticated user message in test mode
+      const authRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${viewerToken}`,
+          },
+          body: JSON.stringify({
+            stream_id: "live_dev_chat_01",
+            user_id: "FT102857",
+            user_name: "Spoofed Name",
+            message: "Dev logged-in message",
+          }),
+        }),
+      );
+      assert.equal(authRes?.status, 201);
+      const authData = (await authRes!.json()) as any;
+      assert.equal("user_id" in authData.message, false);
+      assert.equal(authData.message.user_name, "Maya Lin");
+
+      // GET reads both messages back from test store without exposing user_id
+      const listRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/live/chat?stream_id=live_dev_chat_01", {
+          method: "GET",
+        }),
+      );
+      assert.equal(listRes?.status, 200);
+      const listData = (await listRes!.json()) as any;
+      assert.equal(listData.messages.length, 2);
+      assert.equal(listData.messages[0].message, "Dev guest chat message");
+      assert.equal(listData.messages[1].message, "Dev logged-in message");
+      assert.equal("user_id" in listData.messages[0], false);
+      assert.equal("user_id" in listData.messages[1], false);
+
+      // Verify dev/test store retained internal guest/member user_ids internally
+      const storedAfter = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      assert.equal(storedAfter.liveChatMessages.length, 2);
+      assert.match(String(storedAfter.liveChatMessages[0].user_id), /^guest_[a-f0-9]{12}$/);
+      assert.equal(storedAfter.liveChatMessages[1].user_id, "FT900431");
+    });
+
+    it("6. Public GET and POST chat responses never expose private user, session, or payment fields and enforce length/rate-limit bounds", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+
+      enableMockDbEnv({
+        query: async (sql: string, params: unknown[] = []) => {
+          if (/FROM\s+sessions/i.test(sql)) {
+            return [mockSessionUser(params[0]), []];
+          }
+          if (/INSERT\s+INTO\s+live_chat_messages/i.test(sql)) {
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/FROM\s+live_chat_messages/i.test(sql)) {
+            return [
+              [
+                {
+                  id: "chat_priv_01",
+                  stream_id: String(params[0]),
+                  user_id: "FT483921",
+                  user_name: "Alex Rivera",
+                  avatar_url: "/uploads/logos/alex_avatar.png",
+                  message: "Public chat content",
+                  is_superchat: 0,
+                  superchat_amount: "0.00",
+                  created_at: "2026-11-20T12:10:00.000Z",
+                  // Sensitive fields that must always be stripped from public projection
+                  email: "alex@facetube.com",
+                  mobile: "+1 555-014-8392",
+                  password_hash: "$2b$10$secret",
+                  token: "tok_secret_session",
+                  payment_id: "pay_rzp_secret",
+                  order_id: "order_rzp_secret",
+                },
+              ],
+              [],
+            ];
+          }
+          return [[], []];
+        },
+      });
+
+      const getRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat?stream_id=live_privacy_01", {
+          method: "GET",
+        }),
+      );
+      assert.equal(getRes?.status, 200);
+      const getData = (await getRes!.json()) as any;
+      assert.equal(getData.messages.length, 1);
+      const pubMsg = getData.messages[0];
+      assert.deepEqual(Object.keys(pubMsg).sort(), [
+        "avatar_url",
+        "created_at",
+        "id",
+        "is_superchat",
+        "message",
+        "stream_id",
+        "superchat_amount",
+        "user_name",
+      ]);
+      for (const forbiddenKey of [
+        "user_id",
+        "email",
+        "mobile",
+        "password_hash",
+        "token",
+        "payment_id",
+        "order_id",
+      ]) {
+        assert.equal(forbiddenKey in pubMsg, false);
+      }
+
+      // Authenticated POST response also adheres to the exact 8-key public projection
+      const postProjRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
+          body: JSON.stringify({
+            stream_id: "live_privacy_01",
+            message: "Public projection check",
+          }),
+        }),
+      );
+      assert.equal(postProjRes?.status, 201);
+      const postProjData = (await postProjRes!.json()) as any;
+      assert.deepEqual(Object.keys(postProjData.message).sort(), [
+        "avatar_url",
+        "created_at",
+        "id",
+        "is_superchat",
+        "message",
+        "stream_id",
+        "superchat_amount",
+        "user_name",
+      ]);
+      assert.equal("user_id" in postProjData.message, false);
+
+      // Reject oversized messages (> 500 chars)
+      const tooLongRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            stream_id: "live_privacy_01",
+            message: "x".repeat(501),
+          }),
+        }),
+      );
+      assert.equal(tooLongRes?.status, 400);
+
+      // Rate-limit bursts (> 20 messages within 10s from same guest/stream)
+      for (let i = 0; i < 20; i++) {
+        const okBurst = await handleApiRequest(
+          new Request("https://facetube.online/api/live/chat", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Forwarded-For": "203.0.113.99",
+            },
+            body: JSON.stringify({
+              stream_id: "live_rate_limit_stream",
+              message: `Burst message ${i + 1}`,
+            }),
+          }),
+        );
+        assert.equal(okBurst?.status, 201);
+      }
+      const limitedRes = await handleApiRequest(
+        new Request("https://facetube.online/api/live/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Forwarded-For": "203.0.113.99",
+          },
+          body: JSON.stringify({
+            stream_id: "live_rate_limit_stream",
+            message: "Message 21 should be rate-limited",
+          }),
+        }),
+      );
+      assert.equal(limitedRes?.status, 429);
+    });
+
+    it("7. PHP api/live/chat.php enforces parity for guest SHA-256 identity, user_id privacy, anti-impersonation, and non-trusted SuperChat fields", () => {
+      const chatPhp = fs.readFileSync(path.resolve(process.cwd(), "api/live/chat.php"), "utf-8");
+      assert.doesNotMatch(chatPhp, /\$input\['user_name'\]/);
+      assert.doesNotMatch(chatPhp, /!empty\(\$input\['is_superchat'\]\)/);
+      assert.doesNotMatch(chatPhp, /floatval\(\$input\['superchat_amount'\]/);
+      assert.doesNotMatch(chatPhp, /'user_id'\s*=>/);
+      assert.doesNotMatch(chatPhp, /SELECT\s+id,\s*stream_id,\s*user_id,\s*user_name/i);
+      assert.match(chatPhp, /INSERT\s+INTO\s+live_chat_messages\s*\([^)]*user_id/i);
+      assert.match(chatPhp, /'guest_'\s*\.\s*\$guestHash/);
+      assert.match(chatPhp, /\$isSuperchat\s*=\s*false;/);
+      assert.match(chatPhp, /\$superchatAmount\s*=\s*0\.0;/);
+      assert.match(chatPhp, /rowCount\(\)\s*<\s*1/);
+      assert.match(chatPhp, /429/);
+    });
+  });
 });

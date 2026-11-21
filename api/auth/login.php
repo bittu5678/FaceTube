@@ -62,16 +62,23 @@ try {
         jsonResponse(['success' => false, 'error' => 'Incorrect password. Please try again.'], 401);
     }
 
-    // 3. Issue new session token
+    // 3. Issue new session token and fail closed if persistence fails
     $sessionToken = bin2hex(random_bytes(32));
     try {
         $stmtSession = $pdo->prepare('
             INSERT INTO sessions (token, user_id, expires_at, created_at)
             VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())
         ');
-        $stmtSession->execute([$sessionToken, $user['id']]);
-    } catch (Exception $eSession) {
-        // Sessions table optional
+        $sessionOk = $stmtSession->execute([$sessionToken, $user['id']]);
+        if (!$sessionOk || $stmtSession->rowCount() < 1) {
+            throw new RuntimeException('Session insert affected 0 rows.');
+        }
+    } catch (Throwable $eSession) {
+        error_log('[FaceTube Auth] Failed to persist login session: ' . $eSession->getMessage());
+        jsonResponse([
+            'success' => false,
+            'error' => 'Database error while creating login session. Please try again.'
+        ], 500);
     }
 
     unset($user['password_hash']);

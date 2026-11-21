@@ -1224,4 +1224,1225 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
       assert.equal(process.env["APP_ENV"], undefined);
     });
   });
+
+  describe("7. Task 5J-T: Login & Registration Session INSERT Fail-Closed Persistence", () => {
+    const envKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "USE_REMOTE_PHP_API",
+      "DB_HOST",
+      "DB_PORT",
+      "DB_NAME",
+      "DB_USER",
+      "DB_PASSWORD",
+      "MYSQL_HOST",
+      "MYSQL_PORT",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "MYSQL_PASSWORD",
+    ] as const;
+    let envSnapshot: Record<string, string | undefined> = {};
+    const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+    let storeExisted = false;
+    let storeSnapshot: string | null = null;
+
+    beforeEach(() => {
+      envSnapshot = {};
+      for (const k of envKeys) {
+        envSnapshot[k] = process.env[k];
+      }
+      storeExisted = fs.existsSync(storePath);
+      storeSnapshot = storeExisted ? fs.readFileSync(storePath, "utf-8") : null;
+      delete process.env["USE_REMOTE_PHP_API"];
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+    });
+
+    afterEach(() => {
+      setMysqlPoolForTesting(null);
+      for (const k of envKeys) {
+        if (envSnapshot[k] !== undefined) {
+          process.env[k] = envSnapshot[k];
+        } else {
+          delete process.env[k];
+        }
+      }
+      if (storeExisted && storeSnapshot !== null) {
+        fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+      } else if (!storeExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+      resetInMemoryStore();
+    });
+
+    it("1. Successful MySQL session INSERT preserves login response format and allows session resolution", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_prod";
+      process.env["DB_USER"] = "prod_user";
+
+      const sha256Password = crypto.createHash("sha256").update("password123").digest("hex");
+      const persistedSessions = new Map<string, string>();
+      const dbUser = {
+        id: "u-5jt-alex",
+        user_id: "FT483921",
+        name: "Alex Rivera",
+        mobile: "+1 555-014-8392",
+        email: "alex@facetube.com",
+        role: "user",
+        referral_code: "CREATOR50",
+        avatar_url: null,
+        channel_logo_url: "/uploads/logos/alex.png",
+        channel_name: "Alex Studio",
+        channel_description: "Creator channel",
+        created_at: "2026-11-01T00:00:00.000Z",
+      };
+
+      setMysqlPoolForTesting({
+        query: async (sql: string, params: any[] = []) => {
+          if (/INSERT\s+INTO\s+sessions/i.test(sql)) {
+            persistedSessions.set(String(params[0]), String(params[1]));
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/FROM\s+sessions/i.test(sql)) {
+            const tok = String(params[0]);
+            if (persistedSessions.has(tok)) {
+              return [[dbUser], []];
+            }
+            return [[], []];
+          }
+          if (/FROM\s+users/i.test(sql)) {
+            return [[{ ...dbUser, password_hash: sha256Password }], []];
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const loginRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+        }),
+      );
+      assert.ok(loginRes);
+      assert.equal(loginRes.status, 200);
+      const loginData = (await loginRes.json()) as any;
+      assert.equal(loginData.success, true);
+      assert.equal(typeof loginData.token, "string");
+      assert.equal(loginData.token.length, 48);
+      assert.equal(loginData.message, "Login successful.");
+      assert.equal(loginData.user.user_id, "FT483921");
+      assert.equal(
+        loginData.user.channel_logo_url,
+        "https://api.facetube.online/uploads/logos/alex.png",
+      );
+      assert.equal("password_hash" in loginData.user, false);
+      assert.ok(persistedSessions.has(loginData.token));
+
+      const meRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/me", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${loginData.token}` },
+        }),
+      );
+      assert.ok(meRes);
+      assert.equal(meRes.status, 200);
+      const meData = (await meRes.json()) as any;
+      assert.equal(meData.authenticated, true);
+      assert.equal(meData.user.user_id, "FT483921");
+    });
+
+    it("2. Failed MySQL session INSERT on POST /api/auth/login fails closed with HTTP 500 and never returns a token", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_prod";
+      process.env["DB_USER"] = "prod_user";
+
+      const sha256Password = crypto.createHash("sha256").update("password123").digest("hex");
+      const dbUser = {
+        id: "u-5jt-alex",
+        user_id: "FT483921",
+        name: "Alex Rivera",
+        mobile: "+1 555-014-8392",
+        email: "alex@facetube.com",
+        password_hash: sha256Password,
+        role: "user",
+        referral_code: "CREATOR50",
+        avatar_url: null,
+        channel_logo_url: null,
+        channel_name: "Alex Studio",
+        channel_description: null,
+        created_at: "2026-11-01T00:00:00.000Z",
+      };
+
+      // Case A: MySQL error thrown on INSERT INTO sessions (e.g., ER_NO_SUCH_TABLE)
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (/FROM\s+users/i.test(sql)) {
+            return [[dbUser], []];
+          }
+          if (/INSERT\s+INTO\s+sessions/i.test(sql)) {
+            throw new Error("ER_NO_SUCH_TABLE: secret-prod-db.sessions doesn't exist");
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const errRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+        }),
+      );
+      assert.ok(errRes);
+      assert.equal(errRes.status, 500);
+      const errData = (await errRes.json()) as any;
+      assert.equal(errData.success, false);
+      assert.equal(errData.token, undefined);
+      assert.equal(errData.user, undefined);
+      assert.doesNotMatch(String(errData.error || ""), /secret-prod-db|ER_NO_SUCH_TABLE/);
+
+      // Case B: INSERT INTO sessions reports affectedRows: 0
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (/FROM\s+users/i.test(sql)) {
+            return [[dbUser], []];
+          }
+          if (/INSERT\s+INTO\s+sessions/i.test(sql)) {
+            return [{ affectedRows: 0 }, []];
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const zeroRowsRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+        }),
+      );
+      assert.ok(zeroRowsRes);
+      assert.equal(zeroRowsRes.status, 500);
+      const zeroRowsData = (await zeroRowsRes.json()) as any;
+      assert.equal(zeroRowsData.success, false);
+      assert.equal(zeroRowsData.token, undefined);
+
+      // Case C: Handler runtime env override { APP_ENV: "production" } via Nitro server entry
+      process.env["NODE_ENV"] = "test";
+      delete process.env["APP_ENV"];
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (/FROM\s+users/i.test(sql)) {
+            return [[dbUser], []];
+          }
+          if (/INSERT\s+INTO\s+sessions/i.test(sql)) {
+            throw new Error("Simulated MySQL session insert outage");
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const nitroRes = await nitroServerEntry.fetch(
+        new Request("https://internal-lb.cluster.local/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+        }),
+        { APP_ENV: "production" },
+        undefined,
+      );
+      assert.equal(nitroRes.status, 500);
+      const nitroData = (await nitroRes.json()) as any;
+      assert.equal(nitroData.success, false);
+      assert.equal(nitroData.token, undefined);
+      assert.equal(process.env["NODE_ENV"], "test");
+      assert.equal(process.env["APP_ENV"], undefined);
+    });
+
+    it("3. Successful MySQL registration preserves 201 format and failed MySQL session INSERT fails closed without returning a token", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_prod";
+      process.env["DB_USER"] = "prod_user";
+
+      const persistedSessions = new Map<string, string>();
+
+      // Case A: Successful registration
+      setMysqlPoolForTesting({
+        query: async (sql: string, params: any[] = []) => {
+          if (/SELECT\s+id\s+FROM\s+users/i.test(sql) || /SELECT\s+1\s+FROM\s+users/i.test(sql)) {
+            return [[], []];
+          }
+          if (/INSERT\s+INTO\s+users/i.test(sql)) {
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/INSERT\s+INTO\s+wallet_balances/i.test(sql)) {
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/INSERT\s+INTO\s+sessions/i.test(sql)) {
+            persistedSessions.set(String(params[0]), String(params[1]));
+            return [{ affectedRows: 1 }, []];
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const okRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "New Creator",
+            mobile: "+1 555-010-1234",
+            email: "newcreator@facetube.com",
+            password: "Password123!",
+          }),
+        }),
+      );
+      assert.ok(okRes);
+      assert.equal(okRes.status, 201);
+      const okData = (await okRes.json()) as any;
+      assert.equal(okData.success, true);
+      assert.equal(typeof okData.token, "string");
+      assert.equal(okData.token.length, 48);
+      assert.match(String(okData.userId || ""), /^FT\d{6}$/);
+      assert.equal(okData.user.email, "newcreator@facetube.com");
+      assert.equal(okData.message, "Registration successful.");
+      assert.ok(okData.emailDelivery);
+      assert.ok(persistedSessions.has(okData.token));
+
+      // Case B: Session INSERT throws during registration -> HTTP 500 and NO token
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (/SELECT\s+id\s+FROM\s+users/i.test(sql) || /SELECT\s+1\s+FROM\s+users/i.test(sql)) {
+            return [[], []];
+          }
+          if (/INSERT\s+INTO\s+users/i.test(sql)) {
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/INSERT\s+INTO\s+wallet_balances/i.test(sql)) {
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/INSERT\s+INTO\s+sessions/i.test(sql)) {
+            throw new Error("ER_NO_SUCH_TABLE: internal-mysql.sessions missing");
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const failRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "Blocked Creator",
+            mobile: "+1 555-010-5678",
+            email: "blocked@facetube.com",
+            password: "Password123!",
+          }),
+        }),
+      );
+      assert.ok(failRes);
+      assert.equal(failRes.status, 500);
+      const failData = (await failRes.json()) as any;
+      assert.equal(failData.success, false);
+      assert.equal(failData.token, undefined);
+      assert.equal(failData.user, undefined);
+      assert.doesNotMatch(String(failData.error || ""), /internal-mysql|ER_NO_SUCH_TABLE/);
+
+      // Case C: Session INSERT returns affectedRows: 0 during registration -> HTTP 500 and NO token
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (/SELECT\s+id\s+FROM\s+users/i.test(sql) || /SELECT\s+1\s+FROM\s+users/i.test(sql)) {
+            return [[], []];
+          }
+          if (/INSERT\s+INTO\s+users/i.test(sql)) {
+            return [{ affectedRows: 1 }, []];
+          }
+          if (/INSERT\s+INTO\s+sessions/i.test(sql)) {
+            return [{ affectedRows: 0 }, []];
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const zeroRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "Zero Row Creator",
+            mobile: "+1 555-010-9999",
+            email: "zerorow@facetube.com",
+            password: "Password123!",
+          }),
+        }),
+      );
+      assert.ok(zeroRes);
+      assert.equal(zeroRes.status, 500);
+      const zeroData = (await zeroRes.json()) as any;
+      assert.equal(zeroData.success, false);
+      assert.equal(zeroData.token, undefined);
+    });
+
+    it("4. Development/test JSON fallback works when pool is absent, while failed MySQL session INSERT never issues a token even in test mode", async () => {
+      delete process.env["DB_HOST"];
+      delete process.env["DB_NAME"];
+      delete process.env["DB_USER"];
+      process.env["NODE_ENV"] = "test";
+      delete process.env["APP_ENV"];
+      setMysqlPoolForTesting(null);
+
+      // Explicit test mode without MySQL pool -> JSON store login & session resolution still work
+      const devLoginRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "alex@facetube.com", password: "password" }),
+        }),
+      );
+      assert.ok(devLoginRes);
+      assert.equal(devLoginRes.status, 200);
+      const devLoginData = (await devLoginRes.json()) as any;
+      assert.equal(devLoginData.success, true);
+      assert.ok(devLoginData.token);
+
+      const devMeRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/auth/me", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${devLoginData.token}` },
+        }),
+      );
+      assert.ok(devMeRes);
+      assert.equal(devMeRes.status, 200);
+      const devMeData = (await devMeRes.json()) as any;
+      assert.equal(devMeData.authenticated, true);
+      assert.equal(devMeData.user.user_id, "FT483921");
+
+      // Even in test mode, if MySQL pool IS configured and session INSERT fails, do not return a token
+      const sha256Password = crypto.createHash("sha256").update("password123").digest("hex");
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (/FROM\s+users/i.test(sql)) {
+            return [
+              [
+                {
+                  id: "u-5jt-alex",
+                  user_id: "FT483921",
+                  name: "Alex Rivera",
+                  mobile: "+1 555-014-8392",
+                  email: "alex@facetube.com",
+                  password_hash: sha256Password,
+                  role: "user",
+                  referral_code: null,
+                  avatar_url: null,
+                  channel_logo_url: null,
+                  channel_name: null,
+                  channel_description: null,
+                  created_at: "2026-11-01T00:00:00.000Z",
+                },
+              ],
+              [],
+            ];
+          }
+          if (/INSERT\s+INTO\s+sessions/i.test(sql)) {
+            throw new Error("Simulated test MySQL session insert failure");
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const failTestRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+        }),
+      );
+      assert.ok(failTestRes);
+      assert.equal(failTestRes.status, 500);
+      const failTestData = (await failTestRes.json()) as any;
+      assert.equal(failTestData.success, false);
+      assert.equal(failTestData.token, undefined);
+    });
+
+    it("5. PHP auth/login.php and auth/register.php enforce fail-closed session INSERT parity", () => {
+      for (const relPath of ["api/auth/login.php", "api/auth/register.php"]) {
+        const fullPath = path.resolve(process.cwd(), relPath);
+        assert.ok(fs.existsSync(fullPath), `${relPath} must exist`);
+        const content = fs.readFileSync(fullPath, "utf-8");
+
+        assert.doesNotMatch(
+          content,
+          /Sessions table optional/i,
+          `${relPath} must not treat sessions table failures as optional`,
+        );
+        assert.match(
+          content,
+          /rowCount\(\)\s*<\s*1/,
+          `${relPath} must verify INSERT INTO sessions affected at least 1 row`,
+        );
+        assert.match(
+          content,
+          /catch\s*\(\s*Throwable\s+\$eSession\s*\)[\s\S]*?jsonResponse\([\s\S]*?'success'\s*=>\s*false[\s\S]*?,\s*500\s*\)/,
+          `${relPath} must fail closed with HTTP 500 when session persistence fails`,
+        );
+      }
+    });
+  });
+
+  describe("8. Task 5J-T2: Registration Failure Recovery & Retry Consistency", () => {
+    const envKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "USE_REMOTE_PHP_API",
+      "DB_HOST",
+      "DB_PORT",
+      "DB_NAME",
+      "DB_USER",
+      "DB_PASSWORD",
+      "MYSQL_HOST",
+      "MYSQL_PORT",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "MYSQL_PASSWORD",
+    ] as const;
+    let envSnapshot: Record<string, string | undefined> = {};
+    const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+    let storeExisted = false;
+    let storeSnapshot: string | null = null;
+
+    interface MockUserRow {
+      id: string;
+      user_id: string;
+      name: string;
+      mobile: string;
+      email: string;
+      password_hash: string;
+      role: string;
+      referral_code: string | null;
+      avatar_url: string | null;
+      channel_logo_url: string | null;
+      channel_name: string | null;
+      channel_description: string | null;
+      created_at: string;
+    }
+
+    interface MockWalletRow {
+      user_id: string;
+      balance: number;
+    }
+
+    function createStatefulAuthMockPool(options: {
+      sessionFailureMode: () => "none" | "throw" | "zero_rows";
+    }) {
+      const users: MockUserRow[] = [];
+      const walletBalances: MockWalletRow[] = [];
+      const sessions = new Map<string, string>();
+      const queryLog: string[] = [];
+
+      const pool = {
+        query: async (sql: string, params: any[] = []) => {
+          const normalizedSql = sql.replace(/\s+/g, " ").trim();
+          queryLog.push(normalizedSql);
+
+          if (/^SELECT id FROM users WHERE LOWER\(email\) = LOWER\(\?\)/i.test(normalizedSql)) {
+            const targetEmail = String(params[0] || "").toLowerCase();
+            const found = users.filter((u) => u.email.toLowerCase() === targetEmail);
+            return [found.map((u) => ({ id: u.id })), []];
+          }
+
+          if (/^SELECT 1 FROM users WHERE UPPER\(user_id\) = UPPER\(\?\)/i.test(normalizedSql)) {
+            const targetUid = String(params[0] || "").toUpperCase();
+            const found = users.filter((u) => u.user_id.toUpperCase() === targetUid);
+            return [found.map(() => ({ 1: 1 })), []];
+          }
+
+          if (/^INSERT INTO users\b/i.test(normalizedSql)) {
+            const [uuid, userId, name, mobile, email, passwordHash, role, referralCode] = params;
+            const emailStr = String(email).toLowerCase();
+            const uidStr = String(userId).toUpperCase();
+            if (users.some((u) => u.email.toLowerCase() === emailStr)) {
+              throw new Error("ER_DUP_ENTRY: Duplicate entry for key 'uniq_users_email'");
+            }
+            if (users.some((u) => u.user_id.toUpperCase() === uidStr)) {
+              throw new Error("ER_DUP_ENTRY: Duplicate entry for key 'uniq_users_user_id'");
+            }
+            users.push({
+              id: String(uuid),
+              user_id: String(userId),
+              name: String(name),
+              mobile: String(mobile || ""),
+              email: emailStr,
+              password_hash: String(passwordHash),
+              role: String(role || "user"),
+              referral_code:
+                referralCode === null || referralCode === undefined ? null : String(referralCode),
+              avatar_url: null,
+              channel_logo_url: null,
+              channel_name: null,
+              channel_description: null,
+              created_at: new Date().toISOString(),
+            });
+            return [{ affectedRows: 1 }, []];
+          }
+
+          if (/^INSERT INTO wallet_balances\b/i.test(normalizedSql)) {
+            const userId = String(params[0]);
+            if (!walletBalances.some((w) => w.user_id === userId)) {
+              walletBalances.push({ user_id: userId, balance: 0 });
+            }
+            return [{ affectedRows: 1 }, []];
+          }
+
+          if (/^INSERT INTO sessions\b/i.test(normalizedSql)) {
+            const mode = options.sessionFailureMode();
+            if (mode === "throw") {
+              throw new Error("ER_LOCK_WAIT_TIMEOUT: Simulated sessions table failure");
+            }
+            if (mode === "zero_rows") {
+              return [{ affectedRows: 0 }, []];
+            }
+            const token = String(params[0]);
+            const userUuid = String(params[1]);
+            sessions.set(token, userUuid);
+            return [{ affectedRows: 1 }, []];
+          }
+
+          if (
+            /FROM users WHERE UPPER\(user_id\) = UPPER\(\?\) OR LOWER\(email\) = LOWER\(\?\)/i.test(
+              normalizedSql,
+            )
+          ) {
+            const ident = String(params[0] || "").trim();
+            const found = users.filter(
+              (u) =>
+                u.user_id.toUpperCase() === ident.toUpperCase() ||
+                u.email.toLowerCase() === ident.toLowerCase(),
+            );
+            return [found.map((u) => ({ ...u })), []];
+          }
+
+          if (/FROM sessions s INNER JOIN users u/i.test(normalizedSql)) {
+            const token = String(params[0] || "").trim();
+            const sessionUserUuid = sessions.get(token);
+            if (!sessionUserUuid) {
+              return [[], []];
+            }
+            const user = users.find(
+              (u) => u.id === sessionUserUuid || u.user_id === sessionUserUuid,
+            );
+            if (!user) {
+              return [[], []];
+            }
+            const { password_hash: _ph, ...safeUser } = user;
+            return [[safeUser], []];
+          }
+
+          return [[], []];
+        },
+      } as any;
+
+      return { pool, users, walletBalances, sessions, queryLog };
+    }
+
+    beforeEach(() => {
+      envSnapshot = {};
+      for (const k of envKeys) {
+        envSnapshot[k] = process.env[k];
+      }
+      storeExisted = fs.existsSync(storePath);
+      storeSnapshot = storeExisted ? fs.readFileSync(storePath, "utf-8") : null;
+      delete process.env["USE_REMOTE_PHP_API"];
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+    });
+
+    afterEach(() => {
+      setMysqlPoolForTesting(null);
+      for (const k of envKeys) {
+        if (envSnapshot[k] !== undefined) {
+          process.env[k] = envSnapshot[k];
+        } else {
+          delete process.env[k];
+        }
+      }
+      if (storeExisted && storeSnapshot !== null) {
+        fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+      } else if (!storeExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+      resetInMemoryStore();
+    });
+
+    it("1. Failed session INSERT leaves committed user/wallet, blocks duplicate retry with 409, and recovers via email login + auth/me", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_prod";
+      process.env["DB_USER"] = "prod_user";
+
+      let sessionFailureMode: "none" | "throw" | "zero_rows" = "throw";
+      const db = createStatefulAuthMockPool({
+        sessionFailureMode: () => sessionFailureMode,
+      });
+      setMysqlPoolForTesting(db.pool);
+
+      const email = "recovery.creator@facetube.com";
+      const password = "RecoveryPassword!2026";
+
+      // 1) First registration: user + wallet INSERT succeed, session INSERT fails -> HTTP 500, no token
+      const firstRegRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "Recovery Creator",
+            mobile: "+1 555-019-7788",
+            email,
+            password,
+          }),
+        }),
+      );
+      assert.ok(firstRegRes);
+      assert.equal(firstRegRes.status, 500);
+      const firstRegData = (await firstRegRes.json()) as any;
+      assert.equal(firstRegData.success, false);
+      assert.equal(firstRegData.token, undefined);
+      assert.equal(firstRegData.user, undefined);
+
+      assert.equal(
+        db.users.length,
+        1,
+        "User row remains committed in MySQL after session INSERT failure",
+      );
+      assert.equal(db.walletBalances.length, 1, "Wallet row remains committed in MySQL");
+      assert.equal(db.sessions.size, 0, "No session row should exist after failed session INSERT");
+      assert.equal(db.users[0]?.email, email);
+      assert.match(String(db.users[0]?.user_id || ""), /^FT\d{6}$/);
+      assert.equal(db.walletBalances[0]?.user_id, db.users[0]?.user_id);
+
+      // 2) Registration retry with the same email -> HTTP 409, no duplicate user or wallet created
+      const retryRegRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "Recovery Creator Retry",
+            mobile: "+1 555-019-7788",
+            email: "  Recovery.Creator@Facetube.COM ",
+            password,
+          }),
+        }),
+      );
+      assert.ok(retryRegRes);
+      assert.equal(retryRegRes.status, 409);
+      const retryRegData = (await retryRegRes.json()) as any;
+      assert.equal(retryRegData.success, false);
+      assert.equal(retryRegData.token, undefined);
+      assert.match(String(retryRegData.error || ""), /already registered/i);
+      assert.equal(db.users.length, 1, "Duplicate user must not be created on retry");
+      assert.equal(db.walletBalances.length, 1, "Duplicate wallet must not be created on retry");
+      assert.equal(db.sessions.size, 0);
+
+      // 3) Login recovery with same email and original password once session persistence succeeds -> HTTP 200 + token
+      sessionFailureMode = "none";
+      const loginRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            identifier: email,
+            password,
+          }),
+        }),
+      );
+      assert.ok(loginRes);
+      assert.equal(loginRes.status, 200);
+      const loginData = (await loginRes.json()) as any;
+      assert.equal(loginData.success, true);
+      assert.equal(typeof loginData.token, "string");
+      assert.equal(loginData.token.length, 48);
+      assert.equal(loginData.user.id, db.users[0]?.id);
+      assert.equal(loginData.user.user_id, db.users[0]?.user_id);
+      assert.equal(loginData.user.email, email);
+      assert.equal("password_hash" in loginData.user, false);
+      assert.equal(db.sessions.size, 1);
+      assert.equal(db.sessions.get(loginData.token), db.users[0]?.id);
+
+      // 4) GET /api/auth/me resolves the authenticated user using the recovered token
+      const meRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/me", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${loginData.token}` },
+        }),
+      );
+      assert.ok(meRes);
+      assert.equal(meRes.status, 200);
+      const meData = (await meRes.json()) as any;
+      assert.equal(meData.authenticated, true);
+      assert.equal(meData.user.id, db.users[0]?.id);
+      assert.equal(meData.user.user_id, db.users[0]?.user_id);
+      assert.equal(meData.user.email, email);
+      assert.equal(meData.user.name, "Recovery Creator");
+      assert.equal("password_hash" in meData.user, false);
+    });
+
+    it("2. Registration failing with affectedRows=0 also prevents duplicates on 409 retry and recovers on subsequent login", async () => {
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_prod";
+      process.env["DB_USER"] = "prod_user";
+
+      let sessionFailureMode: "none" | "throw" | "zero_rows" = "zero_rows";
+      const db = createStatefulAuthMockPool({
+        sessionFailureMode: () => sessionFailureMode,
+      });
+      setMysqlPoolForTesting(db.pool);
+
+      const email = "zero.rows.recovery@facetube.com";
+      const password = "StrongPassword!99";
+
+      const regRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "Zero Rows User",
+            mobile: "+1 555-019-8899",
+            email,
+            password,
+          }),
+        }),
+      );
+      assert.ok(regRes);
+      assert.equal(regRes.status, 500);
+      const regData = (await regRes.json()) as any;
+      assert.equal(regData.success, false);
+      assert.equal(regData.token, undefined);
+      assert.equal(db.users.length, 1);
+      assert.equal(db.walletBalances.length, 1);
+      assert.equal(db.sessions.size, 0);
+
+      // Retry registration while session persistence is even healthy again -> still 409, no duplicate
+      sessionFailureMode = "none";
+      const retryRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: "Zero Rows User",
+            mobile: "+1 555-019-8899",
+            email,
+            password,
+          }),
+        }),
+      );
+      assert.ok(retryRes);
+      assert.equal(retryRes.status, 409);
+      assert.equal(db.users.length, 1);
+      assert.equal(db.sessions.size, 0);
+
+      // Wrong password rejected with 401 and no session created
+      const badLoginRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: email, password: "WrongPassword!00" }),
+        }),
+      );
+      assert.ok(badLoginRes);
+      assert.equal(badLoginRes.status, 401);
+      assert.equal(db.sessions.size, 0);
+
+      // Original password recovers cleanly and authenticates /api/auth/me
+      const goodLoginRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ identifier: email, password }),
+        }),
+      );
+      assert.ok(goodLoginRes);
+      assert.equal(goodLoginRes.status, 200);
+      const goodLoginData = (await goodLoginRes.json()) as any;
+      assert.equal(goodLoginData.success, true);
+      assert.ok(goodLoginData.token);
+      assert.equal(db.sessions.size, 1);
+
+      const meRes = await handleApiRequest(
+        new Request("https://facetube.online/api/auth/me", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${goodLoginData.token}` },
+        }),
+      );
+      assert.ok(meRes);
+      assert.equal(meRes.status, 200);
+      const meData = (await meRes.json()) as any;
+      assert.equal(meData.authenticated, true);
+      assert.equal(meData.user.user_id, db.users[0]?.user_id);
+      assert.equal(meData.user.email, email);
+    });
+  });
+
+  describe("Task 5J-V1: Production JSON Store Access Protection", () => {
+    const envKeys = [
+      "NODE_ENV",
+      "APP_ENV",
+      "USE_REMOTE_PHP_API",
+      "DB_HOST",
+      "DB_PORT",
+      "DB_NAME",
+      "DB_USER",
+      "DB_PASSWORD",
+      "MYSQL_HOST",
+      "MYSQL_PORT",
+      "MYSQL_DATABASE",
+      "MYSQL_USER",
+      "MYSQL_PASSWORD",
+    ] as const;
+    const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+    let envSnapshot: Record<string, string | undefined> = {};
+    let storeExisted = false;
+    let storeSnapshot: string | null = null;
+
+    function installStoreFsSpy() {
+      const origExistsSync = fs.existsSync;
+      const origStatSync = fs.statSync;
+      const origReadFileSync = fs.readFileSync;
+      const origWriteFileSync = fs.writeFileSync;
+
+      const ops = {
+        existsChecks: 0,
+        statChecks: 0,
+        reads: 0,
+        writes: 0,
+      };
+
+      const isTargetStore = (p: fs.PathOrFileDescriptor | fs.PathLike): boolean => {
+        if (typeof p !== "string" && !(p instanceof URL)) return false;
+        const resolved = p instanceof URL ? p.pathname : path.resolve(p);
+        return resolved === storePath;
+      };
+
+      fs.existsSync = ((p: fs.PathLike) => {
+        if (isTargetStore(p)) ops.existsChecks++;
+        return origExistsSync(p);
+      }) as typeof fs.existsSync;
+
+      (fs as any).statSync = ((p: fs.PathLike, options?: any) => {
+        if (isTargetStore(p)) ops.statChecks++;
+        return origStatSync(p, options);
+      }) as typeof fs.statSync;
+
+      fs.readFileSync = ((p: fs.PathOrFileDescriptor, options?: any) => {
+        if (isTargetStore(p)) ops.reads++;
+        return origReadFileSync(p, options);
+      }) as typeof fs.readFileSync;
+
+      fs.writeFileSync = ((p: fs.PathOrFileDescriptor, data: any, options?: any) => {
+        if (isTargetStore(p)) ops.writes++;
+        return origWriteFileSync(p, data, options);
+      }) as typeof fs.writeFileSync;
+
+      return {
+        ops,
+        restore: () => {
+          fs.existsSync = origExistsSync;
+          (fs as any).statSync = origStatSync;
+          fs.readFileSync = origReadFileSync;
+          fs.writeFileSync = origWriteFileSync;
+        },
+      };
+    }
+
+    beforeEach(() => {
+      envSnapshot = {};
+      for (const k of envKeys) {
+        envSnapshot[k] = process.env[k];
+      }
+      storeExisted = fs.existsSync(storePath);
+      storeSnapshot = storeExisted ? fs.readFileSync(storePath, "utf-8") : null;
+      resetInMemoryStore();
+      setMysqlPoolForTesting(null);
+      delete process.env["USE_REMOTE_PHP_API"];
+      delete process.env["DB_HOST"];
+      delete process.env["DB_NAME"];
+      delete process.env["DB_USER"];
+      delete process.env["MYSQL_HOST"];
+      delete process.env["MYSQL_DATABASE"];
+      delete process.env["MYSQL_USER"];
+    });
+
+    afterEach(() => {
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+      for (const k of envKeys) {
+        if (envSnapshot[k] === undefined) delete process.env[k];
+        else process.env[k] = envSnapshot[k];
+      }
+      if (storeExisted && storeSnapshot !== null) {
+        const dir = path.dirname(storePath);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+      } else if (!storeExisted && fs.existsSync(storePath)) {
+        fs.unlinkSync(storePath);
+      }
+    });
+
+    it("1. NODE_ENV=production never reads, seeds, or writes data/facetube_store.json across API dispatch", async () => {
+      if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+      process.env["NODE_ENV"] = "production";
+      delete process.env["APP_ENV"];
+
+      const spy = installStoreFsSpy();
+      try {
+        // Without MySQL pool: fail-closed 503, no crash, no disk touch
+        const videosNoPoolRes = await handleApiRequest(
+          new Request("https://facetube.online/api/videos/list", { method: "GET" }),
+        );
+        assert.equal(videosNoPoolRes?.status, 503);
+
+        const loginNoPoolRes = await nitroServerEntry.fetch(
+          new Request("https://facetube.online/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifier: "alex@facetube.com", password: "password" }),
+          }),
+          undefined,
+          undefined,
+        );
+        assert.equal(loginNoPoolRes.status, 503);
+
+        // Even a store-reading route must not crash, must not seed demo videos, and must not touch disk
+        const countsRes = await handleApiRequest(
+          new Request("https://facetube.online/api/videos/counts", { method: "GET" }),
+        );
+        assert.equal(countsRes?.status, 200);
+        const countsData = (await countsRes!.json()) as any;
+        assert.equal(countsData.counts?.totalUploaded, 0);
+
+        // With healthy MySQL pool returning empty rows: no demo videos/users leaked, no disk touch
+        process.env["DB_HOST"] = "127.0.0.1";
+        process.env["DB_NAME"] = "facetube_prod";
+        process.env["DB_USER"] = "prod_user";
+        setMysqlPoolForTesting({ query: async () => [[], []] } as any);
+        const videosWithPoolRes = await handleApiRequest(
+          new Request("https://facetube.online/api/videos/list", { method: "GET" }),
+        );
+        assert.equal(videosWithPoolRes?.status, 200);
+        const videosData = (await videosWithPoolRes!.json()) as any;
+        assert.deepEqual(videosData.videos, []);
+
+        assert.deepEqual(spy.ops, { existsChecks: 0, statChecks: 0, reads: 0, writes: 0 });
+      } finally {
+        spy.restore();
+      }
+      assert.equal(
+        fs.existsSync(storePath),
+        false,
+        "Production must never seed facetube_store.json",
+      );
+    });
+
+    it("2. APP_ENV=production with NODE_ENV unset or development (and via runtime env arg) blocks JSON store read/seed/write", async () => {
+      const cases: Array<{
+        label: string;
+        procNodeEnv?: string;
+        procAppEnv?: string;
+        runtimeEnv?: Record<string, string | undefined>;
+      }> = [
+        {
+          label: "APP_ENV=production, NODE_ENV unset",
+          procAppEnv: "production",
+        },
+        {
+          label: "APP_ENV=production, NODE_ENV=development",
+          procAppEnv: "production",
+          procNodeEnv: "development",
+        },
+        {
+          label: "process NODE_ENV=test overridden by runtime env { APP_ENV: 'production' }",
+          procNodeEnv: "test",
+          runtimeEnv: { APP_ENV: "production" },
+        },
+      ];
+
+      for (const tc of cases) {
+        resetInMemoryStore();
+        if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+        if (tc.procNodeEnv !== undefined) process.env["NODE_ENV"] = tc.procNodeEnv;
+        else delete process.env["NODE_ENV"];
+        if (tc.procAppEnv !== undefined) process.env["APP_ENV"] = tc.procAppEnv;
+        else delete process.env["APP_ENV"];
+
+        const spy = installStoreFsSpy();
+        try {
+          const videosRes = await handleApiRequest(
+            new Request("https://facetube.online/api/videos/list", { method: "GET" }),
+            tc.runtimeEnv,
+          );
+          assert.equal(videosRes?.status, 503, `${tc.label}: videos/list should fail closed`);
+
+          const catsRes = await nitroServerEntry.fetch(
+            new Request("https://facetube.online/api/categories/list", { method: "GET" }),
+            tc.runtimeEnv,
+            undefined,
+          );
+          assert.ok(catsRes.status >= 200 && catsRes.status < 600, `${tc.label}: no crash`);
+
+          const likeRes = await handleApiRequest(
+            new Request("https://facetube.online/api/videos/like", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ videoId: "vid-seed-001" }),
+            }),
+            tc.runtimeEnv,
+          );
+          assert.equal(likeRes?.status, 404, `${tc.label}: seeded demo video must not exist`);
+
+          assert.deepEqual(
+            spy.ops,
+            { existsChecks: 0, statChecks: 0, reads: 0, writes: 0 },
+            `${tc.label}: must never touch facetube_store.json on disk`,
+          );
+        } finally {
+          spy.restore();
+        }
+        assert.equal(
+          fs.existsSync(storePath),
+          false,
+          `${tc.label}: must not create facetube_store.json`,
+        );
+      }
+    });
+
+    it("3. Both APP_ENV and NODE_ENV unset activates fail-closed protection with zero disk access or demo seeding", async () => {
+      if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+      delete process.env["APP_ENV"];
+      delete process.env["NODE_ENV"];
+
+      const spy = installStoreFsSpy();
+      try {
+        const listRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/videos/list", { method: "GET" }),
+        );
+        assert.equal(listRes?.status, 503);
+
+        const loginRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifier: "admin@facetube.com", password: "password" }),
+          }),
+        );
+        assert.equal(loginRes?.status, 503);
+
+        const countsRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/videos/counts", { method: "GET" }),
+        );
+        assert.equal(countsRes?.status, 200);
+        const countsData = (await countsRes!.json()) as any;
+        assert.equal(countsData.counts?.totalUploaded, 0);
+
+        assert.deepEqual(spy.ops, { existsChecks: 0, statChecks: 0, reads: 0, writes: 0 });
+      } finally {
+        spy.restore();
+      }
+      assert.equal(fs.existsSync(storePath), false);
+    });
+
+    it("4. Cached non-production inMemoryStore does not leak demo data into subsequent production requests", async () => {
+      process.env["NODE_ENV"] = "test";
+      delete process.env["APP_ENV"];
+
+      // Populate inMemoryStore in test mode
+      const testRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/list", { method: "GET" }),
+      );
+      assert.equal(testRes?.status, 200);
+      const testData = (await testRes!.json()) as any;
+      assert.ok(Array.isArray(testData.videos) && testData.videos.length > 0);
+
+      // Switch to production without resetting inMemoryStore and delete store file
+      if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+      process.env["APP_ENV"] = "production";
+      delete process.env["NODE_ENV"];
+
+      const spy = installStoreFsSpy();
+      try {
+        const countsRes = await handleApiRequest(
+          new Request("https://facetube.online/api/videos/counts", { method: "GET" }),
+        );
+        assert.equal(countsRes?.status, 200);
+        const countsData = (await countsRes!.json()) as any;
+        assert.equal(
+          countsData.counts?.totalUploaded,
+          0,
+          "Production must not leak cached demo videos",
+        );
+
+        const loginRes = await handleApiRequest(
+          new Request("https://facetube.online/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifier: "alex@facetube.com", password: "password" }),
+          }),
+        );
+        assert.equal(loginRes?.status, 503);
+        assert.deepEqual(spy.ops, { existsChecks: 0, statChecks: 0, reads: 0, writes: 0 });
+      } finally {
+        spy.restore();
+      }
+      assert.equal(fs.existsSync(storePath), false);
+    });
+
+    it("5. NODE_ENV=test and NODE_ENV=development preserve existing JSON fallback and seed behavior", async () => {
+      for (const envName of ["test", "development"] as const) {
+        resetInMemoryStore();
+        if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+        process.env["NODE_ENV"] = envName;
+        delete process.env["APP_ENV"];
+
+        const listRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/videos/list", { method: "GET" }),
+        );
+        assert.equal(listRes?.status, 200, `NODE_ENV=${envName} should serve JSON videos`);
+        const listData = (await listRes!.json()) as any;
+        assert.equal(listData.success, true);
+        assert.ok(Array.isArray(listData.videos) && listData.videos.length > 0);
+        assert.equal(
+          fs.existsSync(storePath),
+          true,
+          `NODE_ENV=${envName} should persist facetube_store.json`,
+        );
+
+        const loginRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+          }),
+        );
+        assert.equal(
+          loginRes?.status,
+          200,
+          `NODE_ENV=${envName} should preserve JSON login fallback`,
+        );
+        const loginData = (await loginRes!.json()) as any;
+        assert.equal(loginData.success, true);
+        assert.ok(loginData.token);
+      }
+    });
+  });
 });

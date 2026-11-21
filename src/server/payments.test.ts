@@ -1,6 +1,8 @@
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import {
   verifyServerPayment,
   verifyPayment,
@@ -21,7 +23,9 @@ import {
   buildMaskedBeneficiaryDetails,
   setStoreWalletBalance,
   resetStoreForTests,
+  resetInMemoryStore,
 } from "./api-handler";
+import { setMysqlPoolForTesting } from "./mysql";
 import { isPromotionActive, getVideoBadgeLabels } from "../lib/video-service";
 import { api } from "../lib/api";
 import { processWithdrawal, getUserWallet, saveStoredLedger } from "../lib/ledger-service";
@@ -3225,5 +3229,616 @@ describe("Payout Metadata and Sensitive Beneficiary Masking Audit Tests", () => 
       assert.equal(bStr.includes("987654321098"), false);
       assert.equal(bStr.includes("XXXXXXXX1098"), true);
     }
+  });
+});
+
+describe("Task 5J-V2: Payment Create-Order Production Fail-Closed Tests", () => {
+  const envKeys = [
+    "NODE_ENV",
+    "APP_ENV",
+    "USE_REMOTE_PHP_API",
+    "DB_HOST",
+    "DB_PORT",
+    "DB_NAME",
+    "DB_USER",
+    "DB_PASSWORD",
+    "MYSQL_HOST",
+    "MYSQL_PORT",
+    "MYSQL_DATABASE",
+    "MYSQL_USER",
+    "MYSQL_PASSWORD",
+    "RAZORPAY_KEY_ID",
+    "RAZORPAY_KEY_SECRET",
+    "RAZORPAY_SKIP_REMOTE_CHECK",
+  ] as const;
+
+  const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+  let envSnapshot: Record<string, string | undefined> = {};
+  let storeExisted = false;
+  let storeSnapshot: string | null = null;
+  let originalFetch: typeof globalThis.fetch;
+
+  function installStoreFsSpy() {
+    const origExistsSync = fs.existsSync;
+    const origStatSync = fs.statSync;
+    const origReadFileSync = fs.readFileSync;
+    const origWriteFileSync = fs.writeFileSync;
+
+    const ops = {
+      existsChecks: 0,
+      statChecks: 0,
+      reads: 0,
+      writes: 0,
+    };
+
+    const isTargetStore = (p: fs.PathOrFileDescriptor | fs.PathLike): boolean => {
+      if (typeof p !== "string" && !(p instanceof URL)) return false;
+      const resolved = p instanceof URL ? p.pathname : path.resolve(p);
+      return resolved === storePath;
+    };
+
+    fs.existsSync = ((p: fs.PathLike) => {
+      if (isTargetStore(p)) ops.existsChecks++;
+      return origExistsSync(p);
+    }) as typeof fs.existsSync;
+
+    (fs as any).statSync = ((p: fs.PathLike, options?: any) => {
+      if (isTargetStore(p)) ops.statChecks++;
+      return origStatSync(p, options);
+    }) as typeof fs.statSync;
+
+    fs.readFileSync = ((p: fs.PathOrFileDescriptor, options?: any) => {
+      if (isTargetStore(p)) ops.reads++;
+      return origReadFileSync(p, options);
+    }) as typeof fs.readFileSync;
+
+    fs.writeFileSync = ((p: fs.PathOrFileDescriptor, data: any, options?: any) => {
+      if (isTargetStore(p)) ops.writes++;
+      return origWriteFileSync(p, data, options);
+    }) as typeof fs.writeFileSync;
+
+    return {
+      ops,
+      restore: () => {
+        fs.existsSync = origExistsSync;
+        (fs as any).statSync = origStatSync;
+        fs.readFileSync = origReadFileSync;
+        fs.writeFileSync = origWriteFileSync;
+      },
+    };
+  }
+
+  function enableMockDbEnv() {
+    process.env["DB_HOST"] = "127.0.0.1";
+    process.env["DB_NAME"] = "facetube_test";
+    process.env["DB_USER"] = "facetube_user";
+    process.env["DB_PASSWORD"] = "secret";
+  }
+
+  function createAuthSessionRow(userId = "FT483921", role = "user") {
+    return {
+      id: userId,
+      user_id: userId,
+      name: userId === "FT900431" ? "Maya Lin" : "Alex Rivera",
+      mobile: "9999999999",
+      email: userId === "FT900431" ? "maya@facetube.com" : "alex@facetube.com",
+      role,
+      referral_code: userId,
+      avatar_url: null,
+      channel_logo_url: null,
+      channel_name: "Creator Channel",
+      channel_description: null,
+      created_at: new Date().toISOString(),
+    };
+  }
+
+  beforeEach(() => {
+    envSnapshot = {};
+    for (const k of envKeys) {
+      envSnapshot[k] = process.env[k];
+    }
+    originalFetch = globalThis.fetch;
+    storeExisted = fs.existsSync(storePath);
+    storeSnapshot = storeExisted ? fs.readFileSync(storePath, "utf-8") : null;
+    resetInMemoryStore();
+    setMysqlPoolForTesting(null);
+    delete process.env["USE_REMOTE_PHP_API"];
+    delete process.env["DB_HOST"];
+    delete process.env["DB_NAME"];
+    delete process.env["DB_USER"];
+    delete process.env["DB_PASSWORD"];
+    delete process.env["MYSQL_HOST"];
+    delete process.env["MYSQL_DATABASE"];
+    delete process.env["MYSQL_USER"];
+    delete process.env["MYSQL_PASSWORD"];
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    setMysqlPoolForTesting(null);
+    resetInMemoryStore();
+    for (const k of envKeys) {
+      if (envSnapshot[k] === undefined) delete process.env[k];
+      else process.env[k] = envSnapshot[k];
+    }
+    if (storeExisted && storeSnapshot !== null) {
+      const dir = path.dirname(storePath);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(storePath, storeSnapshot, "utf-8");
+    } else if (!storeExisted && fs.existsSync(storePath)) {
+      fs.unlinkSync(storePath);
+    }
+  });
+
+  it("1. Production without MySQL pool returns 503 and never accesses JSON store or Razorpay", async () => {
+    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response(JSON.stringify({ id: "order_should_not_exist" }), { status: 200 });
+    }) as typeof fetch;
+
+    const spy = installStoreFsSpy();
+    try {
+      const cases: Array<{
+        label: string;
+        procNode?: string;
+        procApp?: string;
+        handlerEnv?: Record<string, string | undefined>;
+      }> = [
+        { label: "NODE_ENV=production", procNode: "production" },
+        {
+          label: "APP_ENV=production overrides NODE_ENV=development",
+          procNode: "development",
+          procApp: "production",
+        },
+        {
+          label: "Handler env APP_ENV=production overrides process.env",
+          procNode: "development",
+          handlerEnv: { APP_ENV: "production", NODE_ENV: "development" },
+        },
+        { label: "Unset APP_ENV and NODE_ENV fail closed as production" },
+      ];
+
+      for (const tc of cases) {
+        if (tc.procNode === undefined) delete process.env["NODE_ENV"];
+        else process.env["NODE_ENV"] = tc.procNode;
+
+        if (tc.procApp === undefined) delete process.env["APP_ENV"];
+        else process.env["APP_ENV"] = tc.procApp;
+
+        const req = new Request("https://facetube.online/api/payments/create-order", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            purpose: "premium_video_upload",
+            userId: "FT483921",
+          }),
+        });
+
+        const res = await handleApiRequest(req, {
+          RAZORPAY_KEY_ID: "rzp_test_prod_key",
+          RAZORPAY_KEY_SECRET: "rzp_test_prod_secret",
+          ...(tc.handlerEnv || {}),
+        });
+
+        assert.ok(res, tc.label);
+        assert.equal(res.status, 503, `${tc.label}: expected 503`);
+        const body = await res.json();
+        assert.equal(body.success, false, tc.label);
+        assert.match(body.error || "", /database connection unavailable/i, tc.label);
+      }
+
+      assert.equal(fetchCalls, 0);
+      assert.equal(spy.ops.reads, 0);
+      assert.equal(spy.ops.writes, 0);
+      assert.equal(spy.ops.existsChecks, 0);
+      assert.equal(fs.existsSync(storePath), false);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("2. Production MySQL payment_orders INSERT failure fails closed with 500 and never writes JSON or returns orderId", async () => {
+    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+    process.env["NODE_ENV"] = "production";
+    delete process.env["APP_ENV"];
+    enableMockDbEnv();
+
+    globalThis.fetch = (async () => {
+      return new Response(JSON.stringify({ id: "order_rzp_fail_test_1" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const spy = installStoreFsSpy();
+    try {
+      // Scenario A: pool.query throws during INSERT INTO payment_orders
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) {
+            return [[createAuthSessionRow("FT483921")], []];
+          }
+          if (sql.includes("INSERT INTO payment_orders")) {
+            throw new Error("MySQL deadlock or write error");
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const resThrow = await handleApiRequest(
+        new Request("https://facetube.online/api/payments/create-order", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer valid_prod_token_1",
+          },
+          body: JSON.stringify({
+            purpose: "premium_video_upload",
+            userId: "FT483921",
+          }),
+        }),
+        {
+          RAZORPAY_KEY_ID: "rzp_test_prod_key",
+          RAZORPAY_KEY_SECRET: "rzp_test_prod_secret",
+        },
+      );
+
+      assert.ok(resThrow);
+      assert.equal(resThrow.status, 500);
+      const bodyThrow = await resThrow.json();
+      assert.equal(bodyThrow.success, false);
+      assert.equal(bodyThrow.orderId, undefined);
+      assert.match(bodyThrow.error || "", /persisting payment order/i);
+
+      // Scenario B: INSERT INTO payment_orders resolves with affectedRows: 0
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s")) {
+            return [[createAuthSessionRow("FT483921")], []];
+          }
+          if (sql.includes("INSERT INTO payment_orders")) {
+            return [{ affectedRows: 0 }, []];
+          }
+          return [[], []];
+        },
+      } as any);
+
+      const resZeroRows = await handleApiRequest(
+        new Request("https://facetube.online/api/payments/create-order", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer valid_prod_token_1",
+          },
+          body: JSON.stringify({
+            purpose: "paid_subscription",
+            planId: "member-monthly",
+            userId: "FT483921",
+          }),
+        }),
+        {
+          RAZORPAY_KEY_ID: "rzp_test_prod_key",
+          RAZORPAY_KEY_SECRET: "rzp_test_prod_secret",
+        },
+      );
+
+      assert.ok(resZeroRows);
+      assert.equal(resZeroRows.status, 500);
+      const bodyZeroRows = await resZeroRows.json();
+      assert.equal(bodyZeroRows.success, false);
+      assert.equal(bodyZeroRows.orderId, undefined);
+      assert.match(bodyZeroRows.error || "", /failed to persist payment order/i);
+
+      assert.equal(spy.ops.writes, 0);
+      assert.equal(spy.ops.reads, 0);
+      assert.equal(fs.existsSync(storePath), false);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("3. Production verifies video ownership & eligibility from authoritative MySQL uploaded_videos", async () => {
+    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+    process.env["APP_ENV"] = "production";
+    process.env["NODE_ENV"] = "development";
+    enableMockDbEnv();
+
+    let razorpayCalls = 0;
+    globalThis.fetch = (async () => {
+      razorpayCalls++;
+      return new Response(JSON.stringify({ id: "order_should_not_be_created" }), { status: 200 });
+    }) as typeof fetch;
+
+    setMysqlPoolForTesting({
+      query: async (sql: string, params?: any[]) => {
+        if (sql.includes("FROM sessions s")) {
+          const token = params?.[0];
+          if (token === "token_maya") return [[createAuthSessionRow("FT900431")], []];
+          return [[createAuthSessionRow("FT483921")], []];
+        }
+        if (sql.includes("FROM uploaded_videos")) {
+          const vid = params?.[0];
+          if (vid === "vid-db-alex-1") {
+            return [
+              [{ id: vid, user_id: "FT483921", video_type: "ads", payment_status: "pending" }],
+              [],
+            ];
+          }
+          if (vid === "vid-db-free-maya") {
+            return [
+              [{ id: vid, user_id: "FT900431", video_type: "free", payment_status: "paid" }],
+              [],
+            ];
+          }
+          if (vid === "vid-db-err") {
+            throw new Error("uploaded_videos lookup failed");
+          }
+          return [[], []];
+        }
+        return [[], []];
+      },
+    } as any);
+
+    const env = {
+      APP_ENV: "production",
+      NODE_ENV: "development",
+      RAZORPAY_KEY_ID: "rzp_test_prod_key",
+      RAZORPAY_KEY_SECRET: "rzp_test_prod_secret",
+    };
+
+    // 3a. Non-owner (Maya) blocked from promoting Alex's DB video -> 403
+    const nonOwnerPromoRes = await handleApiRequest(
+      new Request("https://facetube.online/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer token_maya",
+        },
+        body: JSON.stringify({
+          purpose: "ads_promotion",
+          videoId: "vid-db-alex-1",
+          planId: "plan-monthly",
+          userId: "FT900431",
+        }),
+      }),
+      env,
+    );
+    assert.equal(nonOwnerPromoRes?.status, 403);
+
+    // 3b. Missing video for ads_promotion -> 404
+    const missingVideoRes = await handleApiRequest(
+      new Request("https://facetube.online/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer token_alex",
+        },
+        body: JSON.stringify({
+          purpose: "ads_promotion",
+          videoId: "vid-nonexistent",
+          planId: "plan-monthly",
+          userId: "FT483921",
+        }),
+      }),
+      env,
+    );
+    assert.equal(missingVideoRes?.status, 404);
+
+    // 3c. Free video for premium_video_upload -> 400
+    const freeVideoRes = await handleApiRequest(
+      new Request("https://facetube.online/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer token_maya",
+        },
+        body: JSON.stringify({
+          purpose: "premium_video_upload",
+          videoId: "vid-db-free-maya",
+          userId: "FT900431",
+        }),
+      }),
+      env,
+    );
+    assert.equal(freeVideoRes?.status, 400);
+
+    // 3d. DB error during uploaded_videos check -> 500 fail closed
+    const dbErrRes = await handleApiRequest(
+      new Request("https://facetube.online/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer token_alex",
+        },
+        body: JSON.stringify({
+          purpose: "ads_promotion",
+          videoId: "vid-db-err",
+          planId: "plan-monthly",
+          userId: "FT483921",
+        }),
+      }),
+      env,
+    );
+    assert.equal(dbErrRes?.status, 500);
+    assert.equal(razorpayCalls, 0);
+  });
+
+  it("4. Valid production MySQL order creation preserves Razorpay amount/INR currency and persists to MySQL without touching JSON", async () => {
+    if (fs.existsSync(storePath)) fs.unlinkSync(storePath);
+    process.env["NODE_ENV"] = "production";
+    delete process.env["APP_ENV"];
+    enableMockDbEnv();
+
+    const razorpayRequests: Array<{ amount: number; currency: string; purpose?: string }> = [];
+    const persistedOrders: any[][] = [];
+
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const sent = JSON.parse(String(init?.body || "{}"));
+      razorpayRequests.push({
+        amount: sent.amount,
+        currency: sent.currency,
+        purpose: sent.notes?.purpose,
+      });
+      return new Response(JSON.stringify({ id: `order_prod_${razorpayRequests.length}` }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    setMysqlPoolForTesting({
+      query: async (sql: string, params?: any[]) => {
+        if (sql.includes("FROM sessions s")) {
+          return [[createAuthSessionRow("FT483921")], []];
+        }
+        if (sql.includes("FROM uploaded_videos")) {
+          const vid = params?.[0];
+          return [
+            [{ id: vid, user_id: "FT483921", video_type: "premium", payment_status: "pending" }],
+            [],
+          ];
+        }
+        if (sql.includes("INSERT INTO payment_orders")) {
+          persistedOrders.push(params || []);
+          return [{ affectedRows: 1 }, []];
+        }
+        return [[], []];
+      },
+    } as any);
+
+    const spy = installStoreFsSpy();
+    try {
+      const testCases = [
+        {
+          body: { purpose: "premium_video_upload", videoId: "vid-db-prem-1", userId: "FT483921" },
+          expectedAmount: 6,
+          expectedSubunits: 600,
+        },
+        {
+          body: {
+            purpose: "ads_promotion",
+            videoId: "vid-db-ads-1",
+            planId: "plan-yearly",
+            userId: "FT483921",
+          },
+          expectedAmount: 3000,
+          expectedSubunits: 300000,
+        },
+        {
+          body: { purpose: "paid_subscription", planId: "member-monthly", userId: "FT483921" },
+          expectedAmount: 49,
+          expectedSubunits: 4900,
+        },
+      ];
+
+      for (let i = 0; i < testCases.length; i++) {
+        const tc = testCases[i]!;
+        const res = await handleApiRequest(
+          new Request("https://facetube.online/api/payments/create-order", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer token_alex_prod",
+            },
+            body: JSON.stringify(tc.body),
+          }),
+          {
+            RAZORPAY_KEY_ID: "rzp_test_prod_key",
+            RAZORPAY_KEY_SECRET: "rzp_test_prod_secret",
+          },
+        );
+
+        assert.ok(res);
+        assert.equal(res.status, 200);
+        const data = await res.json();
+        assert.equal(data.orderId, `order_prod_${i + 1}`);
+        assert.equal(data.amount, tc.expectedAmount);
+        assert.equal(data.amountInSubunits, tc.expectedSubunits);
+        assert.equal(data.currency, "INR");
+      }
+
+      assert.equal(razorpayRequests.length, 3);
+      assert.deepEqual(
+        razorpayRequests.map((r) => [r.amount, r.currency]),
+        [
+          [600, "INR"],
+          [300000, "INR"],
+          [4900, "INR"],
+        ],
+      );
+      assert.equal(persistedOrders.length, 3);
+      assert.equal(persistedOrders[0]?.[0], "order_prod_1");
+      assert.equal(persistedOrders[1]?.[5], "plan-yearly");
+      assert.equal(persistedOrders[2]?.[5], "member-monthly");
+      assert.equal(spy.ops.reads, 0);
+      assert.equal(spy.ops.writes, 0);
+      assert.equal(fs.existsSync(storePath), false);
+    } finally {
+      spy.restore();
+    }
+  });
+
+  it("5. Development/test fallback without MySQL pool preserves JSON store paymentOrders persistence", async () => {
+    process.env["NODE_ENV"] = "test";
+    delete process.env["APP_ENV"];
+
+    const res = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          purpose: "paid_subscription",
+          planId: "member-monthly",
+          userId: "FT483921",
+        }),
+      }),
+      {
+        NODE_ENV: "test",
+        RAZORPAY_KEY_ID: "rzp_test_dev_key",
+        RAZORPAY_KEY_SECRET: "rzp_test_dev_secret",
+        RAZORPAY_SKIP_REMOTE_CHECK: "true",
+      },
+    );
+
+    assert.ok(res);
+    assert.equal(res.status, 200);
+    const data = await res.json();
+    assert.ok(data.orderId);
+    assert.equal(data.amount, 49);
+    assert.equal(data.currency, "INR");
+
+    const diskStore = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+    const recorded = (diskStore.paymentOrders || []).find((o: any) => o.order_id === data.orderId);
+    assert.ok(recorded, "Dev/test fallback should record order into JSON store");
+    assert.equal(recorded.amount, 49);
+    assert.equal(recorded.currency, "INR");
+  });
+
+  it("6. PHP counterpart api/payments/create-order.php fails closed on payment_orders INSERT error and verifies DB video eligibility", () => {
+    const phpPath = path.resolve(process.cwd(), "api/payments/create-order.php");
+    const phpCode = fs.readFileSync(phpPath, "utf-8");
+
+    assert.match(phpCode, /INSERT INTO payment_orders/);
+    assert.match(phpCode, /\$inserted\s*===\s*false/);
+    assert.match(phpCode, /catch\s*\(\s*Throwable\s+\$ePo\s*\)/);
+    assert.match(
+      phpCode,
+      /jsonResponse\(\[\s*'success'\s*=>\s*false,\s*'error'\s*=>\s*'Failed to persist payment order in database\. Please try again\.',?\s*\],\s*500\)/,
+    );
+    assert.equal(
+      phpCode.includes("Warning: Failed to record payment_orders"),
+      false,
+      "PHP create-order must not swallow payment_orders DB errors as warnings",
+    );
+
+    assert.match(
+      phpCode,
+      /SELECT id, user_id, video_type FROM uploaded_videos WHERE id = \? LIMIT 1/,
+    );
+    assert.match(phpCode, /catch\s*\(\s*Throwable\s+\$eVid\s*\)/);
+    assert.match(phpCode, /Free video uploads do not require payment\./);
+    assert.match(phpCode, /Video not found for promotion\./);
   });
 });

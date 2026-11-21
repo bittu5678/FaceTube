@@ -111,16 +111,23 @@ try {
         // Non-blocking wallet init
     }
 
-    // 8. Generate session token
+    // 8. Generate session token and fail closed if persistence fails
     $sessionToken = bin2hex(random_bytes(32));
     try {
         $stmtSession = $pdo->prepare('
             INSERT INTO sessions (token, user_id, expires_at, created_at)
             VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())
         ');
-        $stmtSession->execute([$sessionToken, $uuid]);
-    } catch (Exception $eSession) {
-        // Sessions table optional
+        $sessionOk = $stmtSession->execute([$sessionToken, $uuid]);
+        if (!$sessionOk || $stmtSession->rowCount() < 1) {
+            throw new RuntimeException('Session insert affected 0 rows.');
+        }
+    } catch (Throwable $eSession) {
+        error_log('[FaceTube Auth] Failed to persist registration session: ' . $eSession->getMessage());
+        jsonResponse([
+            'success' => false,
+            'error' => 'Registration failed: could not persist login session.'
+        ], 500);
     }
 
     // 9. Fetch freshly created user record directly from MySQL

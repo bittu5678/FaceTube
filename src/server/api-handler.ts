@@ -71,6 +71,14 @@ export function isFailClosedProductionEnv(appEnvRaw?: string, nodeEnvRaw?: strin
   return presentEnvs.length === 0 || presentEnvs.some((v) => !nonProdEnvs.has(v));
 }
 
+function readEnvValue(env: Record<string, string | undefined> | undefined, key: string): string {
+  return String(env?.[key] ?? process.env[key] ?? "").trim();
+}
+
+function isProductionStoreBlocked(env?: Record<string, string | undefined>): boolean {
+  return isFailClosedProductionEnv(readEnvValue(env, "APP_ENV"), readEnvValue(env, "NODE_ENV"));
+}
+
 export function normalizeServerMediaUrl(
   rawUrl: unknown,
   request?: Request,
@@ -1121,12 +1129,50 @@ function getInitialStore(): ServerStore {
 let inMemoryStore: ServerStore | null = null;
 let lastLoadedMtime = 0;
 
+const liveChatRateLimitMap = new Map<string, number[]>();
+
 export function resetInMemoryStore(): void {
   inMemoryStore = null;
   lastLoadedMtime = 0;
+  liveChatRateLimitMap.clear();
 }
 
-function loadStore(): ServerStore {
+function createEmptyProductionStore(): ServerStore {
+  return {
+    users: [],
+    sessions: {},
+    videos: [],
+    comments: [],
+    images: [],
+    payoutBatches: [],
+    personalKyc: {},
+    bankKyc: {},
+    kycAuditLog: [],
+    certificates: {},
+    walletTransactions: [],
+    passwordResetTokens: [],
+    wallets: {},
+    categories: [],
+    subscriberPlans: [],
+    affiliateNetworks: {},
+    affiliateClicks: [],
+    affiliateConversions: {},
+    affiliateAuditLog: [],
+    liveStreams: [],
+    liveChatMessages: [],
+    liveStreamViewers: {},
+    livekitWebhookEvents: {},
+    userSubscriptions: [],
+    paymentOrders: [],
+    subscriptionRefundRequests: [],
+    channelSubscriptions: [],
+  };
+}
+
+function loadStore(env?: Record<string, string | undefined>): ServerStore {
+  if (isProductionStoreBlocked(env)) {
+    return createEmptyProductionStore();
+  }
   try {
     if (fs.existsSync(STORE_FILE)) {
       const stats = fs.statSync(STORE_FILE);
@@ -1190,11 +1236,14 @@ function loadStore(): ServerStore {
   if (!inMemoryStore.subscriptionRefundRequests) inMemoryStore.subscriptionRefundRequests = [];
   if (!inMemoryStore.kycAuditLog) inMemoryStore.kycAuditLog = [];
   if (!inMemoryStore.channelSubscriptions) inMemoryStore.channelSubscriptions = [];
-  saveStore(inMemoryStore);
+  saveStore(inMemoryStore, env);
   return inMemoryStore;
 }
 
-function saveStore(store: ServerStore): void {
+function saveStore(store: ServerStore, env?: Record<string, string | undefined>): void {
+  if (isProductionStoreBlocked(env)) {
+    return;
+  }
   inMemoryStore = store;
   try {
     if (!fs.existsSync(DATA_DIR)) {
@@ -1870,7 +1919,7 @@ async function dispatchApiRequest(
   // Normalize path: strip /api/ and .php extension
   const route = pathname.replace(/^\/api\/?/, "").replace(/\.php$/, "");
   const method = request.method;
-  const store = loadStore();
+  const store = isProductionStoreBlocked(env) ? createEmptyProductionStore() : loadStore(env);
 
   // 1. Email Endpoints
   if (route === "send-welcome-email") {
@@ -1916,9 +1965,23 @@ async function dispatchApiRequest(
   if (route === "payments/create-order" || route === "payment/create-order") {
     if (method === "POST") {
       try {
-        const payload = await request.json();
+        const readEnv = (key: string) => readEnvValue(env, key);
+        const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
         const pool = getMysqlPool();
-        const authUser = await getAuthUserFromRequest(request, store, pool);
+
+        if (isProduction && !pool) {
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                "Database connection unavailable. In production, persistent database storage is required to create payment orders.",
+            },
+            503,
+          );
+        }
+
+        const payload = await request.json();
+        const authUser = await getAuthUserFromRequest(request, store, pool, env);
         const reqUserId = String(payload.userId || payload.user_id || "")
           .trim()
           .toUpperCase();
@@ -1939,20 +2002,86 @@ async function dispatchApiRequest(
 
         const videoId = String(payload.videoId || payload.video_id || "").trim();
         const purpose = String(payload.purpose || "premium_video_upload").trim();
-        if (purpose === "ads_promotion" && videoId) {
-          const v = store.videos.find((vid) => vid.id === videoId);
-          if (v) {
-            const isOwner = v.user_id.toUpperCase() === effectiveUserId.toUpperCase();
-            const isAdmin = authUser?.role === "admin";
-            if (!isOwner && !isAdmin) {
+        const planId = String(
+          payload.planId || payload.plan_id || payload.metadata?.planId || "",
+        ).trim();
+
+        if (videoId) {
+          if (pool) {
+            let vRows: any;
+            try {
+              [vRows] = await pool.query(
+                "SELECT id, user_id, video_type, payment_status FROM uploaded_videos WHERE id = ? LIMIT 1",
+                [videoId],
+              );
+            } catch (_eVid) {
+              if (isProduction) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: "Database error verifying video eligibility.",
+                  },
+                  500,
+                );
+              }
+              vRows = [];
+            }
+
+            if (vRows && vRows.length > 0) {
+              const vid = vRows[0];
+              const isOwner =
+                String(vid.user_id || "")
+                  .trim()
+                  .toUpperCase() === effectiveUserId.toUpperCase();
+              const isAdmin = authUser?.role === "admin";
+              if (!isOwner && !isAdmin) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error:
+                      purpose === "ads_promotion"
+                        ? "Unauthorized: You can only initiate promotion for your own uploaded videos."
+                        : "Unauthorized: You can only initiate payment or promotion for your own uploaded videos.",
+                  },
+                  403,
+                );
+              }
+              if (
+                purpose === "premium_video_upload" &&
+                String(vid.video_type || "").toLowerCase() === "free"
+              ) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: "Free video uploads do not require payment.",
+                  },
+                  400,
+                );
+              }
+            } else if (isProduction && purpose === "ads_promotion") {
               return jsonResponse(
                 {
                   success: false,
-                  error:
-                    "Unauthorized: You can only initiate promotion for your own uploaded videos.",
+                  error: "Video not found for promotion.",
                 },
-                403,
+                404,
               );
+            }
+          } else if (!isProduction && purpose === "ads_promotion") {
+            const v = store.videos.find((vid) => vid.id === videoId);
+            if (v) {
+              const isOwner = v.user_id.toUpperCase() === effectiveUserId.toUpperCase();
+              const isAdmin = authUser?.role === "admin";
+              if (!isOwner && !isAdmin) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error:
+                      "Unauthorized: You can only initiate promotion for your own uploaded videos.",
+                  },
+                  403,
+                );
+              }
             }
           }
         }
@@ -1967,7 +2096,7 @@ async function dispatchApiRequest(
 
         if (pool) {
           try {
-            await pool.query(
+            const [insertRes]: any = await pool.query(
               `INSERT INTO payment_orders (
                 order_id, user_id, user_name, video_id, purpose, plan_id,
                 content_type, amount, currency, status, created_at
@@ -1979,33 +2108,61 @@ async function dispatchApiRequest(
                 payload.userName || authUser?.name || "Creator",
                 videoId || null,
                 purpose,
-                payload.planId || null,
+                planId || null,
                 payload.contentType || null,
                 result.amount,
               ],
             );
+            if (
+              isProduction &&
+              insertRes &&
+              typeof insertRes.affectedRows === "number" &&
+              insertRes.affectedRows < 1
+            ) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Failed to persist payment order in database.",
+                },
+                500,
+              );
+            }
           } catch (_ePo) {
-            // optional
+            if (isProduction) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Database error persisting payment order. Please try again.",
+                },
+                500,
+              );
+            }
           }
         }
-        if (!store.paymentOrders) store.paymentOrders = [];
-        store.paymentOrders.push({
-          order_id: result.orderId,
-          user_id: effectiveUserId,
-          user_name: payload.userName || authUser?.name || "Creator",
-          video_id: videoId || null,
-          purpose,
-          plan_id: payload.planId || null,
-          content_type: payload.contentType || null,
-          amount: result.amount,
-          currency: "INR",
-          status: "created",
-          created_at: new Date().toISOString(),
-        });
-        saveStore(store);
+
+        if (!isProduction && !pool) {
+          if (!store.paymentOrders) store.paymentOrders = [];
+          store.paymentOrders.push({
+            order_id: result.orderId,
+            user_id: effectiveUserId,
+            user_name: payload.userName || authUser?.name || "Creator",
+            video_id: videoId || null,
+            purpose,
+            plan_id: planId || null,
+            content_type: payload.contentType || null,
+            amount: result.amount,
+            currency: "INR",
+            status: "created",
+            created_at: new Date().toISOString(),
+          });
+          saveStore(store, env);
+        }
 
         return jsonResponse(result);
       } catch (err: any) {
+        if (err instanceof AuthDatabaseError) {
+          throw err;
+        }
         const msg = err?.message || "Failed to create payment order";
         const status = msg.includes("credentials") ? 503 : 500;
         return jsonResponse({ success: false, error: msg }, status);
@@ -3434,7 +3591,7 @@ async function dispatchApiRequest(
             }
           }
 
-          saveStore(store);
+          saveStore(store, env);
           return jsonResponse({
             ...result,
             duplicate: isDuplicate,
@@ -3488,6 +3645,8 @@ async function dispatchApiRequest(
         }
 
         const normalizedEmail = email.trim().toLowerCase();
+        const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+        const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
         const pool = getMysqlPool();
 
         if (pool) {
@@ -3557,13 +3716,32 @@ async function dispatchApiRequest(
 
           const token = crypto.randomBytes(24).toString("hex");
           try {
-            await pool.query(
+            const [sessionRes]: any = await pool.query(
               `INSERT INTO sessions (token, user_id, expires_at, created_at)
                VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())`,
               [token, uuid],
             );
-          } catch (_e) {
-            // Sessions table optional
+            if (
+              sessionRes &&
+              typeof sessionRes === "object" &&
+              !Array.isArray(sessionRes) &&
+              "affectedRows" in sessionRes &&
+              Number(sessionRes.affectedRows) < 1
+            ) {
+              throw new Error("Session insert affected 0 rows");
+            }
+          } catch (sessionErr: unknown) {
+            console.error("[Auth] Failed to persist registration session in MySQL:", {
+              isProduction,
+              message: sessionErr instanceof Error ? sessionErr.message : "unknown_error",
+            });
+            return jsonResponse(
+              {
+                success: false,
+                error: "Registration failed: could not persist login session.",
+              },
+              500,
+            );
           }
 
           const newUser = {
@@ -3717,13 +3895,32 @@ async function dispatchApiRequest(
 
           const token = crypto.randomBytes(24).toString("hex");
           try {
-            await pool.query(
+            const [sessionRes]: any = await pool.query(
               `INSERT INTO sessions (token, user_id, expires_at, created_at)
                VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())`,
               [token, user.id],
             );
-          } catch (_e) {
-            // Sessions table optional
+            if (
+              sessionRes &&
+              typeof sessionRes === "object" &&
+              !Array.isArray(sessionRes) &&
+              "affectedRows" in sessionRes &&
+              Number(sessionRes.affectedRows) < 1
+            ) {
+              throw new Error("Session insert affected 0 rows");
+            }
+          } catch (sessionErr: unknown) {
+            console.error("[Auth] Failed to persist login session in MySQL:", {
+              isProduction,
+              message: sessionErr instanceof Error ? sessionErr.message : "unknown_error",
+            });
+            return jsonResponse(
+              {
+                success: false,
+                error: "Authentication service error: could not persist login session.",
+              },
+              500,
+            );
           }
 
           delete user.password_hash;
@@ -3801,7 +3998,7 @@ async function dispatchApiRequest(
             store.sessions = {};
           }
           store.sessions[token] = user.user_id;
-          saveStore(store);
+          saveStore(store, env);
 
           const { password_hash: _ph, ...safeUser } = user;
           return jsonResponse({
@@ -3846,7 +4043,7 @@ async function dispatchApiRequest(
       }
       if (auth && store.sessions && store.sessions[auth]) {
         delete store.sessions[auth];
-        saveStore(store);
+        saveStore(store, env);
       }
       return jsonResponse({ success: true, message: "Logged out successfully" });
     }
@@ -4032,7 +4229,7 @@ async function dispatchApiRequest(
 
           const newHash = await bcrypt.hash(newPassword, 10);
           user.password_hash = newHash;
-          saveStore(store);
+          saveStore(store, env);
 
           return jsonResponse({
             success: true,
@@ -4192,7 +4389,7 @@ async function dispatchApiRequest(
             used: false,
             created_at: new Date().toISOString(),
           });
-          saveStore(store);
+          saveStore(store, env);
         }
 
         const clientOrigin =
@@ -4365,7 +4562,7 @@ async function dispatchApiRequest(
             }
           }
 
-          saveStore(store);
+          saveStore(store, env);
 
           return jsonResponse({
             success: true,
@@ -4825,7 +5022,7 @@ async function dispatchApiRequest(
         if (hasChannelDescriptionUpdate) {
           storeUser.channel_description = nextChannelDescription;
         }
-        saveStore(store);
+        saveStore(store, env);
         const { password_hash: _ph, ...safeProfile } = storeUser;
         return jsonResponse({
           success: true,
@@ -5426,7 +5623,7 @@ async function dispatchApiRequest(
       }
 
       store.videos.unshift(newVideo);
-      saveStore(store);
+      saveStore(store, env);
       return jsonResponse({ success: true, video: newVideo }, 201);
     }
   }
@@ -5437,7 +5634,7 @@ async function dispatchApiRequest(
       const vid = store.videos.find((v) => v.id === body.videoId);
       if (vid) {
         vid.likes = (vid.likes || 0) + 1;
-        saveStore(store);
+        saveStore(store, env);
 
         const pool = getMysqlPool();
         if (pool) {
@@ -5557,7 +5754,7 @@ async function dispatchApiRequest(
         vid.is_promoted = true;
         vid.promotion_plan = planId;
         vid.promotion_expires_at = expiresAt;
-        saveStore(store);
+        saveStore(store, env);
       }
 
       return jsonResponse({
@@ -5816,7 +6013,7 @@ async function dispatchApiRequest(
         created_at: new Date().toISOString(),
       };
       store.comments.unshift(newComment);
-      saveStore(store);
+      saveStore(store, env);
       return jsonResponse({ success: true, comment: newComment });
     }
   }
@@ -5998,7 +6195,7 @@ async function dispatchApiRequest(
       }
 
       store.images.unshift(newImage);
-      saveStore(store);
+      saveStore(store, env);
       return jsonResponse({
         success: true,
         image: {
@@ -6747,7 +6944,7 @@ async function dispatchApiRequest(
         created_at: new Date().toISOString(),
       };
       store.walletTransactions.unshift(tx);
-      saveStore(store);
+      saveStore(store, env);
 
       return jsonResponse({
         success: true,
@@ -6791,7 +6988,7 @@ async function dispatchApiRequest(
         status: "Submitted",
         updatedAt: new Date().toISOString(),
       };
-      saveStore(store);
+      saveStore(store, env);
       return jsonResponse({
         success: true,
         message: "Personal KYC saved",
@@ -6826,7 +7023,7 @@ async function dispatchApiRequest(
         status: "Submitted",
         updatedAt: new Date().toISOString(),
       };
-      saveStore(store);
+      saveStore(store, env);
       return jsonResponse({ success: true, message: "Bank KYC saved", kyc: store.bankKyc[userId] });
     }
   }
@@ -7134,7 +7331,7 @@ async function dispatchApiRequest(
       const body = await request.json();
       const userId = (body.userId || "FT102857").toUpperCase();
       store.certificates[userId] = body;
-      saveStore(store);
+      saveStore(store, env);
       return jsonResponse({
         success: true,
         message: "Certificate saved successfully",
@@ -7247,7 +7444,7 @@ async function dispatchApiRequest(
       );
       if (user) {
         user.role = newRole;
-        saveStore(store);
+        saveStore(store, env);
         return jsonResponse({
           success: true,
           message: `User role updated to ${newRole} successfully.`,
@@ -7293,7 +7490,7 @@ async function dispatchApiRequest(
         vid.is_blocked = isBlocked;
         vid.block_reason = isBlocked ? reason : undefined;
         vid.blocked_at = isBlocked ? new Date().toISOString() : undefined;
-        saveStore(store);
+        saveStore(store, env);
       }
       if (pool) {
         await pool
@@ -8002,7 +8199,7 @@ async function dispatchApiRequest(
             notes: `${notes} (Chunk failure: ${chunkErr.message})`,
             created_at: new Date().toISOString(),
           });
-          saveStore(store);
+          saveStore(store, env);
 
           return jsonResponse(
             {
@@ -8031,7 +8228,7 @@ async function dispatchApiRequest(
         notes,
         created_at: new Date().toISOString(),
       });
-      saveStore(store);
+      saveStore(store, env);
 
       return jsonResponse({
         success: true,
@@ -8527,7 +8724,7 @@ async function dispatchApiRequest(
 
     if (!store.kycAuditLog) store.kycAuditLog = [];
     store.kycAuditLog.unshift(auditEntry);
-    saveStore(store);
+    saveStore(store, env);
 
     return jsonResponse({
       success: true,
@@ -8930,7 +9127,7 @@ async function dispatchApiRequest(
       }
       if (channelName) user.channel_name = channelName;
       if (hasDescriptionKey) user.channel_description = channelDescription;
-      saveStore(store);
+      saveStore(store, env);
 
       const finalLogoUrl = resolveChannelLogoResponseUrl(user.channel_logo_url ?? null);
       const finalChannelName = user.channel_name ?? null;
@@ -9573,7 +9770,7 @@ async function dispatchApiRequest(
       if (!isProduction) {
         if (!store.liveStreams) store.liveStreams = [];
         store.liveStreams.unshift(newStream);
-        saveStore(store);
+        saveStore(store, env);
       }
       return jsonResponse({ success: true, message: "Stream created", stream: newStream }, 201);
     }
@@ -9825,7 +10022,7 @@ async function dispatchApiRequest(
       }
     }
     if (!isProduction) {
-      saveStore(store);
+      saveStore(store, env);
     }
 
     return jsonResponse({
@@ -9955,7 +10152,7 @@ async function dispatchApiRequest(
       stream.status = "ended";
       stream.ended_at = endedAt;
       stream.viewers_count = 0;
-      saveStore(store);
+      saveStore(store, env);
     }
 
     return jsonResponse({
@@ -10200,7 +10397,7 @@ async function dispatchApiRequest(
         }
       }
       if (!isProduction) {
-        saveStore(store);
+        saveStore(store, env);
       }
     }
 
@@ -10213,48 +10410,228 @@ async function dispatchApiRequest(
   }
 
   if (route === "live/chat") {
+    const readEnv = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+    const pool = getMysqlPool();
+
+    const normalizeChatAvatarUrl = (raw: unknown): string | null =>
+      normalizeServerMediaUrl(raw, request, {
+        env,
+        isProduction,
+        defaultSubfolder: "logos",
+        prefixBarePaths: true,
+      }) || null;
+
+    const formatPublicChatMessage = (row: any) => ({
+      id: String(row.id),
+      stream_id: String(row.stream_id),
+      user_name: String(row.user_name || "Viewer"),
+      avatar_url: normalizeChatAvatarUrl(row.avatar_url),
+      message: String(row.message || ""),
+      is_superchat: Boolean(Number(row.is_superchat)),
+      superchat_amount: Number(row.superchat_amount) || 0,
+      created_at:
+        row.created_at instanceof Date
+          ? row.created_at.toISOString()
+          : String(row.created_at || new Date().toISOString()),
+    });
+
     if (method === "GET") {
-      const streamId = url.searchParams.get("stream_id") || "live_seed_001";
-      const messages = (store.liveChatMessages || []).filter((m) => m.stream_id === streamId);
+      const streamId = (
+        url.searchParams.get("stream_id") ||
+        url.searchParams.get("streamId") ||
+        ""
+      ).trim();
+      if (!streamId || streamId.length > 64) {
+        return jsonResponse({ success: false, error: "stream_id parameter is required" }, 400);
+      }
+
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Database connection unavailable in production environment",
+          },
+          503,
+        );
+      }
+
+      if (pool) {
+        try {
+          const [rows]: any = await pool.query(
+            `SELECT id, stream_id, user_name, avatar_url, message, is_superchat, superchat_amount, created_at
+             FROM live_chat_messages
+             WHERE stream_id = ?
+             ORDER BY created_at ASC
+             LIMIT 200`,
+            [streamId],
+          );
+          const messages = (Array.isArray(rows) ? rows : []).map(formatPublicChatMessage);
+          return jsonResponse({ success: true, stream_id: streamId, messages });
+        } catch (_dbErr) {
+          if (isProduction) {
+            return jsonResponse(
+              { success: false, error: "Database error while loading live chat messages" },
+              500,
+            );
+          }
+          // Non-production fallback below
+        }
+      }
+
+      const messages = (store.liveChatMessages || [])
+        .filter((m) => m && m.stream_id === streamId)
+        .slice(-200)
+        .map(formatPublicChatMessage);
       return jsonResponse({ success: true, stream_id: streamId, messages });
     }
+
     if (method === "POST") {
-      const pool = getMysqlPool();
-      const authUser = await getAuthUserFromRequest(request, store, pool);
-      const body = await request.json();
-      const streamId = body.stream_id || body.streamId;
-      const msgText = String(body.message || "").trim();
+      if (isProduction && !pool) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Database connection unavailable in production environment",
+          },
+          503,
+        );
+      }
+
+      const authUser = await getAuthUserFromRequest(request, store, pool, env);
+      const body: any = await request.json().catch(() => null);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return jsonResponse({ success: false, error: "Invalid JSON request body" }, 400);
+      }
+
+      const streamId = String(body.stream_id ?? body.streamId ?? "").trim();
+      const msgText = String(body.message ?? "").trim();
       if (!streamId || !msgText) {
         return jsonResponse({ success: false, error: "stream_id and message are required" }, 400);
       }
-      const msgRecord: {
-        id: string;
-        stream_id: string;
-        user_id: string;
-        user_name: string;
-        avatar_url?: string;
-        message: string;
-        is_superchat?: boolean;
-        superchat_amount?: number;
-        created_at: string;
-      } = {
+      if (streamId.length > 64) {
+        return jsonResponse({ success: false, error: "Invalid stream_id" }, 400);
+      }
+      if (msgText.length > 500) {
+        return jsonResponse({ success: false, error: "Message cannot exceed 500 characters" }, 400);
+      }
+
+      let senderUserId: string;
+      let senderUserName: string;
+      let senderAvatarUrl: string | null = null;
+
+      if (authUser) {
+        senderUserId = String(authUser.user_id).trim();
+        senderUserName =
+          (typeof authUser.name === "string" && authUser.name.trim()) ||
+          (typeof authUser.channel_name === "string" && authUser.channel_name.trim()) ||
+          "FaceTube Member";
+        senderAvatarUrl = normalizeChatAvatarUrl(
+          authUser.avatar_url ?? authUser.channel_logo_url ?? null,
+        );
+      } else {
+        const clientIp = (
+          request.headers.get("cf-connecting-ip") ||
+          request.headers.get("x-forwarded-for")?.split(",")[0] ||
+          request.headers.get("x-real-ip") ||
+          "0.0.0.0"
+        )
+          .trim()
+          .slice(0, 128);
+        const userAgent = (request.headers.get("user-agent") || "browser").trim().slice(0, 256);
+        const guestHash = crypto
+          .createHash("sha256")
+          .update(`facetube_live_guest|${clientIp}|${userAgent}`)
+          .digest("hex")
+          .slice(0, 12);
+        senderUserId = `guest_${guestHash}`;
+        senderUserName = `Viewer #${guestHash.slice(0, 4).toUpperCase()}`;
+        senderAvatarUrl = null;
+      }
+
+      // Per-sender sliding-window rate limit (20 messages / 10 seconds per stream)
+      const nowMs = Date.now();
+      const rateWindowMs = 10_000;
+      const maxMsgsPerWindow = 20;
+      const rateKey = `${streamId}:${senderUserId}`;
+      const recentTimestamps = (liveChatRateLimitMap.get(rateKey) || []).filter(
+        (ts) => nowMs - ts < rateWindowMs,
+      );
+      if (recentTimestamps.length >= maxMsgsPerWindow) {
+        return jsonResponse(
+          { success: false, error: "You are sending messages too quickly. Please wait a moment." },
+          429,
+        );
+      }
+      recentTimestamps.push(nowMs);
+      liveChatRateLimitMap.set(rateKey, recentTimestamps);
+      if (liveChatRateLimitMap.size > 2000) {
+        for (const [k, list] of liveChatRateLimitMap.entries()) {
+          if (list.every((ts) => nowMs - ts >= rateWindowMs)) {
+            liveChatRateLimitMap.delete(k);
+          }
+        }
+      }
+
+      // SuperChat requires verified server-side payment linkage; never trust client-supplied SuperChat fields.
+      const isSuperchat = false;
+      const superchatAmount = 0;
+
+      const msgRecord = {
         id: `chat_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`,
         stream_id: streamId,
-        user_id: authUser?.user_id || "GUEST",
-        user_name: authUser?.name || body.user_name || "Viewer",
+        user_id: senderUserId,
+        user_name: senderUserName,
+        ...(senderAvatarUrl ? { avatar_url: senderAvatarUrl } : {}),
         message: msgText,
-        is_superchat: Boolean(body.is_superchat),
-        superchat_amount: Number(body.superchat_amount) || 0,
+        is_superchat: isSuperchat,
+        superchat_amount: superchatAmount,
         created_at: new Date().toISOString(),
       };
-      if (authUser?.avatar_url) {
-        msgRecord.avatar_url = authUser.avatar_url;
+
+      if (pool) {
+        try {
+          const [insertRes]: any = await pool.query(
+            `INSERT INTO live_chat_messages (id, stream_id, user_id, user_name, avatar_url, message, is_superchat, superchat_amount, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            [
+              msgRecord.id,
+              msgRecord.stream_id,
+              msgRecord.user_id,
+              msgRecord.user_name,
+              senderAvatarUrl,
+              msgRecord.message,
+              0,
+              0,
+            ],
+          );
+          if (
+            insertRes &&
+            typeof insertRes === "object" &&
+            !Array.isArray(insertRes) &&
+            "affectedRows" in insertRes &&
+            Number(insertRes.affectedRows) < 1
+          ) {
+            throw new Error("Live chat insert affected 0 rows");
+          }
+          return jsonResponse({ success: true, message: formatPublicChatMessage(msgRecord) }, 201);
+        } catch (_dbErr) {
+          if (isProduction) {
+            return jsonResponse(
+              { success: false, error: "Database error while saving live chat message" },
+              500,
+            );
+          }
+          // Non-production fallback below
+        }
       }
+
       if (!store.liveChatMessages) store.liveChatMessages = [];
       store.liveChatMessages.push(msgRecord);
-      saveStore(store);
-      return jsonResponse({ success: true, message: msgRecord }, 201);
+      saveStore(store, env);
+      return jsonResponse({ success: true, message: formatPublicChatMessage(msgRecord) }, 201);
     }
+
+    return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
   }
 
   // 19. Categories List
@@ -10316,7 +10693,7 @@ async function dispatchApiRequest(
 
       if (!store.categories || store.categories.length === 0) {
         store.categories = getInitialCategories();
-        saveStore(store);
+        saveStore(store, env);
       } else {
         const existingLower = new Set(
           store.categories.map((c: any) =>
@@ -10337,7 +10714,7 @@ async function dispatchApiRequest(
           }
         }
         if (updated) {
-          saveStore(store);
+          saveStore(store, env);
         }
       }
 
@@ -11056,7 +11433,7 @@ async function dispatchApiRequest(
         store.subscriptionRefundRequests = [];
       }
       store.subscriptionRefundRequests.unshift(newRefundReq);
-      saveStore(store);
+      saveStore(store, env);
 
       return jsonResponse(
         {
@@ -11312,7 +11689,7 @@ async function dispatchApiRequest(
           store.subscriptionRefundRequests[sIdx] = updated;
         }
       }
-      saveStore(store);
+      saveStore(store, env);
 
       return jsonResponse({
         success: true,
@@ -11360,7 +11737,7 @@ async function dispatchApiRequest(
           }
         }
       }
-      saveStore(store);
+      saveStore(store, env);
 
       return jsonResponse({
         success: true,
@@ -11392,7 +11769,7 @@ async function dispatchApiRequest(
         store.subscriptionRefundRequests[sIdx] = updated;
       }
     }
-    saveStore(store);
+    saveStore(store, env);
 
     return jsonResponse({
       success: true,
@@ -11499,7 +11876,7 @@ async function dispatchApiRequest(
 
           if (!store.categories) store.categories = getInitialCategories();
           store.categories.push(newCat);
-          saveStore(store);
+          saveStore(store, env);
 
           return jsonResponse(
             {
@@ -11567,7 +11944,7 @@ async function dispatchApiRequest(
         created_at: new Date().toISOString(),
       };
       store.categories.push(newCat);
-      saveStore(store);
+      saveStore(store, env);
 
       return jsonResponse(
         {
@@ -12180,7 +12557,7 @@ async function dispatchApiRequest(
       referenceId,
       creditedAt: new Date().toISOString(),
     };
-    saveStore(store);
+    saveStore(store, env);
 
     return jsonResponse({
       success: true,
@@ -12509,7 +12886,7 @@ async function dispatchApiRequest(
       reportMonth: normalizedMonth,
       creditedAt: new Date().toISOString(),
     };
-    saveStore(store);
+    saveStore(store, env);
 
     return jsonResponse(
       {
@@ -12782,7 +13159,7 @@ async function dispatchApiRequest(
         expires_at: expiresAt,
         created_at: new Date().toISOString(),
       });
-      saveStore(store);
+      saveStore(store, env);
     }
 
     const scopes = [
@@ -13075,7 +13452,7 @@ async function dispatchApiRequest(
         );
       }
 
-      const currentStore = loadStore();
+      const currentStore = loadStore(env);
       const localStates: any[] = (currentStore as any).admobOAuthStates || [];
       const stateIndex = localStates.findIndex(
         (s: any) =>
@@ -13164,7 +13541,7 @@ async function dispatchApiRequest(
       inMemoryConsumedNonces.add(stateNonce);
       stateRecord.is_consumed = 1;
       stateRecord.consumed_at = new Date().toISOString();
-      saveStore(currentStore);
+      saveStore(currentStore, env);
     }
 
     const adminUserId = stateUserId;
@@ -13425,7 +13802,7 @@ async function dispatchApiRequest(
         connected_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
-      saveStore(store);
+      saveStore(store, env);
     }
 
     return reply(
@@ -13660,7 +14037,7 @@ async function dispatchApiRequest(
 
     if (!isDbConfigured) {
       delete (store as any).admobOauth;
-      saveStore(store);
+      saveStore(store, env);
     }
 
     return jsonResponse({
@@ -13983,7 +14360,7 @@ async function dispatchApiRequest(
       referrer,
       created_at: new Date().toISOString(),
     });
-    saveStore(store);
+    saveStore(store, env);
 
     if (shouldRedirect && validation.url) {
       return Response.redirect(validation.url, 302);
@@ -14297,7 +14674,7 @@ async function dispatchApiRequest(
       notes: `Initial verified ingestion from ${network} webhook.`,
       created_at: new Date().toISOString(),
     });
-    saveStore(store);
+    saveStore(store, env);
 
     return jsonResponse(
       {
@@ -14548,7 +14925,7 @@ async function dispatchApiRequest(
       if (webhookSecret !== undefined) netObj.webhook_secret = webhookSecret;
       netObj.updated_by = authUser.user_id;
       netObj.updated_at = new Date().toISOString();
-      saveStore(store);
+      saveStore(store, env);
 
       return jsonResponse({
         success: true,
@@ -15085,7 +15462,7 @@ async function dispatchApiRequest(
           notes,
           created_at: new Date().toISOString(),
         });
-        saveStore(store);
+        saveStore(store, env);
         return jsonResponse({
           success: true,
           message: "Conversion approved successfully.",
@@ -15165,7 +15542,7 @@ async function dispatchApiRequest(
           notes,
           created_at: new Date().toISOString(),
         });
-        saveStore(store);
+        saveStore(store, env);
 
         return jsonResponse({
           success: true,
@@ -15202,7 +15579,7 @@ async function dispatchApiRequest(
           notes,
           created_at: new Date().toISOString(),
         });
-        saveStore(store);
+        saveStore(store, env);
         return jsonResponse({
           success: true,
           message: "Conversion marked as rejected.",
@@ -15270,7 +15647,7 @@ async function dispatchApiRequest(
             notes,
             created_at: new Date().toISOString(),
           });
-          saveStore(store);
+          saveStore(store, env);
 
           return jsonResponse({
             success: true,
@@ -15297,7 +15674,7 @@ async function dispatchApiRequest(
             notes,
             created_at: new Date().toISOString(),
           });
-          saveStore(store);
+          saveStore(store, env);
 
           return jsonResponse({
             success: true,
@@ -15943,7 +16320,7 @@ async function dispatchApiRequest(
         subscriber_user_id: subscriberUserId,
         created_at: new Date().toISOString(),
       });
-      saveStore(store);
+      saveStore(store, env);
     }
     const count = new Set(
       store.channelSubscriptions
@@ -16040,7 +16417,7 @@ async function dispatchApiRequest(
           s.subscriber_user_id.toUpperCase() === subscriberUserId.toUpperCase()
         ),
     );
-    saveStore(store);
+    saveStore(store, env);
 
     const count = new Set(
       store.channelSubscriptions
