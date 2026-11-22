@@ -736,6 +736,32 @@ interface ServerStore {
     subscriber_user_id: string;
     created_at: string;
   }>;
+  admobReportSnapshots?: Array<{
+    id: number;
+    publisher_id: string;
+    app_id: string;
+    report_month: string;
+    period_start: string;
+    period_end: string;
+    reporting_time_zone: string | null;
+    currency_code: string;
+    estimated_earnings_micros: string | number;
+    estimated_earnings: string | number;
+    impressions: number;
+    clicks: number;
+    ad_requests: number;
+    matched_requests: number;
+    ownership_scope: string;
+    status: "staged_estimated" | "verified_finalized";
+    sync_count: number;
+    synced_by: string;
+    synced_at: string;
+    verified_by: string | null;
+    verified_at: string | null;
+    verification_notes: string | null;
+    created_at: string;
+    updated_at: string;
+  }>;
 }
 
 /**
@@ -16956,6 +16982,1426 @@ async function dispatchApiRequest(
       success: true,
       connected: false,
       message: "Google AdMob OAuth credentials disconnected and tokens revoked successfully.",
+    });
+  }
+
+  // ============================================================================
+  // 20c-4. FaceTube - Company AdMob Reporting API v1 (Staging Only — Step 9C Phase 2)
+  // 100% Company Revenue | Strict INR Verification | FaceTube App ID Only | No Wallet Credits
+  // ============================================================================
+
+  const resolveFaceTubeAdmobAppId = (
+    requestedAppId?: string | null,
+  ): { ok: true; appId: string } | { ok: false; status: number; error: string } => {
+    const configuredAppId = readEnvValue(env, "ADMOB_APP_ID");
+    if (!configuredAppId) {
+      return {
+        ok: false,
+        status: 500,
+        error: "FaceTube Android ADMOB_APP_ID is not configured on the server.",
+      };
+    }
+    if (/^ca-app-pub-3940256099942544(?:~|\/|$)/i.test(configuredAppId)) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Google reserved test AdMob App ID cannot be used for AdMob reporting.",
+      };
+    }
+    if (!/^ca-app-pub-\d{16}~\d{10}$/.test(configuredAppId)) {
+      return {
+        ok: false,
+        status: 400,
+        error:
+          "Configured ADMOB_APP_ID format is invalid. Expected ca-app-pub-XXXXXXXXXXXXXXXX~YYYYYYYYYY.",
+      };
+    }
+    const reqApp = String(requestedAppId ?? "").trim();
+    if (reqApp && reqApp !== configuredAppId) {
+      return {
+        ok: false,
+        status: 400,
+        error: "Only the configured FaceTube Android app ID is permitted in AdMob reporting.",
+      };
+    }
+    return { ok: true, appId: configuredAppId };
+  };
+
+  const parseStrictAdmobJsonBody = async (
+    req: Request,
+  ): Promise<
+    { ok: true; data: Record<string, any> } | { ok: false; status: number; error: string }
+  > => {
+    let raw = "";
+    try {
+      raw = await req.text();
+    } catch {
+      return { ok: false, status: 400, error: "Invalid JSON body" };
+    }
+    if (!raw.trim()) {
+      return { ok: true, data: {} };
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { ok: false, status: 400, error: "Invalid JSON body" };
+      }
+      return { ok: true, data: parsed as Record<string, any> };
+    } catch {
+      return { ok: false, status: 400, error: "Invalid JSON body" };
+    }
+  };
+
+  const validateAdmobReportingTimeZone = (
+    reportingTimeZone?: string | null,
+    allowEmptyDefaultUtc = true,
+  ): { ok: true; reportingTimeZone: string } | { ok: false; status: number; error: string } => {
+    const rawTz = String(reportingTimeZone ?? "").trim();
+    if (!rawTz) {
+      if (allowEmptyDefaultUtc) {
+        return { ok: true, reportingTimeZone: "UTC" };
+      }
+      return {
+        ok: false,
+        status: 422,
+        error: "AdMob reportingTimeZone is missing and cannot be safely established.",
+      };
+    }
+
+    try {
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: rawTz,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).formatToParts(new Date());
+      return { ok: true, reportingTimeZone: rawTz };
+    } catch {
+      return {
+        ok: false,
+        status: 422,
+        error: `Invalid AdMob reportingTimeZone '${rawTz}'. Refusing to fall back silently to UTC.`,
+      };
+    }
+  };
+
+  const resolveDefaultAdmobReportMonth = (
+    reportingTimeZone: string,
+  ): { ok: true; reportMonth: string } | { ok: false; status: number; error: string } => {
+    const tzCheck = validateAdmobReportingTimeZone(reportingTimeZone, true);
+    if (!tzCheck.ok) return tzCheck;
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tzCheck.reportingTimeZone,
+      year: "numeric",
+      month: "2-digit",
+    }).formatToParts(new Date());
+    const y = parts.find((p) => p.type === "year")?.value || "";
+    const m = parts.find((p) => p.type === "month")?.value || "";
+    if (!/^\d{4}$/.test(y) || !/^(0[1-9]|1[0-2])$/.test(m)) {
+      return {
+        ok: false,
+        status: 422,
+        error: "Unable to resolve default AdMob reporting month from reportingTimeZone.",
+      };
+    }
+    return { ok: true, reportMonth: `${y}-${m}` };
+  };
+
+  const isAdmobRetryableConcurrencyError = (err: unknown): boolean => {
+    if (isMysqlDuplicateKeyError(err)) return true;
+    const rec = (err && typeof err === "object" ? err : {}) as {
+      code?: unknown;
+      errno?: unknown;
+      sqlState?: unknown;
+      message?: unknown;
+    };
+    const code = String(rec.code || "");
+    const errno = Number(rec.errno || 0);
+    const sqlState = String(rec.sqlState || "");
+    const msg = String(rec.message || "");
+    return (
+      code === "ER_LOCK_DEADLOCK" ||
+      code === "ER_LOCK_WAIT_TIMEOUT" ||
+      errno === 1213 ||
+      errno === 1205 ||
+      sqlState === "40001" ||
+      /Duplicate entry|Deadlock found|Lock wait timeout/i.test(msg)
+    );
+  };
+
+  const computeAdmobMonthPeriod = (
+    reportMonth: string,
+    reportingTimeZone?: string | null,
+    allowEmptyDefaultUtc = true,
+  ):
+    | {
+        ok: true;
+        reportMonth: string;
+        year: number;
+        month: number;
+        endDay: number;
+        periodStart: string;
+        periodEnd: string;
+        isClosedMonth: boolean;
+        reportingTimeZone: string;
+      }
+    | { ok: false; status: number; error: string } => {
+    const m = reportMonth.match(/^(\d{4})-(0[1-9]|1[0-2])$/);
+    if (!m) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Invalid reportMonth format '${reportMonth}'. Expected YYYY-MM.`,
+      };
+    }
+    const tzCheck = validateAdmobReportingTimeZone(reportingTimeZone, allowEmptyDefaultUtc);
+    if (!tzCheck.ok) {
+      return tzCheck;
+    }
+    const tzName = tzCheck.reportingTimeZone;
+    const year = Number(m[1]);
+    const month = Number(m[2]);
+
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tzName,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(new Date());
+    const curYear = Number(parts.find((p) => p.type === "year")?.value || "0");
+    const curMonth = Number(parts.find((p) => p.type === "month")?.value || "0");
+    const curDay = Number(parts.find((p) => p.type === "day")?.value || "0");
+
+    if (year > curYear || (year === curYear && month > curMonth)) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Cannot operate on future reporting month '${reportMonth}'.`,
+      };
+    }
+
+    const isCurrentOpenMonth = year === curYear && month === curMonth;
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const endDay = isCurrentOpenMonth ? Math.min(curDay, daysInMonth) : daysInMonth;
+    const mm = String(month).padStart(2, "0");
+    const dd = String(endDay).padStart(2, "0");
+
+    return {
+      ok: true,
+      reportMonth: `${year}-${mm}`,
+      year,
+      month,
+      endDay,
+      periodStart: `${year}-${mm}-01`,
+      periodEnd: `${year}-${mm}-${dd}`,
+      isClosedMonth: !isCurrentOpenMonth,
+      reportingTimeZone: tzName,
+    };
+  };
+
+  const formatAdmobMicrosToDecimal = (micros: bigint): string => {
+    const sign = micros < 0n ? "-" : "";
+    const abs = micros < 0n ? -micros : micros;
+    const whole = abs / 1_000_000n;
+    const frac = (abs % 1_000_000n).toString().padStart(6, "0");
+    return `${sign}${whole}.${frac}`;
+  };
+
+  // 20c-4a. GET /api/admin/admob/reports
+  if (route === "admin/admob/reports") {
+    if (method !== "GET") {
+      return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
+    }
+    const isProduction = isFailClosedProductionEnv(
+      readEnvValue(env, "APP_ENV"),
+      readEnvValue(env, "NODE_ENV"),
+    );
+    const pool = getMysqlPool();
+    if (isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required for AdMob staging reports.",
+        },
+        503,
+      );
+    }
+    const authUser = await getAuthUserFromRequest(request, store, pool, env);
+    if (!authUser) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Authentication required. Please provide a valid Bearer session token.",
+        },
+        401,
+      );
+    }
+    if (
+      String(authUser.role || "")
+        .trim()
+        .toLowerCase() !== "admin"
+    ) {
+      return jsonResponse({ success: false, error: "Admin authorization required." }, 403);
+    }
+
+    const parsedUrl = new URL(request.url);
+    const reportMonth = String(
+      parsedUrl.searchParams.get("reportMonth") || parsedUrl.searchParams.get("report_month") || "",
+    ).trim();
+    if (reportMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(reportMonth)) {
+      return jsonResponse(
+        {
+          success: false,
+          error: `Invalid reportMonth filter '${reportMonth}'. Expected YYYY-MM.`,
+        },
+        400,
+      );
+    }
+
+    const appRes = resolveFaceTubeAdmobAppId(null);
+    if (!appRes.ok) {
+      return jsonResponse({ success: false, error: appRes.error }, appRes.status);
+    }
+    const appId = appRes.appId;
+
+    const accountingNotice =
+      "100% FaceTube company revenue staging only — no creator wallets or income_ledger entries affected.";
+
+    let credRow: any = null;
+    if (pool) {
+      try {
+        const [credRows]: any = await pool.query(
+          "SELECT id, publisher_id, is_active FROM admob_oauth_credentials WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+        );
+        if (credRows && credRows.length > 0) credRow = credRows[0];
+      } catch (dbErr: unknown) {
+        if (isMysqlConnectionUnavailableError(dbErr)) {
+          return jsonResponse({ success: false, error: "Database connection unavailable." }, 503);
+        }
+        return jsonResponse(
+          {
+            success: false,
+            error: "AdMob OAuth database table is uninitialized or inaccessible.",
+          },
+          500,
+        );
+      }
+    } else {
+      if (isProduction) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Database connection unavailable. In production, persistent database storage is required for AdMob staging reports.",
+          },
+          503,
+        );
+      }
+      const localOauth = (store as any).admobOauth;
+      if (localOauth && localOauth.is_active) {
+        credRow = localOauth;
+      }
+    }
+
+    if (!credRow || !credRow.publisher_id) {
+      return jsonResponse({
+        success: true,
+        count: 0,
+        snapshots: [],
+        connected: false,
+        accountingNotice,
+      });
+    }
+
+    const activePublisherId = String(credRow.publisher_id).trim();
+    if (
+      activePublisherId === "pub-3940256099942544" ||
+      !/^pub-[a-zA-Z0-9]+$/.test(activePublisherId)
+    ) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Connected AdMob publisher ID is missing, invalid, or matched test ID.",
+        },
+        400,
+      );
+    }
+
+    if (pool) {
+      try {
+        const sql = reportMonth
+          ? "SELECT id, publisher_id, app_id, report_month, period_start, period_end, reporting_time_zone, currency_code, estimated_earnings_micros, estimated_earnings, impressions, clicks, ad_requests, matched_requests, ownership_scope, status, sync_count, synced_by, synced_at, verified_by, verified_at, verification_notes, created_at, updated_at FROM admob_report_snapshots WHERE publisher_id = ? AND app_id = ? AND report_month = ? ORDER BY report_month DESC, synced_at DESC"
+          : "SELECT id, publisher_id, app_id, report_month, period_start, period_end, reporting_time_zone, currency_code, estimated_earnings_micros, estimated_earnings, impressions, clicks, ad_requests, matched_requests, ownership_scope, status, sync_count, synced_by, synced_at, verified_by, verified_at, verification_notes, created_at, updated_at FROM admob_report_snapshots WHERE publisher_id = ? AND app_id = ? ORDER BY report_month DESC, synced_at DESC";
+        const [rows]: any = reportMonth
+          ? await pool.query(sql, [activePublisherId, appId, reportMonth])
+          : await pool.query(sql, [activePublisherId, appId]);
+        const snapshots = rows || [];
+        return jsonResponse({
+          success: true,
+          count: snapshots.length,
+          snapshots,
+          accountingNotice,
+        });
+      } catch (dbErr: unknown) {
+        if (isMysqlConnectionUnavailableError(dbErr)) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database connection unavailable while loading AdMob staging snapshots.",
+            },
+            503,
+          );
+        }
+        return jsonResponse(
+          { success: false, error: "Database error loading AdMob staging snapshots." },
+          500,
+        );
+      }
+    }
+
+    const localSnapshots = (store.admobReportSnapshots || [])
+      .filter(
+        (s) =>
+          s.publisher_id === activePublisherId &&
+          s.app_id === appId &&
+          (!reportMonth || s.report_month === reportMonth),
+      )
+      .sort((a, b) =>
+        b.report_month !== a.report_month
+          ? b.report_month.localeCompare(a.report_month)
+          : b.synced_at.localeCompare(a.synced_at),
+      );
+
+    return jsonResponse({
+      success: true,
+      count: localSnapshots.length,
+      snapshots: localSnapshots,
+      accountingNotice,
+    });
+  }
+
+  // 20c-4b. POST /api/admin/admob/sync-report
+  if (route === "admin/admob/sync-report") {
+    if (method !== "POST") {
+      return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
+    }
+    const isProduction = isFailClosedProductionEnv(
+      readEnvValue(env, "APP_ENV"),
+      readEnvValue(env, "NODE_ENV"),
+    );
+    const pool = getMysqlPool();
+    if (isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required for AdMob staging sync.",
+        },
+        503,
+      );
+    }
+    const authUser = await getAuthUserFromRequest(request, store, pool, env);
+    if (!authUser) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Authentication required. Please provide a valid Bearer session token.",
+        },
+        401,
+      );
+    }
+    if (
+      String(authUser.role || "")
+        .trim()
+        .toLowerCase() !== "admin"
+    ) {
+      return jsonResponse({ success: false, error: "Admin authorization required." }, 403);
+    }
+
+    const secretKey = readEnvValue(env, "ADMOB_ENCRYPTION_KEY");
+    if (!secretKey) {
+      return jsonResponse(
+        { success: false, error: "ADMOB_ENCRYPTION_KEY is not configured on the server." },
+        500,
+      );
+    }
+    const clientId = readEnvValue(env, "ADMOB_OAUTH_CLIENT_ID");
+    const clientSecret = readEnvValue(env, "ADMOB_OAUTH_CLIENT_SECRET");
+    if (!clientId || !clientSecret) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Google AdMob OAuth client credentials are not configured on the server.",
+        },
+        500,
+      );
+    }
+
+    const bodyRes = await parseStrictAdmobJsonBody(request);
+    if (!bodyRes.ok) {
+      return jsonResponse({ success: false, error: bodyRes.error }, bodyRes.status);
+    }
+    const body = bodyRes.data;
+
+    const hasExplicitMonth =
+      Object.prototype.hasOwnProperty.call(body, "reportMonth") ||
+      Object.prototype.hasOwnProperty.call(body, "report_month");
+    let rawMonth = String(body["reportMonth"] ?? body["report_month"] ?? "").trim();
+    if (hasExplicitMonth && !/^\d{4}-(0[1-9]|1[0-2])$/.test(rawMonth)) {
+      return jsonResponse(
+        {
+          success: false,
+          error: `Invalid reportMonth format '${rawMonth}'. Expected YYYY-MM.`,
+        },
+        400,
+      );
+    }
+
+    const requestedAppId = body["appId"] ?? body["app_id"] ?? null;
+    const appRes = resolveFaceTubeAdmobAppId(
+      requestedAppId !== null ? String(requestedAppId) : null,
+    );
+    if (!appRes.ok) {
+      return jsonResponse({ success: false, error: appRes.error }, appRes.status);
+    }
+    const appId = appRes.appId;
+
+    // 1. Load active encrypted OAuth credential
+    let credRow: any = null;
+    if (pool) {
+      try {
+        const [rows]: any = await pool.query(
+          "SELECT id, publisher_id, account_name, currency_code, encrypted_refresh_token, refresh_token_iv, refresh_token_tag, is_active FROM admob_oauth_credentials WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+        );
+        if (rows && rows.length > 0) credRow = rows[0];
+      } catch (dbErr: unknown) {
+        if (isMysqlConnectionUnavailableError(dbErr)) {
+          return jsonResponse({ success: false, error: "Database connection unavailable." }, 503);
+        }
+        return jsonResponse(
+          {
+            success: false,
+            error: "AdMob OAuth database table is uninitialized or inaccessible.",
+          },
+          500,
+        );
+      }
+    } else {
+      if (isProduction) {
+        return jsonResponse({ success: false, error: "Database connection unavailable." }, 503);
+      }
+      const localOauth = (store as any).admobOauth;
+      if (localOauth && localOauth.is_active) {
+        credRow = localOauth;
+      }
+    }
+
+    if (!credRow || !credRow.publisher_id) {
+      return jsonResponse(
+        { success: false, error: "Google AdMob OAuth account is not connected." },
+        409,
+      );
+    }
+
+    const publisherId = String(credRow.publisher_id).trim();
+    if (publisherId === "pub-3940256099942544" || !/^pub-[a-zA-Z0-9]+$/.test(publisherId)) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Connected AdMob publisher ID is missing, invalid, or matched test ID.",
+        },
+        400,
+      );
+    }
+
+    const refreshToken = decryptAdmobSecretGCM(
+      String(credRow.encrypted_refresh_token || ""),
+      String(credRow.refresh_token_iv || ""),
+      String(credRow.refresh_token_tag || ""),
+      secretKey,
+    );
+    if (!refreshToken) {
+      return jsonResponse(
+        { success: false, error: "Failed to decrypt stored AdMob OAuth refresh token." },
+        500,
+      );
+    }
+
+    // 2. Obtain fresh access token via grant_type=refresh_token
+    let accessToken = "";
+    try {
+      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          refresh_token: refreshToken,
+          grant_type: "refresh_token",
+        }).toString(),
+      });
+      const tokenJson: any = await tokenRes.json().catch(() => null);
+      if (!tokenRes.ok || !tokenJson || !tokenJson.access_token) {
+        const oauthErr = String(tokenJson?.error || "");
+        const oauthDesc = String(
+          tokenJson?.error_description || oauthErr || "Token refresh failed",
+        );
+        if (oauthErr === "invalid_grant") {
+          if (pool && credRow.id) {
+            try {
+              await pool.query(
+                "UPDATE admob_oauth_credentials SET is_active = 0, updated_at = NOW() WHERE id = ?",
+                [credRow.id],
+              );
+            } catch {
+              // ignore cleanup failure
+            }
+          } else if (!pool && (store as any).admobOauth) {
+            (store as any).admobOauth.is_active = 0;
+            (store as any).admobOauth.updated_at = new Date().toISOString();
+            saveStore(store, env);
+          }
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                "Google AdMob OAuth refresh token expired or was revoked (invalid_grant). Please reconnect AdMob OAuth.",
+            },
+            401,
+          );
+        }
+        return jsonResponse(
+          {
+            success: false,
+            error: `Failed to refresh Google AdMob access token: ${oauthDesc}`,
+          },
+          502,
+        );
+      }
+      accessToken = String(tokenJson.access_token);
+    } catch {
+      return jsonResponse(
+        { success: false, error: "Network error refreshing Google AdMob OAuth access token." },
+        502,
+      );
+    }
+
+    // 3. Verify live Google PublisherAccount currency === INR (never silently assume INR)
+    let reportingTimeZone = "UTC";
+    try {
+      const accRes = await fetch(
+        `https://admob.googleapis.com/v1/accounts/${encodeURIComponent(publisherId)}`,
+        {
+          method: "GET",
+          headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+        },
+      );
+      if (accRes.status === 401) {
+        return jsonResponse(
+          { success: false, error: "Google AdMob API rejected the OAuth access token (HTTP 401)." },
+          401,
+        );
+      }
+      if (!accRes.ok) {
+        return jsonResponse(
+          {
+            success: false,
+            error: `Unable to verify Google AdMob publisher account metadata (HTTP ${accRes.status}).`,
+          },
+          502,
+        );
+      }
+      const accJson: any = await accRes.json().catch(() => null);
+      if (!accJson || typeof accJson !== "object") {
+        return jsonResponse(
+          { success: false, error: "Invalid JSON returned by Google AdMob accounts endpoint." },
+          502,
+        );
+      }
+      const actualCurrency = String(accJson.currencyCode || "")
+        .trim()
+        .toUpperCase();
+      if (!actualCurrency) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Google AdMob publisher account metadata did not include currencyCode. Refusing to assume INR.",
+          },
+          422,
+        );
+      }
+      if (actualCurrency !== "INR") {
+        return jsonResponse(
+          {
+            success: false,
+            error: `Google AdMob publisher account currency is '${actualCurrency}', expected 'INR'. FX conversion is not authorized; sync aborted.`,
+          },
+          422,
+        );
+      }
+      const rawTz = String(accJson.reportingTimeZone ?? "").trim();
+      const tzCheck = validateAdmobReportingTimeZone(rawTz, true);
+      if (!tzCheck.ok) {
+        return jsonResponse(
+          {
+            success: false,
+            error: `Google AdMob publisher account returned invalid reportingTimeZone '${rawTz}'. Refusing to fall back silently to UTC.`,
+          },
+          422,
+        );
+      }
+      reportingTimeZone = tzCheck.reportingTimeZone;
+    } catch {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Network error querying Google AdMob publisher account metadata.",
+        },
+        502,
+      );
+    }
+
+    if (!rawMonth) {
+      const defMonthRes = resolveDefaultAdmobReportMonth(reportingTimeZone);
+      if (!defMonthRes.ok) {
+        return jsonResponse({ success: false, error: defMonthRes.error }, defMonthRes.status);
+      }
+      rawMonth = defMonthRes.reportMonth;
+    }
+
+    const period = computeAdmobMonthPeriod(rawMonth, reportingTimeZone, false);
+    if (!period.ok) {
+      return jsonResponse({ success: false, error: period.error }, period.status);
+    }
+
+    if (pool && credRow.id) {
+      try {
+        await pool.query(
+          "UPDATE admob_oauth_credentials SET currency_code = ?, reporting_time_zone = ?, updated_at = NOW() WHERE id = ?",
+          ["INR", reportingTimeZone, credRow.id],
+        );
+      } catch {
+        try {
+          await pool.query(
+            "UPDATE admob_oauth_credentials SET currency_code = ?, updated_at = NOW() WHERE id = ?",
+            ["INR", credRow.id],
+          );
+        } catch {
+          // non-fatal
+        }
+      }
+    } else if (!pool && (store as any).admobOauth) {
+      (store as any).admobOauth.currency_code = "INR";
+      (store as any).admobOauth.reporting_time_zone = reportingTimeZone;
+    }
+
+    // 4. Query networkReport:generate filtered strictly to FaceTube Android App ID
+    let totalMicros = 0n;
+    let impressions = 0;
+    let clicks = 0;
+    let adRequests = 0;
+    let matchedRequests = 0;
+
+    try {
+      const reportRes = await fetch(
+        `https://admob.googleapis.com/v1/accounts/${encodeURIComponent(publisherId)}/networkReport:generate`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+            Accept: "application/json",
+          },
+          body: JSON.stringify({
+            reportSpec: {
+              dateRange: {
+                startDate: { year: period.year, month: period.month, day: 1 },
+                endDate: { year: period.year, month: period.month, day: period.endDay },
+              },
+              dimensions: ["APP"],
+              metrics: [
+                "ESTIMATED_EARNINGS",
+                "IMPRESSIONS",
+                "CLICKS",
+                "AD_REQUESTS",
+                "MATCHED_REQUESTS",
+              ],
+              dimensionFilters: [
+                {
+                  dimension: "APP",
+                  matchesAny: {
+                    values: [appId],
+                  },
+                },
+              ],
+              localizationSettings: {
+                languageCode: "en-US",
+              },
+            },
+          }),
+        },
+      );
+
+      if (reportRes.status === 429 || reportRes.status >= 500) {
+        return jsonResponse(
+          {
+            success: false,
+            error: `Google AdMob Reporting API temporarily unavailable or rate-limited (HTTP ${reportRes.status}).`,
+          },
+          503,
+        );
+      }
+      if (!reportRes.ok) {
+        return jsonResponse(
+          {
+            success: false,
+            error: `Google AdMob networkReport:generate request failed (HTTP ${reportRes.status}).`,
+          },
+          reportRes.status === 401 ? 401 : 502,
+        );
+      }
+
+      const items: any = await reportRes.json().catch(() => null);
+      if (!Array.isArray(items)) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Invalid JSON response from Google AdMob networkReport:generate.",
+          },
+          502,
+        );
+      }
+
+      let headerCurrency = "";
+      for (const entry of items) {
+        if (!entry || typeof entry !== "object") continue;
+        if (entry.header && typeof entry.header === "object") {
+          headerCurrency = String(entry.header.localizationSettings?.currencyCode || "")
+            .trim()
+            .toUpperCase();
+        }
+        if (entry.row && typeof entry.row === "object") {
+          const rowAppId = String(entry.row.dimensionValues?.APP?.value || "").trim();
+          if (rowAppId !== appId) {
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  "Google AdMob report returned a non-FaceTube app row; sync aborted by app scope policy.",
+              },
+              422,
+            );
+          }
+          const metrics = entry.row.metricValues || {};
+          const rawMicros = String(metrics.ESTIMATED_EARNINGS?.microsValue ?? "0").trim();
+          if (!/^-?\d+$/.test(rawMicros)) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Invalid ESTIMATED_EARNINGS microsValue returned by Google AdMob.",
+              },
+              502,
+            );
+          }
+          totalMicros += BigInt(rawMicros);
+          impressions += Math.max(0, Number(metrics.IMPRESSIONS?.integerValue || 0) || 0);
+          clicks += Math.max(0, Number(metrics.CLICKS?.integerValue || 0) || 0);
+          adRequests += Math.max(0, Number(metrics.AD_REQUESTS?.integerValue || 0) || 0);
+          matchedRequests += Math.max(0, Number(metrics.MATCHED_REQUESTS?.integerValue || 0) || 0);
+        }
+      }
+
+      if (!headerCurrency) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Google AdMob report header omitted localizationSettings.currencyCode. Refusing to assume INR.",
+          },
+          422,
+        );
+      }
+      if (headerCurrency !== "INR") {
+        return jsonResponse(
+          {
+            success: false,
+            error: `Google AdMob report currency is '${headerCurrency}', expected 'INR'. Sync aborted.`,
+          },
+          422,
+        );
+      }
+    } catch {
+      return jsonResponse(
+        { success: false, error: "Network error fetching Google AdMob network report." },
+        502,
+      );
+    }
+
+    const estimatedDecimal = formatAdmobMicrosToDecimal(totalMicros);
+
+    // 5. Idempotently upsert staging snapshot inside bounded-retry transaction (NEVER touch wallet_balances or income_ledger)
+    if (pool) {
+      const maxTxAttempts = 3;
+      for (let attempt = 1; attempt <= maxTxAttempts; attempt++) {
+        let conn: PoolConnection | null = null;
+        let txBegun = false;
+        const safeRollback = async () => {
+          if (!conn || !txBegun) return;
+          txBegun = false;
+          try {
+            await conn.rollback();
+          } catch {
+            // ignore
+          }
+        };
+
+        try {
+          conn = await pool.getConnection();
+          await conn.beginTransaction();
+          txBegun = true;
+
+          const [lockRows]: any = await conn.query(
+            "SELECT id, status, sync_count FROM admob_report_snapshots WHERE publisher_id = ? AND app_id = ? AND report_month = ? LIMIT 1 FOR UPDATE",
+            [publisherId, appId, period.reportMonth],
+          );
+          const existing = lockRows && lockRows.length > 0 ? lockRows[0] : null;
+
+          if (existing && existing.status === "verified_finalized") {
+            await safeRollback();
+            return jsonResponse(
+              {
+                success: false,
+                error: `AdMob company snapshot for ${period.reportMonth} is already verified_finalized and cannot be overwritten by API sync.`,
+              },
+              409,
+            );
+          }
+
+          if (existing) {
+            await conn.query(
+              "UPDATE admob_report_snapshots SET period_start = ?, period_end = ?, reporting_time_zone = ?, currency_code = 'INR', estimated_earnings_micros = ?, estimated_earnings = ?, impressions = ?, clicks = ?, ad_requests = ?, matched_requests = ?, sync_count = sync_count + 1, synced_by = ?, synced_at = NOW(), updated_at = NOW() WHERE id = ?",
+              [
+                period.periodStart,
+                period.periodEnd,
+                reportingTimeZone,
+                totalMicros.toString(),
+                estimatedDecimal,
+                impressions,
+                clicks,
+                adRequests,
+                matchedRequests,
+                authUser.user_id,
+                existing.id,
+              ],
+            );
+          } else {
+            await conn.query(
+              "INSERT INTO admob_report_snapshots (publisher_id, app_id, report_month, period_start, period_end, reporting_time_zone, currency_code, estimated_earnings_micros, estimated_earnings, impressions, clicks, ad_requests, matched_requests, ownership_scope, status, sync_count, synced_by, synced_at) VALUES (?, ?, ?, ?, ?, ?, 'INR', ?, ?, ?, ?, ?, ?, 'COMPANY_100_PERCENT', 'staged_estimated', 1, ?, NOW())",
+              [
+                publisherId,
+                appId,
+                period.reportMonth,
+                period.periodStart,
+                period.periodEnd,
+                reportingTimeZone,
+                totalMicros.toString(),
+                estimatedDecimal,
+                impressions,
+                clicks,
+                adRequests,
+                matchedRequests,
+                authUser.user_id,
+              ],
+            );
+          }
+
+          const [readRows]: any = await conn.query(
+            "SELECT id, publisher_id, app_id, report_month, period_start, period_end, reporting_time_zone, currency_code, estimated_earnings_micros, estimated_earnings, impressions, clicks, ad_requests, matched_requests, ownership_scope, status, sync_count, synced_by, synced_at, verified_by, verified_at, verification_notes, created_at, updated_at FROM admob_report_snapshots WHERE publisher_id = ? AND app_id = ? AND report_month = ? LIMIT 1",
+            [publisherId, appId, period.reportMonth],
+          );
+          const snapshot = readRows?.[0] || null;
+          await conn.commit();
+          txBegun = false;
+
+          return jsonResponse({
+            success: true,
+            message: `Synced FaceTube AdMob company staging report for ${period.reportMonth} (INR).`,
+            snapshot,
+            companyOwnership: "100% FaceTube",
+            walletCredited: false,
+            ledgerPosted: false,
+          });
+        } catch (dbErr: unknown) {
+          await safeRollback();
+          if (isAdmobRetryableConcurrencyError(dbErr)) {
+            if (attempt < maxTxAttempts) {
+              await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
+              continue;
+            }
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  "Concurrent AdMob report sync conflict in progress. Please retry in a moment.",
+              },
+              409,
+            );
+          }
+          const status = isMysqlConnectionUnavailableError(dbErr) ? 503 : 500;
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                status === 503
+                  ? "Database connection unavailable while saving AdMob staging snapshot."
+                  : "Database error saving AdMob staging snapshot.",
+            },
+            status,
+          );
+        } finally {
+          if (conn) {
+            try {
+              conn.release();
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    }
+
+    if (isProduction) {
+      return jsonResponse({ success: false, error: "Database connection unavailable." }, 503);
+    }
+
+    if (!store.admobReportSnapshots) {
+      store.admobReportSnapshots = [];
+    }
+    const nowIso = new Date().toISOString();
+    const existingIdx = store.admobReportSnapshots.findIndex(
+      (s) =>
+        s.publisher_id === publisherId &&
+        s.app_id === appId &&
+        s.report_month === period.reportMonth,
+    );
+    if (
+      existingIdx !== -1 &&
+      store.admobReportSnapshots[existingIdx]!.status === "verified_finalized"
+    ) {
+      return jsonResponse(
+        {
+          success: false,
+          error: `AdMob company snapshot for ${period.reportMonth} is already verified_finalized and cannot be overwritten by API sync.`,
+        },
+        409,
+      );
+    }
+
+    const storedMicrosValue =
+      totalMicros <= BigInt(Number.MAX_SAFE_INTEGER) &&
+      totalMicros >= BigInt(Number.MIN_SAFE_INTEGER)
+        ? Number(totalMicros)
+        : totalMicros.toString();
+
+    let savedSnapshot: NonNullable<ServerStore["admobReportSnapshots"]>[number];
+    if (existingIdx !== -1) {
+      const prev = store.admobReportSnapshots[existingIdx]!;
+      savedSnapshot = {
+        ...prev,
+        period_start: period.periodStart,
+        period_end: period.periodEnd,
+        reporting_time_zone: reportingTimeZone,
+        currency_code: "INR",
+        estimated_earnings_micros: storedMicrosValue,
+        estimated_earnings: estimatedDecimal,
+        impressions,
+        clicks,
+        ad_requests: adRequests,
+        matched_requests: matchedRequests,
+        sync_count: (prev.sync_count || 1) + 1,
+        synced_by: authUser.user_id,
+        synced_at: nowIso,
+        updated_at: nowIso,
+      };
+      store.admobReportSnapshots[existingIdx] = savedSnapshot;
+    } else {
+      const nextId =
+        store.admobReportSnapshots.reduce((max, item) => Math.max(max, Number(item.id) || 0), 0) +
+        1;
+      savedSnapshot = {
+        id: nextId,
+        publisher_id: publisherId,
+        app_id: appId,
+        report_month: period.reportMonth,
+        period_start: period.periodStart,
+        period_end: period.periodEnd,
+        reporting_time_zone: reportingTimeZone,
+        currency_code: "INR",
+        estimated_earnings_micros: storedMicrosValue,
+        estimated_earnings: estimatedDecimal,
+        impressions,
+        clicks,
+        ad_requests: adRequests,
+        matched_requests: matchedRequests,
+        ownership_scope: "COMPANY_100_PERCENT",
+        status: "staged_estimated",
+        sync_count: 1,
+        synced_by: authUser.user_id,
+        synced_at: nowIso,
+        verified_by: null,
+        verified_at: null,
+        verification_notes: null,
+        created_at: nowIso,
+        updated_at: nowIso,
+      };
+      store.admobReportSnapshots.unshift(savedSnapshot);
+    }
+    saveStore(store, env);
+
+    return jsonResponse({
+      success: true,
+      message: `Synced FaceTube AdMob company staging report for ${period.reportMonth} (INR).`,
+      snapshot: savedSnapshot,
+      companyOwnership: "100% FaceTube",
+      walletCredited: false,
+      ledgerPosted: false,
+    });
+  }
+
+  // 20c-4c. POST /api/admin/admob/verify-report
+  if (route === "admin/admob/verify-report") {
+    if (method !== "POST") {
+      return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
+    }
+    const isProduction = isFailClosedProductionEnv(
+      readEnvValue(env, "APP_ENV"),
+      readEnvValue(env, "NODE_ENV"),
+    );
+    const pool = getMysqlPool();
+    if (isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required to verify AdMob staging snapshots.",
+        },
+        503,
+      );
+    }
+    const authUser = await getAuthUserFromRequest(request, store, pool, env);
+    if (!authUser) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Authentication required. Please provide a valid Bearer session token.",
+        },
+        401,
+      );
+    }
+    if (
+      String(authUser.role || "")
+        .trim()
+        .toLowerCase() !== "admin"
+    ) {
+      return jsonResponse({ success: false, error: "Admin authorization required." }, 403);
+    }
+
+    const bodyRes = await parseStrictAdmobJsonBody(request);
+    if (!bodyRes.ok) {
+      return jsonResponse({ success: false, error: bodyRes.error }, bodyRes.status);
+    }
+    const body = bodyRes.data;
+
+    const rawMonth = String(body["reportMonth"] || body["report_month"] || "").trim();
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(rawMonth)) {
+      return jsonResponse(
+        {
+          success: false,
+          error: `Invalid reportMonth format '${rawMonth}'. Expected YYYY-MM.`,
+        },
+        400,
+      );
+    }
+
+    const verificationNotes = String(
+      body["verificationNotes"] || body["verification_notes"] || "",
+    ).trim();
+    const requestedAppId = body["appId"] ?? body["app_id"] ?? null;
+    const appRes = resolveFaceTubeAdmobAppId(
+      requestedAppId !== null ? String(requestedAppId) : null,
+    );
+    if (!appRes.ok) {
+      return jsonResponse({ success: false, error: appRes.error }, appRes.status);
+    }
+    const appId = appRes.appId;
+    const requestedPublisherId = String(body["publisherId"] || body["publisher_id"] || "").trim();
+
+    // Resolve active connected publisher_id from AdMob OAuth credentials
+    let credRow: any = null;
+    if (pool) {
+      try {
+        const [rows]: any = await pool.query(
+          "SELECT id, publisher_id, is_active FROM admob_oauth_credentials WHERE is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+        );
+        if (rows && rows.length > 0) credRow = rows[0];
+      } catch (dbErr: unknown) {
+        if (isMysqlConnectionUnavailableError(dbErr)) {
+          return jsonResponse({ success: false, error: "Database connection unavailable." }, 503);
+        }
+        return jsonResponse(
+          {
+            success: false,
+            error: "AdMob OAuth database table is uninitialized or inaccessible.",
+          },
+          500,
+        );
+      }
+    } else {
+      if (isProduction) {
+        return jsonResponse({ success: false, error: "Database connection unavailable." }, 503);
+      }
+      const localOauth = (store as any).admobOauth;
+      if (localOauth && localOauth.is_active) {
+        credRow = localOauth;
+      }
+    }
+
+    if (!credRow || !credRow.publisher_id) {
+      return jsonResponse(
+        { success: false, error: "Google AdMob OAuth account is not connected." },
+        409,
+      );
+    }
+
+    const activePublisherId = String(credRow.publisher_id).trim();
+    if (
+      activePublisherId === "pub-3940256099942544" ||
+      !/^pub-[a-zA-Z0-9]+$/.test(activePublisherId)
+    ) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Connected AdMob publisher ID is missing, invalid, or matched test ID.",
+        },
+        400,
+      );
+    }
+
+    if (requestedPublisherId && requestedPublisherId !== activePublisherId) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Cannot verify AdMob snapshot for a different publisher account than the active connected publisher.",
+        },
+        403,
+      );
+    }
+
+    if (pool) {
+      let conn: PoolConnection | null = null;
+      let txBegun = false;
+      const safeRollback = async () => {
+        if (!conn || !txBegun) return;
+        txBegun = false;
+        try {
+          await conn.rollback();
+        } catch {
+          // ignore
+        }
+      };
+
+      try {
+        conn = await pool.getConnection();
+        await conn.beginTransaction();
+        txBegun = true;
+
+        const [rows]: any = await conn.query(
+          "SELECT id, publisher_id, app_id, report_month, reporting_time_zone, currency_code, status FROM admob_report_snapshots WHERE publisher_id = ? AND app_id = ? AND report_month = ? LIMIT 1 FOR UPDATE",
+          [activePublisherId, appId, rawMonth],
+        );
+        const row = rows && rows.length > 0 ? rows[0] : null;
+        if (!row) {
+          const [otherRows]: any = await conn.query(
+            "SELECT id, publisher_id FROM admob_report_snapshots WHERE app_id = ? AND report_month = ? LIMIT 1",
+            [appId, rawMonth],
+          );
+          await safeRollback();
+          if (otherRows && otherRows.length > 0) {
+            return jsonResponse(
+              {
+                success: false,
+                error: `AdMob snapshot for ${rawMonth} belongs to a different publisher account and cannot be verified under the active publisher.`,
+              },
+              403,
+            );
+          }
+          return jsonResponse(
+            {
+              success: false,
+              error: `No staged AdMob report snapshot found for ${rawMonth}. Sync the report first.`,
+            },
+            404,
+          );
+        }
+        if (String(row.currency_code || "").toUpperCase() !== "INR") {
+          await safeRollback();
+          return jsonResponse(
+            { success: false, error: "Cannot verify snapshot: currency_code is not INR." },
+            422,
+          );
+        }
+
+        const period = computeAdmobMonthPeriod(rawMonth, row.reporting_time_zone ?? null, false);
+        if (!period.ok) {
+          await safeRollback();
+          return jsonResponse({ success: false, error: period.error }, period.status);
+        }
+        if (!period.isClosedMonth) {
+          await safeRollback();
+          return jsonResponse(
+            {
+              success: false,
+              error: `Reporting month '${rawMonth}' has not closed yet in ${period.reportingTimeZone}. Admin verification is only permitted after month-end close.`,
+            },
+            400,
+          );
+        }
+        if (row.status === "verified_finalized") {
+          await safeRollback();
+          return jsonResponse(
+            {
+              success: false,
+              error: `AdMob staging snapshot for ${rawMonth} is already verified_finalized.`,
+            },
+            409,
+          );
+        }
+
+        await conn.query(
+          "UPDATE admob_report_snapshots SET status = 'verified_finalized', verified_by = ?, verified_at = NOW(), verification_notes = ?, updated_at = NOW() WHERE id = ?",
+          [authUser.user_id, verificationNotes || null, row.id],
+        );
+
+        const [readRows]: any = await conn.query(
+          "SELECT id, publisher_id, app_id, report_month, period_start, period_end, reporting_time_zone, currency_code, estimated_earnings_micros, estimated_earnings, impressions, clicks, ad_requests, matched_requests, ownership_scope, status, sync_count, synced_by, synced_at, verified_by, verified_at, verification_notes, created_at, updated_at FROM admob_report_snapshots WHERE id = ? LIMIT 1",
+          [row.id],
+        );
+        const snapshot = readRows?.[0] || null;
+        await conn.commit();
+        txBegun = false;
+
+        return jsonResponse({
+          success: true,
+          message: `AdMob company staging snapshot for ${rawMonth} marked verified_finalized (no creator wallet or ledger posting performed).`,
+          snapshot,
+          walletCredited: false,
+          ledgerPosted: false,
+        });
+      } catch (dbErr: unknown) {
+        await safeRollback();
+        const status = isMysqlConnectionUnavailableError(dbErr) ? 503 : 500;
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              status === 503
+                ? "Database connection unavailable while verifying AdMob snapshot."
+                : "Database error verifying AdMob snapshot.",
+          },
+          status,
+        );
+      } finally {
+        if (conn) {
+          try {
+            conn.release();
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
+    if (isProduction) {
+      return jsonResponse({ success: false, error: "Database connection unavailable." }, 503);
+    }
+
+    const snapshots = store.admobReportSnapshots || [];
+    const idx = snapshots.findIndex(
+      (s) =>
+        s.publisher_id === activePublisherId && s.app_id === appId && s.report_month === rawMonth,
+    );
+    if (idx === -1) {
+      const otherPublisherMatch = snapshots.some(
+        (s) => s.app_id === appId && s.report_month === rawMonth,
+      );
+      if (otherPublisherMatch) {
+        return jsonResponse(
+          {
+            success: false,
+            error: `AdMob snapshot for ${rawMonth} belongs to a different publisher account and cannot be verified under the active publisher.`,
+          },
+          403,
+        );
+      }
+      return jsonResponse(
+        {
+          success: false,
+          error: `No staged AdMob report snapshot found for ${rawMonth}. Sync the report first.`,
+        },
+        404,
+      );
+    }
+    const row = snapshots[idx]!;
+    if (String(row.currency_code || "").toUpperCase() !== "INR") {
+      return jsonResponse(
+        { success: false, error: "Cannot verify snapshot: currency_code is not INR." },
+        422,
+      );
+    }
+    const period = computeAdmobMonthPeriod(rawMonth, row.reporting_time_zone ?? null, false);
+    if (!period.ok) {
+      return jsonResponse({ success: false, error: period.error }, period.status);
+    }
+    if (!period.isClosedMonth) {
+      return jsonResponse(
+        {
+          success: false,
+          error: `Reporting month '${rawMonth}' has not closed yet in ${period.reportingTimeZone}. Admin verification is only permitted after month-end close.`,
+        },
+        400,
+      );
+    }
+    if (row.status === "verified_finalized") {
+      return jsonResponse(
+        {
+          success: false,
+          error: `AdMob staging snapshot for ${rawMonth} is already verified_finalized.`,
+        },
+        409,
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    const updated = {
+      ...row,
+      status: "verified_finalized" as const,
+      verified_by: authUser.user_id,
+      verified_at: nowIso,
+      verification_notes: verificationNotes || null,
+      updated_at: nowIso,
+    };
+    snapshots[idx] = updated;
+    saveStore(store, env);
+
+    return jsonResponse({
+      success: true,
+      message: `AdMob company staging snapshot for ${rawMonth} marked verified_finalized (no creator wallet or ledger posting performed).`,
+      snapshot: updated,
+      walletCredited: false,
+      ledgerPosted: false,
     });
   }
 

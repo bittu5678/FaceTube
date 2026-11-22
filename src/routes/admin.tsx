@@ -43,6 +43,7 @@ import {
   RotateCcw,
   AlertCircle,
   Shield,
+  Smartphone,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Navbar } from "@/components/videohub/Navbar";
@@ -352,6 +353,23 @@ function AdminPage() {
   const [adCreditDesc, setAdCreditDesc] = useState<string>("");
   const [isRecordingAdSense, setIsRecordingAdSense] = useState(false);
 
+  // Company AdMob Staging Reporting State (100% Company Revenue, No Creator Wallet Credits)
+  const [admobStatus, setAdmobStatus] = useState<{
+    connected: boolean;
+    publisher_id: string | null;
+    currency_code: string | null;
+  } | null>(null);
+  const [admobStatusError, setAdmobStatusError] = useState<string | null>(null);
+  const [admobSnapshots, setAdmobSnapshots] = useState<any[]>([]);
+  const [admobSyncMonth, setAdmobSyncMonth] = useState<string>(
+    new Date().toISOString().slice(0, 7),
+  );
+  const [admobVerifyNotes, setAdmobVerifyNotes] = useState<string>("");
+  const [isLoadingAdmobReports, setIsLoadingAdmobReports] = useState(false);
+  const [isSyncingAdmobReport, setIsSyncingAdmobReport] = useState(false);
+  const [verifyingAdmobMonth, setVerifyingAdmobMonth] = useState<string | null>(null);
+  const [admobBannerError, setAdmobBannerError] = useState<string | null>(null);
+
   const loadPlatformSettings = useCallback(async () => {
     setIsLoadingSettings(true);
     try {
@@ -445,6 +463,172 @@ function AdminPage() {
       toast.error(err?.message || "Failed to record AdSense earning.");
     } finally {
       setIsRecordingAdSense(false);
+    }
+  };
+
+  const formatAdmobInrExact = (value: unknown): string => {
+    const raw = String(value ?? "0.000000").trim();
+    const match = /^(-?)(\d+)(?:\.(\d+))?$/.exec(raw);
+    if (!match) {
+      return raw || "0.000000";
+    }
+    const sign = match[1] || "";
+    const whole = BigInt(match[2] || "0").toLocaleString("en-IN");
+    const frac = (match[3] || "").padEnd(6, "0").slice(0, 6);
+    return `${sign}${whole}.${frac}`;
+  };
+
+  const getAdmobMonthCloseState = (
+    reportMonth: string,
+    reportingTimeZone?: string | null,
+  ): { isClosed: boolean; reason: string | null; isTimezoneError: boolean } => {
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(reportMonth)) {
+      return {
+        isClosed: false,
+        reason: "Invalid reporting month format.",
+        isTimezoneError: false,
+      };
+    }
+    const tz = String(reportingTimeZone ?? "").trim();
+    if (!tz) {
+      return {
+        isClosed: false,
+        reason: "Missing reporting timezone metadata; cannot verify month-end close safely.",
+        isTimezoneError: true,
+      };
+    }
+    try {
+      const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: tz,
+        year: "numeric",
+        month: "2-digit",
+      }).formatToParts(new Date());
+      const year = parts.find((p) => p.type === "year")?.value;
+      const month = parts.find((p) => p.type === "month")?.value;
+      if (!year || !month) {
+        return {
+          isClosed: false,
+          reason: `Invalid reporting timezone '${tz}'; cannot verify month-end close safely.`,
+          isTimezoneError: true,
+        };
+      }
+      if (reportMonth >= `${year}-${month}`) {
+        return {
+          isClosed: false,
+          reason: `Reporting month has not closed yet in ${tz}.`,
+          isTimezoneError: false,
+        };
+      }
+      return { isClosed: true, reason: null, isTimezoneError: false };
+    } catch {
+      return {
+        isClosed: false,
+        reason: `Invalid reporting timezone '${tz}'; cannot verify month-end close safely.`,
+        isTimezoneError: true,
+      };
+    }
+  };
+
+  const isAdmobMonthClosed = (reportMonth: string, reportingTimeZone?: string | null): boolean =>
+    getAdmobMonthCloseState(reportMonth, reportingTimeZone).isClosed;
+
+  const loadAdmobStaging = useCallback(async () => {
+    setIsLoadingAdmobReports(true);
+    setAdmobBannerError(null);
+    setAdmobStatusError(null);
+    try {
+      const [statusRes, reportsRes] = await Promise.allSettled([
+        api.admin.admob.getStatus(),
+        api.admin.admob.listReports(),
+      ]);
+      const errors: string[] = [];
+
+      if (statusRes.status === "fulfilled" && statusRes.value?.success) {
+        setAdmobStatus({
+          connected: Boolean(statusRes.value.connected),
+          publisher_id: statusRes.value.publisher_id,
+          currency_code: statusRes.value.currency_code,
+        });
+      } else {
+        const statusErr =
+          statusRes.status === "rejected"
+            ? statusRes.reason?.message || "Failed to load AdMob OAuth status."
+            : (statusRes.value as any)?.error || "Failed to load AdMob OAuth status.";
+        setAdmobStatus(null);
+        setAdmobStatusError(statusErr);
+        errors.push(statusErr);
+      }
+
+      if (reportsRes.status === "fulfilled" && reportsRes.value?.success) {
+        setAdmobSnapshots(reportsRes.value.snapshots || []);
+      } else {
+        const reportsErr =
+          reportsRes.status === "rejected"
+            ? reportsRes.reason?.message || "Failed to load AdMob staging snapshots."
+            : (reportsRes.value as any)?.error || "Failed to load AdMob staging snapshots.";
+        errors.push(reportsErr);
+      }
+
+      if (errors.length > 0) {
+        setAdmobBannerError(errors.join(" | "));
+      }
+    } catch (err: any) {
+      setAdmobBannerError(err?.message || "Failed to load AdMob staging data.");
+    } finally {
+      setIsLoadingAdmobReports(false);
+    }
+  }, []);
+
+  const handleSyncAdmobReport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(admobSyncMonth)) {
+      toast.error("Please select a valid reporting month (YYYY-MM).");
+      return;
+    }
+    setIsSyncingAdmobReport(true);
+    setAdmobBannerError(null);
+    try {
+      const res = await api.admin.admob.syncReport({ reportMonth: admobSyncMonth });
+      if (res && res.success) {
+        toast.success(res.message || "AdMob staging report synced.");
+        await loadAdmobStaging();
+      } else {
+        const msg = (res as any)?.error || "AdMob sync failed.";
+        setAdmobBannerError(msg);
+        toast.error(msg);
+      }
+    } catch (err: any) {
+      const msg = err?.message || "AdMob sync failed.";
+      setAdmobBannerError(msg);
+      toast.error(msg);
+    } finally {
+      setIsSyncingAdmobReport(false);
+    }
+  };
+
+  const handleVerifyAdmobMonth = async (reportMonth: string) => {
+    setVerifyingAdmobMonth(reportMonth);
+    setAdmobBannerError(null);
+    try {
+      const trimmedNotes = admobVerifyNotes.trim();
+      const res = await api.admin.admob.verifyReport(
+        trimmedNotes ? { reportMonth, verificationNotes: trimmedNotes } : { reportMonth },
+      );
+      if (res && res.success) {
+        toast.success(res.message || `Verified ${reportMonth} staging snapshot.`);
+        setAdmobVerifyNotes("");
+        await loadAdmobStaging();
+      } else {
+        const msg = (res as any)?.error || "Verification failed.";
+        setAdmobBannerError(msg);
+        toast.error(msg);
+      }
+    } catch (err: any) {
+      const msg = err?.message || "Verification failed.";
+      setAdmobBannerError(msg);
+      toast.error(msg);
+    } finally {
+      setVerifyingAdmobMonth(null);
     }
   };
 
@@ -850,6 +1034,7 @@ function AdminPage() {
     }
     if (isAdmin && activeTab === "settings") {
       loadPlatformSettings();
+      loadAdmobStaging();
     }
     if (isAdmin && activeTab === "subscriptions") {
       loadAdminSubscriptions();
@@ -860,6 +1045,7 @@ function AdminPage() {
     activeTab,
     loadEarningsReport,
     loadPlatformSettings,
+    loadAdmobStaging,
     loadAdminSubscriptions,
     loadAdminRefunds,
   ]);
@@ -3040,6 +3226,227 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                       </button>
                     </div>
                   </form>
+                </div>
+
+                {/* Company AdMob Reporting (Staging Only — 100% FaceTube Company Revenue) */}
+                <div className="rounded-xl border border-border bg-secondary/20 p-5 space-y-4">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-border/60 pb-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="grid h-9 w-9 place-items-center rounded-xl bg-blue-500/10 text-blue-400">
+                        <Smartphone className="h-4 w-4" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-bold text-foreground">
+                          Company AdMob Reporting (Staging Only — 100% FaceTube Revenue)
+                        </h3>
+                        <p className="text-xs text-muted-foreground">
+                          Syncs FaceTube Android app AdMob estimated earnings in INR into staging
+                          snapshots. Never credits creator wallets or settled income_ledger.
+                        </p>
+                      </div>
+                    </div>
+                    <span
+                      className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[10px] font-bold ${
+                        admobStatusError
+                          ? "bg-rose-500/15 text-rose-400 border border-rose-500/30"
+                          : admobStatus?.connected
+                            ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
+                            : "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                      }`}
+                    >
+                      {admobStatusError
+                        ? "OAuth Status Error"
+                        : admobStatus?.connected
+                          ? `OAuth Connected (${admobStatus.publisher_id})`
+                          : "OAuth Disconnected / Redirect URI Unverified"}
+                    </span>
+                  </div>
+
+                  <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3.5 text-xs text-amber-200 space-y-1">
+                    <p className="font-bold flex items-center gap-1.5 text-amber-300">
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                      <span>Staging &amp; OAuth Verification Notice</span>
+                    </p>
+                    <p className="text-[11px] text-amber-200/90 leading-relaxed">
+                      Production OAuth redirect URI remains unverified against Hostinger / Google
+                      Cloud Console. Sync strictly enforces Google&apos;s live publisher currency
+                      equals <strong>INR</strong>, filters to FaceTube&apos;s configured Android App
+                      ID, and stages values separately until month-end Admin verification.
+                    </p>
+                  </div>
+
+                  {admobBannerError && (
+                    <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3.5 py-2.5 text-xs text-rose-300">
+                      {admobBannerError}
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSyncAdmobReport} className="flex flex-wrap items-end gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-foreground mb-1">
+                        Reporting Month (YYYY-MM)
+                      </label>
+                      <input
+                        type="month"
+                        required
+                        value={admobSyncMonth}
+                        onChange={(e) => setAdmobSyncMonth(e.target.value)}
+                        className="rounded-xl border border-border bg-background px-3 py-2 text-xs font-mono text-foreground outline-none focus:border-brand"
+                      />
+                    </div>
+                    <div className="min-w-[240px] flex-1">
+                      <label className="block text-xs font-semibold text-foreground mb-1">
+                        Verification Notes (Optional, applied on Verify)
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={500}
+                        value={admobVerifyNotes}
+                        onChange={(e) => setAdmobVerifyNotes(e.target.value)}
+                        placeholder="e.g., Matches Google payment statement #..."
+                        className="w-full rounded-xl border border-border bg-background px-3 py-2 text-xs text-foreground outline-none focus:border-brand"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={isSyncingAdmobReport}
+                      className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-xs font-bold text-white shadow-lift transition hover:bg-blue-500 disabled:opacity-50"
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${isSyncingAdmobReport ? "animate-spin" : ""}`}
+                      />
+                      <span>
+                        {isSyncingAdmobReport
+                          ? "Syncing from AdMob..."
+                          : "Sync Company AdMob Report (INR)"}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={loadAdmobStaging}
+                      disabled={isLoadingAdmobReports}
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-background px-3 py-2 text-xs font-semibold text-foreground hover:bg-secondary/50 disabled:opacity-50"
+                    >
+                      <span>{isLoadingAdmobReports ? "Refreshing..." : "Refresh Snapshots"}</span>
+                    </button>
+                  </form>
+
+                  <div className="overflow-x-auto rounded-xl border border-border/60 bg-background/70">
+                    <table className="w-full text-left text-xs">
+                      <thead className="border-b border-border/60 bg-secondary/40 text-[11px] uppercase text-muted-foreground">
+                        <tr>
+                          <th className="px-3 py-2">Month</th>
+                          <th className="px-3 py-2">App ID</th>
+                          <th className="px-3 py-2">Currency</th>
+                          <th className="px-3 py-2">Est. Earnings</th>
+                          <th className="px-3 py-2">Impressions / Clicks</th>
+                          <th className="px-3 py-2">Syncs</th>
+                          <th className="px-3 py-2">Status</th>
+                          <th className="px-3 py-2 text-right">Month-End Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border/50">
+                        {admobSnapshots.length === 0 ? (
+                          <tr>
+                            <td colSpan={8} className="px-3 py-6 text-center text-muted-foreground">
+                              No company AdMob staging snapshots recorded yet.
+                            </td>
+                          </tr>
+                        ) : (
+                          admobSnapshots.map((snap: any) => {
+                            const closeState = getAdmobMonthCloseState(
+                              String(snap.report_month || ""),
+                              snap.reporting_time_zone,
+                            );
+                            const monthClosed = closeState.isClosed;
+                            return (
+                              <tr key={`${snap.publisher_id}_${snap.app_id}_${snap.report_month}`}>
+                                <td className="px-3 py-2 font-mono font-bold text-foreground">
+                                  {snap.report_month}
+                                </td>
+                                <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">
+                                  {snap.app_id}
+                                </td>
+                                <td className="px-3 py-2 font-mono font-semibold text-emerald-400">
+                                  {snap.currency_code}
+                                </td>
+                                <td
+                                  className="px-3 py-2 font-mono font-bold text-foreground"
+                                  title={`${snap.estimated_earnings_micros ?? "0"} micros (${snap.estimated_earnings ?? "0.000000"} INR)`}
+                                >
+                                  ₹{formatAdmobInrExact(snap.estimated_earnings)}
+                                </td>
+                                <td className="px-3 py-2 font-mono text-[11px] text-muted-foreground">
+                                  {Number(snap.impressions || 0).toLocaleString()} /{" "}
+                                  {Number(snap.clicks || 0).toLocaleString()}
+                                </td>
+                                <td className="px-3 py-2 font-mono text-muted-foreground">
+                                  #{snap.sync_count || 1}
+                                </td>
+                                <td className="px-3 py-2">
+                                  <span
+                                    className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                                      snap.status === "verified_finalized"
+                                        ? "bg-emerald-500/15 text-emerald-400"
+                                        : "bg-blue-500/15 text-blue-400"
+                                    }`}
+                                  >
+                                    {snap.status === "verified_finalized"
+                                      ? "Verified (Finalized — No Payout)"
+                                      : "Staged (Estimated)"}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 text-right">
+                                  {snap.status === "staged_estimated" ? (
+                                    <div className="inline-flex flex-col items-end gap-1">
+                                      <button
+                                        type="button"
+                                        disabled={
+                                          !monthClosed || verifyingAdmobMonth === snap.report_month
+                                        }
+                                        title={
+                                          monthClosed
+                                            ? "Verify closed reporting month (staging only, no wallet/ledger payout)"
+                                            : closeState.reason ||
+                                              "Verification disabled until month closes"
+                                        }
+                                        onClick={() => handleVerifyAdmobMonth(snap.report_month)}
+                                        className="rounded-lg bg-emerald-600/90 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-50"
+                                      >
+                                        {verifyingAdmobMonth === snap.report_month
+                                          ? "Verifying..."
+                                          : closeState.isTimezoneError
+                                            ? "Timezone Metadata Required"
+                                            : !monthClosed
+                                              ? "Month Open (Wait for Close)"
+                                              : "Verify Closed Month"}
+                                      </button>
+                                      {closeState.isTimezoneError && closeState.reason && (
+                                        <span className="max-w-[240px] text-right text-[10px] text-amber-400">
+                                          {closeState.reason}
+                                        </span>
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <div className="space-y-0.5">
+                                      <span className="block text-[11px] text-emerald-400 font-semibold">
+                                        Verified ({snap.verified_by || "Admin"})
+                                      </span>
+                                      {snap.verification_notes && (
+                                        <span className="block text-[10px] text-muted-foreground">
+                                          {snap.verification_notes}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </section>
             </div>

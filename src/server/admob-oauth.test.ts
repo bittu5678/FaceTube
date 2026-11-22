@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
-import { handleApiRequest } from "./api-handler.ts";
+import { handleApiRequest, resetInMemoryStore } from "./api-handler.ts";
 import { setMysqlPoolForTesting } from "./mysql.ts";
 
 async function callApi(req: Request, env?: Record<string, string | undefined>): Promise<Response> {
@@ -19,6 +19,7 @@ describe("FaceTube AdMob OAuth 2.0 Security Hardening (Phase 2.2) Test Suite", (
   const regularUserId = "FT483921";
   const testEncryptionKey = "facetube-test-admob-aes-256-gcm-master-key-2026!";
   const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+  let initialStoreSnapshot: string | null = null;
 
   const originalClientId = process.env["ADMOB_OAUTH_CLIENT_ID"];
   const originalClientSecret = process.env["ADMOB_OAUTH_CLIENT_SECRET"];
@@ -28,6 +29,8 @@ describe("FaceTube AdMob OAuth 2.0 Security Hardening (Phase 2.2) Test Suite", (
   const originalNodeEnv = process.env["NODE_ENV"];
 
   before(async () => {
+    initialStoreSnapshot = fs.existsSync(storePath) ? fs.readFileSync(storePath, "utf-8") : null;
+    resetInMemoryStore();
     // Run suite in explicit test mode so fail-closed production checks behave accurately
     if (!process.env["NODE_ENV"] && !process.env["APP_ENV"]) {
       process.env["NODE_ENV"] = "test";
@@ -93,6 +96,12 @@ describe("FaceTube AdMob OAuth 2.0 Security Hardening (Phase 2.2) Test Suite", (
 
     if (originalNodeEnv !== undefined) process.env["NODE_ENV"] = originalNodeEnv;
     else delete process.env["NODE_ENV"];
+
+    setMysqlPoolForTesting(null);
+    if (initialStoreSnapshot !== null) {
+      fs.writeFileSync(storePath, initialStoreSnapshot, "utf-8");
+    }
+    resetInMemoryStore();
   });
 
   // --------------------------------------------------------------------------

@@ -1269,6 +1269,82 @@ export const api = {
       }>("/admin/record-admob-earning.php");
     },
 
+    admob: {
+      getStatus: async () => {
+        return apiFetch<{
+          success: boolean;
+          connected: boolean;
+          publisher_id: string | null;
+          account_name: string | null;
+          currency_code: string | null;
+          connected_by?: string | null;
+          connected_at?: string | null;
+          updated_at?: string | null;
+          has_refresh_token: boolean;
+        }>("/admin/admob/status.php");
+      },
+
+      listReports: async (reportMonth?: string) => {
+        const qs = reportMonth ? `?reportMonth=${encodeURIComponent(reportMonth)}` : "";
+        return apiFetch<{
+          success: boolean;
+          count: number;
+          snapshots: Array<{
+            id: number;
+            publisher_id: string;
+            app_id: string;
+            report_month: string;
+            period_start: string;
+            period_end: string;
+            reporting_time_zone: string | null;
+            currency_code: string;
+            estimated_earnings_micros: string | number;
+            estimated_earnings: string | number;
+            impressions: number;
+            clicks: number;
+            ad_requests: number;
+            matched_requests: number;
+            ownership_scope: string;
+            status: "staged_estimated" | "verified_finalized";
+            sync_count: number;
+            synced_by: string;
+            synced_at: string;
+            verified_by: string | null;
+            verified_at: string | null;
+            verification_notes: string | null;
+          }>;
+          accountingNotice?: string;
+        }>(`/admin/admob/reports.php${qs}`);
+      },
+
+      syncReport: async (params: { reportMonth: string }) => {
+        return apiFetch<{
+          success: boolean;
+          message: string;
+          snapshot: any;
+          companyOwnership: string;
+          walletCredited: boolean;
+          ledgerPosted: boolean;
+        }>("/admin/admob/sync-report.php", {
+          method: "POST",
+          body: JSON.stringify(params),
+        });
+      },
+
+      verifyReport: async (params: { reportMonth: string; verificationNotes?: string }) => {
+        return apiFetch<{
+          success: boolean;
+          message: string;
+          snapshot: any;
+          walletCredited: boolean;
+          ledgerPosted: boolean;
+        }>("/admin/admob/verify-report.php", {
+          method: "POST",
+          body: JSON.stringify(params),
+        });
+      },
+    },
+
     // Affiliate Marketing Administration
     affiliate: {
       getSettings: async () => {
