@@ -357,12 +357,34 @@ try {
             'Coding' => 'https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800&auto=format&fit=crop&q=80',
             'Motivational' => 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?w=800&auto=format&fit=crop&q=80',
             'Comedy' => 'https://images.unsplash.com/photo-1514306191717-452ec28c7814?w=800&auto=format&fit=crop&q=80',
+            'Blog' => 'https://images.unsplash.com/photo-1499750310107-5fef28a66643?w=800&auto=format&fit=crop&q=80',
+            'Movie' => 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800&auto=format&fit=crop&q=80',
             'Entertainment' => 'https://images.unsplash.com/photo-1598488035139-bdbb2231ce04?w=800&auto=format&fit=crop&q=80',
+            'Cooking' => 'https://images.unsplash.com/photo-1556910103-1c02745aae4d?w=800&auto=format&fit=crop&q=80',
             'Finance' => 'https://images.unsplash.com/photo-1579621970563-ebec7560ff3e?w=800&auto=format&fit=crop&q=80',
             'Share Market' => 'https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?w=800&auto=format&fit=crop&q=80',
+            'Business' => 'https://images.unsplash.com/photo-1486406146926-c627a92ad1ab?w=800&auto=format&fit=crop&q=80',
+            'Crypto' => 'https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?w=800&auto=format&fit=crop&q=80',
+            'Music' => 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=800&auto=format&fit=crop&q=80',
+            'Gaming' => 'https://images.unsplash.com/photo-1538481199705-c710c4e965fc?w=800&auto=format&fit=crop&q=80',
+            'Travel' => 'https://images.unsplash.com/photo-1488646953014-85cb44e25828?w=800&auto=format&fit=crop&q=80',
+            'AI' => 'https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80',
+            'Education' => 'https://images.unsplash.com/photo-1503676260728-1c00da094a0b?w=800&auto=format&fit=crop&q=80',
+            'Health' => 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iMzYwIiB2aWV3Qm94PSIwIDAgNjQwIDM2MCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJnaCIgeDE9IjAlIiB5MT0iMCUiIHgyPSIxMDAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzBmMTcyYSIvPjxzdG9wIG9mZnNldD0iNTUlIiBzdG9wLWNvbG9yPSIjMTM0ZTRhIi8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjYmUxMjNjIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0idXJsKCNnaCkiLz48Y2lyY2xlIGN4PSIzMjAiIGN5PSIxODAiIHI9IjY0IiBmaWxsPSIjZjQzZjVlIiBmaWxsLW9wYWNpdHk9IjAuMjIiLz48cGF0aCBkPSJNMjY2IDE4MGgyNmwxNC0yOCAyNCA1NiAxNi0zNiAxMiA4aDE2IiBmaWxsPSJub25lIiBzdHJva2U9IiNmZGE0YWYiIHN0cm9rZS13aWR0aD0iNiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+PC9zdmc+',
+            'Sports' => 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iMzYwIiB2aWV3Qm94PSIwIDAgNjQwIDM2MCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJncyIgeDE9IjAlIiB5MT0iMCUiIHgyPSIxMDAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzBmMTcyYSIvPjxzdG9wIG9mZnNldD0iNTUlIiBzdG9wLWNvbG9yPSIjMWUzYThhIi8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjZDk3NzA2Ii8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0idXJsKCNncykiLz48Y2lyY2xlIGN4PSIzMjAiIGN5PSIxODAiIHI9IjY0IiBmaWxsPSIjZjU5ZTBiIiBmaWxsLW9wYWNpdHk9IjAuMiIvPjxwYXRoIGQ9Ik0yOTIgMTQ2aDU2djI0YzAgMTgtMTIgMzItMjggMzYtMTYtNC0yOC0xOC0yOC0zNnYtMjR6bTAgOGgtMTZjMCAxOCA4IDI4IDE2IDMwbTU2LTMwaDE2YzAgMTgtOCAyOC0xNiAzMG0tMjggMjJ2MjJtLTE4IDBoMzYiIGZpbGw9Im5vbmUiIHN0cm9rZT0iI2ZjZDM0ZCIgc3Ryb2tlLXdpZHRoPSI1IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48L3N2Zz4=',
+            'Drama' => 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iMzYwIiB2aWV3Qm94PSIwIDAgNjQwIDM2MCI+PGRlZnM+PGxpbmVhckdyYWRpZW50IGlkPSJnZCIgeDE9IjAlIiB5MT0iMCUiIHgyPSIxMDAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzBmMTcyYSIvPjxzdG9wIG9mZnNldD0iNTUlIiBzdG9wLWNvbG9yPSIjNGMxZDk1Ii8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjYmUxODVkIi8+PC9saW5lYXJHcmFkaWVudD48L2RlZnM+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0idXJsKCNnZCkiLz48Y2lyY2xlIGN4PSIzMjAiIGN5PSIxODAiIHI9IjY0IiBmaWxsPSIjYTg1NWY3IiBmaWxsLW9wYWNpdHk9IjAuMjIiLz48cGF0aCBkPSJNMjc2IDE1MGg0MHYyOGMwIDE0LTkgMjQtMjAgMjgtMTEtNC0yMC0xNC0yMC0yOHYtMjh6bTQ4IDhoNDB2MjhjMCAxNC05IDI0LTIwIDI4LTExLTQtMjAtMTQtMjAtMjh2LTI4eiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZTlkNWZmIiBzdHJva2Utd2lkdGg9IjUiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48Y2lyY2xlIGN4PSIyOTAiIGN5PSIxNjYiIHI9IjMiIGZpbGw9IiNlOWQ1ZmYiLz48Y2lyY2xlIGN4PSIzMDIiIGN5PSIxNjYiIHI9IjMiIGZpbGw9IiNlOWQ1ZmYiLz48Y2lyY2xlIGN4PSIzMzgiIGN5PSIxNzQiIHI9IjMiIGZpbGw9IiNlOWQ1ZmYiLz48Y2lyY2xlIGN4PSIzNTAiIGN5PSIxNzQiIHI9IjMiIGZpbGw9IiNlOWQ1ZmYiLz48L3N2Zz4=',
             'General' => 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=60',
         ];
-        $thumbnailUrl = $categoryThumbnails[$category] ?? $categoryThumbnails['General'];
+        $thumbnailUrl = $categoryThumbnails['General'];
+        $trimmedCategory = trim($category);
+        if ($trimmedCategory !== '') {
+            foreach ($categoryThumbnails as $catKey => $catThumb) {
+                if (strcasecmp($catKey, $trimmedCategory) === 0) {
+                    $thumbnailUrl = $catThumb;
+                    break;
+                }
+            }
+        }
     } else {
         $thumbnailUrl = toAbsoluteMediaUrl($thumbnailUrl, 'images');
     }

@@ -20,7 +20,12 @@ import {
 import { verifyPassword } from "./password";
 import { api, setStoredAuthToken, getStoredAuthToken } from "./api";
 import { resolveMediaUrl } from "./media-url";
-import { computeUpdatedChannelSession, LOCAL_STORAGE_SESSION_KEY } from "./channel-branding";
+import {
+  CHANNEL_BRANDING_UPDATED_EVENT,
+  computeUpdatedChannelSession,
+  LOCAL_STORAGE_SESSION_KEY,
+  syncCachedVideosChannelBranding,
+} from "./channel-branding";
 import { clearProtectedVideoCaches } from "./video-service";
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -644,6 +649,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             return u;
           }),
         );
+
+        syncCachedVideosChannelBranding({
+          userId: activeUserId,
+          ...(hasName ? { channelName: updates.channel_name ?? null } : {}),
+          ...(hasLogo ? { channelLogoUrl: nextLogo ?? null } : {}),
+        });
+
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent(CHANNEL_BRANDING_UPDATED_EVENT, {
+              detail: {
+                userId: activeUserId,
+                ...(hasName ? { channelName: updates.channel_name ?? null } : {}),
+                ...(hasLogo ? { channelLogoUrl: nextLogo ?? null } : {}),
+              },
+            }),
+          );
+        }
       }
     },
     [user, profile, dbUser, role],

@@ -5,6 +5,7 @@ import {
   captureAndUploadThumbnail,
 } from "./thumbnail-service";
 import { resolveMediaUrl } from "./media-url";
+import { computeChannelInitials } from "./channel-branding";
 import type { Video } from "@/data/videos";
 import type { ShortItem } from "@/data/shorts";
 
@@ -33,6 +34,9 @@ export const VIDEO_CATEGORIES = [
   "Travel",
   "AI",
   "Education",
+  "Health",
+  "Sports",
+  "Drama",
 ] as const;
 
 export type VideoCategory = (typeof VIDEO_CATEGORIES)[number];
@@ -47,12 +51,26 @@ export interface CategoryRecord {
 
 /**
  * Loads managed categories from the API with graceful fallback to static VIDEO_CATEGORIES.
+ * Preserves API/admin-created categories while guaranteeing all baseline categories are present without duplicates.
  */
 export async function getAvailableCategories(): Promise<string[]> {
   try {
     const res = await api.categories.list();
     if (res?.categories && res.categories.length > 0) {
-      return res.categories.map((c) => c.name);
+      const seen = new Set<string>();
+      const merged: string[] = [];
+      for (const name of [...res.categories.map((c) => c.name), ...VIDEO_CATEGORIES]) {
+        const trimmed = String(name || "").trim();
+        if (!trimmed) continue;
+        const norm = trimmed.toLowerCase();
+        if (!seen.has(norm)) {
+          seen.add(norm);
+          merged.push(trimmed);
+        }
+      }
+      if (merged.length > 0) {
+        return merged;
+      }
     }
   } catch (_err) {
     // Fallback to static baseline while migration is pending
@@ -1384,7 +1402,7 @@ export function convertUploadedToCatalogVideo(v: UploadedVideo): Video {
     channelName,
     channelLogoUrl,
     channel_logo_url: channelLogoUrl,
-    initials: channelName.slice(0, 2).toUpperCase(),
+    initials: computeChannelInitials(channelName, "FT"),
     views: `${(Number(v.views) || 0).toLocaleString()} views`,
     age: v.createdAt ? new Date(v.createdAt).toLocaleDateString() : "Recently uploaded",
     duration: v.duration || "0:00",
@@ -1656,7 +1674,7 @@ export function convertVideoToShortItem(v: Video | UploadedVideo): ShortItem {
     title: v.title || "FaceTube Short",
     creator: channel,
     creatorHandle: `@${channel.toLowerCase().replace(/[^a-z0-9]/g, "") || "creator"}`,
-    initials: (channel.slice(0, 2) || "FT").toUpperCase(),
+    initials: computeChannelInitials(channel, "FT"),
     views: views,
     likes: (v as any).likes ? `${(v as any).likes.toLocaleString?.() || (v as any).likes}` : "1.2K",
     comments: "48",

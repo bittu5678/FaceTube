@@ -37,6 +37,7 @@ import { ThemeToggle } from "@/components/videohub/ThemeToggle";
 import { BottomNav } from "@/components/videohub/BottomNav";
 import { Footer } from "@/components/videohub/Footer";
 import { useAuth } from "@/lib/auth-context";
+import { resolveChannelDisplayName } from "@/lib/channel-branding";
 import { api } from "@/lib/api";
 import {
   recordNewVideoUpload,
@@ -651,6 +652,32 @@ export interface BulkVideoItem {
   publishedVideo?: UploadedVideo | undefined;
 }
 
+function useUploadCategories(): string[] {
+  const [categories, setCategories] = useState<string[]>([...VIDEO_CATEGORIES]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadCategories = () => {
+      getAvailableCategories()
+        .then((cats) => {
+          if (isMounted && cats && cats.length > 0) {
+            setCategories(cats);
+          }
+        })
+        .catch(() => {});
+    };
+
+    loadCategories();
+    window.addEventListener("facetube:categories-updated", loadCategories);
+    return () => {
+      isMounted = false;
+      window.removeEventListener("facetube:categories-updated", loadCategories);
+    };
+  }, []);
+
+  return categories;
+}
+
 export function BulkVideoUploadView({
   onBack,
   onUploaded,
@@ -662,13 +689,12 @@ export function BulkVideoUploadView({
 }) {
   const { user, profile, dbUser } = useAuth();
   const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
-  const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
+  const creatorName = resolveChannelDisplayName({ user, profile, dbUser }, "FaceTube Creator");
 
   const [queue, setQueue] = useState<BulkVideoItem[]>([]);
   const queueRef = useRef<BulkVideoItem[]>(queue);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [categories, setCategories] = useState<string[]>([...VIDEO_CATEGORIES]);
+  const categories = useUploadCategories();
   const [batchCategory, setBatchCategory] = useState<string>("Entertainment");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isProcessingRef = useRef(false);
@@ -677,17 +703,6 @@ export function BulkVideoUploadView({
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
-
-  // Load available categories asynchronously
-  useEffect(() => {
-    getAvailableCategories()
-      .then((cats) => {
-        if (cats && cats.length > 0) {
-          setCategories(cats);
-        }
-      })
-      .catch(() => {});
-  }, []);
 
   const addFilesToQueue = useCallback((fileList: FileList | File[]) => {
     const files = Array.from(fileList);
@@ -1653,8 +1668,7 @@ function FreeVideoUploadView({
 }) {
   const { user, profile, dbUser } = useAuth();
   const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
-  const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
+  const creatorName = resolveChannelDisplayName({ user, profile, dbUser }, "FaceTube Creator");
 
   const [uploadTab, setUploadTab] = useState<"single" | "bulk">("single");
   const [queuedFilesForBulk, setQueuedFilesForBulk] = useState<File[]>([]);
@@ -1663,6 +1677,7 @@ function FreeVideoUploadView({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<string>("Coding");
+  const categories = useUploadCategories();
   const [visibility, setVisibility] = useState<VideoVisibility>("public");
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
@@ -2119,7 +2134,7 @@ function FreeVideoUploadView({
             />
           </div>
 
-          {/* EXACT 11 CATEGORIES SELECTOR */}
+          {/* Video Category Selector */}
           <div>
             <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
               Video Category <span className="text-brand">*</span>
@@ -2129,7 +2144,7 @@ function FreeVideoUploadView({
               onChange={(e) => setCategory(e.target.value)}
               className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-sky-500 focus:outline-none"
             >
-              {VIDEO_CATEGORIES.map((cat) => (
+              {categories.map((cat) => (
                 <option key={cat} value={cat}>
                   {cat}
                 </option>
@@ -2262,14 +2277,14 @@ function PremiumVideoUploadView({
 }) {
   const { user, profile, dbUser } = useAuth();
   const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
-  const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
+  const creatorName = resolveChannelDisplayName({ user, profile, dbUser }, "FaceTube Creator");
   const referrerId = profile?.referral_code || dbUser?.referral_code || undefined;
 
   const [format, setFormat] = useState<VideoFormatChoice>(initialFormat);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<string>("Coding");
+  const categories = useUploadCategories();
   const [visibility, setVisibility] = useState<VideoVisibility>("public");
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
@@ -2462,10 +2477,11 @@ function PremiumVideoUploadView({
       const vidId = `vid-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 
       // 2. Initiate Razorpay ₹6 payment flow with server verification
+      const resolvedUserEmail = user?.email || profile?.email || dbUser?.email || "";
       await initiatePremiumVideoPayment({
         uploaderUserId: userId,
         uploaderName: creatorName,
-        userEmail: user?.email || "creator@facetube.app",
+        ...(resolvedUserEmail ? { userEmail: resolvedUserEmail } : {}),
         videoId: vidId,
         videoTitle: title.trim(),
         description: description.trim(),
@@ -2705,7 +2721,7 @@ function PremiumVideoUploadView({
             />
           </div>
 
-          {/* EXACT 11 CATEGORIES SELECTOR */}
+          {/* Video Category Selector */}
           <div>
             <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
               Video Category <span className="text-brand">*</span>
@@ -2715,7 +2731,7 @@ function PremiumVideoUploadView({
               onChange={(e) => setCategory(e.target.value)}
               className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-pink-500 focus:outline-none"
             >
-              {VIDEO_CATEGORIES.map((cat) => (
+              {categories.map((cat) => (
                 <option key={cat} value={cat}>
                   {cat}
                 </option>
@@ -2905,8 +2921,7 @@ function AdPromotionUploadView({
 }) {
   const { user, profile, dbUser } = useAuth();
   const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
-  const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
+  const creatorName = resolveChannelDisplayName({ user, profile, dbUser }, "FaceTube Creator");
   const referrerId = profile?.referral_code || dbUser?.referral_code || undefined;
 
   type AdsPlanKey = "plan-7-days" | "plan-15-days" | "plan-monthly" | "plan-yearly";
@@ -3021,10 +3036,11 @@ function AdPromotionUploadView({
     preloadRazorpayScript();
 
     try {
+      const resolvedUserEmail = user?.email || profile?.email || dbUser?.email || "";
       await initiateAdsPromotionPayment({
         userId,
         userName: creatorName,
-        userEmail: user?.email || "creator@facetube.app",
+        ...(resolvedUserEmail ? { userEmail: resolvedUserEmail } : {}),
         videoId: selectedVideoId || "vid-custom",
         planId: currentPlan.id,
         planName: currentPlan.label,
@@ -3311,12 +3327,12 @@ function AdPromotionUploadView({
 function ImageUploadView({ onBack }: { onBack: () => void }) {
   const { user, profile, dbUser } = useAuth();
   const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
-  const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
+  const creatorName = resolveChannelDisplayName({ user, profile, dbUser }, "FaceTube Creator");
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<string>("Coding");
+  const categories = useUploadCategories();
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [selectedFilter, setSelectedFilter] = useState<ImageFilterId>("original");
@@ -3883,7 +3899,7 @@ function ImageUploadView({ onBack }: { onBack: () => void }) {
             />
           </div>
 
-          {/* EXACT 11 CATEGORIES SELECTOR */}
+          {/* Category Selector */}
           <div>
             <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
               Category <span className="text-brand">*</span>
@@ -3893,7 +3909,7 @@ function ImageUploadView({ onBack }: { onBack: () => void }) {
               onChange={(e) => setCategory(e.target.value)}
               className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-teal-500 focus:outline-none"
             >
-              {VIDEO_CATEGORIES.map((cat) => (
+              {categories.map((cat) => (
                 <option key={cat} value={cat}>
                   {cat}
                 </option>

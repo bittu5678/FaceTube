@@ -32,6 +32,9 @@ $baselineCategories = [
     'Travel',
     'AI',
     'Education',
+    'Health',
+    'Sports',
+    'Drama',
 ];
 
 // Format baseline categories

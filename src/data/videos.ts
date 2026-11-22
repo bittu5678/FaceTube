@@ -57,6 +57,9 @@ export const VIDEO_CATEGORIES = [
   "Travel",
   "AI",
   "Education",
+  "Health",
+  "Sports",
+  "Drama",
 ] as const;
 
 export type VideoCategory = (typeof VIDEO_CATEGORIES)[number];

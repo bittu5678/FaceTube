@@ -19,6 +19,9 @@ import {
 import { toast } from "sonner";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { useAuth } from "@/lib/auth-context";
+import { resolveChannelDisplayName } from "@/lib/channel-branding";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
+import { api } from "@/lib/api";
 import { DigitalCertificateCard } from "@/components/certificate/DigitalCertificateCard";
 import {
   CREATOR_RANKS,
@@ -51,35 +54,68 @@ function MyCertificatePage() {
   const { user, profile, dbUser } = useAuth();
 
   // Resolved User Details
-  const userName =
-    profile?.full_name ||
-    profile?.name ||
-    dbUser?.name ||
-    user?.user_metadata?.name ||
-    user?.user_metadata?.full_name ||
-    "Alex Rivera";
+  const userName = resolveChannelDisplayName({ user, profile, dbUser }, "Creator");
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
+  const userEmail = user?.email || profile?.email || dbUser?.email || "";
 
-  const userId = profile?.user_id || dbUser?.user_id || user?.user_metadata?.user_id || "FT483921";
+  // Real subscriber count loaded from backend channel subscription API
+  const [actualSubscribers, setActualSubscribers] = useState<number>(0);
+  const [subscribersLoaded, setSubscribersLoaded] = useState<boolean>(false);
 
-  const userEmail = user?.email || profile?.email || dbUser?.email || "alex.rivera@facetube.app";
+  useEffect(() => {
+    let mounted = true;
+    if (!userId) {
+      setActualSubscribers(0);
+      setSubscribersLoaded(true);
+      return;
+    }
 
-  // Real subscriber count for User (e.g. 128,400 for Alex Rivera FT483921)
-  const actualSubscribers = 128400;
+    setSubscribersLoaded(false);
+    api.channel
+      .getSubscriberCount(userId)
+      .then((res) => {
+        if (!mounted) return;
+        const count = res && res.success ? Number(res.subscriber_count) || 0 : 0;
+        setActualSubscribers(count);
+        setSubscribersLoaded(true);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setActualSubscribers(0);
+        setSubscribersLoaded(true);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [userId]);
 
   // Actual earned rank based on real subscriber count
   const earnedRank = calculateRankFromSubscribers(actualSubscribers);
 
+  const [hasManualRankSelection, setHasManualRankSelection] = useState(false);
+
   // Active viewed/selected rank (defaults to earned rank)
   const [selectedRank, setSelectedRank] = useState<CreatorRankInfo>(() => {
-    const saved = localStorage.getItem(`facetube_current_rank_${userId}`);
-    return saved ? getRankDetails(saved) : earnedRank;
+    if (typeof window !== "undefined" && userId) {
+      const saved = localStorage.getItem(`facetube_current_rank_${userId}`);
+      if (saved) return getRankDetails(saved);
+    }
+    return earnedRank;
   });
 
-  const [subscriberDisplay, setSubscriberDisplay] = useState<string>("128,400");
+  const [subscriberDisplay, setSubscriberDisplay] = useState<string>("0");
+
+  useEffect(() => {
+    if (!hasManualRankSelection) {
+      setSelectedRank(earnedRank);
+      setSubscriberDisplay(actualSubscribers.toLocaleString());
+    }
+  }, [actualSubscribers, earnedRank, hasManualRankSelection]);
 
   // Auto-generated Certificate ID
   const certificateId = React.useMemo(() => {
-    return generateAutoCertificateId(userId, selectedRank.name);
+    return generateAutoCertificateId(userId || "GUEST", selectedRank.name);
   }, [userId, selectedRank.name]);
 
   // Issue date
@@ -101,8 +137,11 @@ function MyCertificatePage() {
   // AUTOMATIC EMAIL ON NEW CREATOR RANK ACHIEVEMENT
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    if (!userId || !userEmail || !subscribersLoaded || typeof window === "undefined") {
+      return;
+    }
     const lastAwardedRank = localStorage.getItem(`facetube_last_cert_rank_${userId}`);
-    if (lastAwardedRank !== selectedRank.name && userEmail) {
+    if (lastAwardedRank !== selectedRank.name) {
       timer = setTimeout(async () => {
         try {
           let base64Pdf: string | undefined;
@@ -161,7 +200,11 @@ function MyCertificatePage() {
     try {
       setDownloadingPdf(true);
       toast.info("Generating high-resolution Certificate PDF (Single A4)...", { duration: 2500 });
-      const formattedUserId = userId.startsWith("FT") ? userId : `FT${userId}`;
+      const formattedUserId = userId
+        ? userId.startsWith("FT")
+          ? userId
+          : `FT${userId}`
+        : "Creator";
       const filename = `Facetube_Certificate_${formattedUserId}.pdf`;
       const result = await captureCertificatePdf(certificateRef.current, {
         filename,
@@ -186,6 +229,10 @@ function MyCertificatePage() {
 
   // 3. Email Certificate
   const handleEmailCertificate = async () => {
+    if (!userEmail) {
+      toast.error("Please sign in with a valid email address to email your certificate.");
+      return;
+    }
     try {
       setSendingEmail(true);
       toast.info(`Preparing Certificate for ${userEmail}...`, { duration: 2000 });
@@ -193,7 +240,11 @@ function MyCertificatePage() {
       let base64Pdf: string | undefined;
       if (certificateRef.current) {
         try {
-          const formattedUserId = userId.startsWith("FT") ? userId : `FT${userId}`;
+          const formattedUserId = userId
+            ? userId.startsWith("FT")
+              ? userId
+              : `FT${userId}`
+            : "Creator";
           const res = await captureCertificatePdf(certificateRef.current, {
             filename: `Facetube_Certificate_${formattedUserId}.pdf`,
             userId: formattedUserId,
@@ -206,7 +257,7 @@ function MyCertificatePage() {
 
       const result = await sendCertificateEmailApi({
         userName,
-        userId,
+        userId: userId || "GUEST",
         email: userEmail,
         rank: selectedRank.name,
         subscribers: `${subscriberDisplay}+`,
@@ -237,6 +288,7 @@ function MyCertificatePage() {
 
   // Switch rank
   const handleSelectRank = (rankInfo: CreatorRankInfo) => {
+    setHasManualRankSelection(true);
     setSelectedRank(rankInfo);
     setSubscriberDisplay(rankInfo.formattedSubscribers);
     toast.info(`Certificate updated for ${rankInfo.levelLabel}: ${rankInfo.awardName}`, {
@@ -453,7 +505,14 @@ function MyCertificatePage() {
               <ShieldCheck className="h-5 w-5 text-emerald-400 shrink-0" />
               <div>
                 <span className="font-bold text-foreground">Registered Creator: </span>
-                {userName} ({userId}) · <span className="font-semibold">{userEmail}</span>
+                {userName}
+                {userId ? ` (${userId})` : ""}
+                {userEmail ? (
+                  <>
+                    {" "}
+                    · <span className="font-semibold">{userEmail}</span>
+                  </>
+                ) : null}
               </div>
             </div>
             <div className="flex items-center gap-2">

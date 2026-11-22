@@ -26,6 +26,7 @@ import { Logo } from "./Logo";
 import { ThemeToggle } from "./ThemeToggle";
 import { ChannelAvatar } from "./ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
+import { resolveChannelAvatarUrl, resolveChannelDisplayName } from "@/lib/channel-branding";
 import { allVideos } from "@/data/videos";
 
 interface SpeechRecognitionResultItem {
@@ -131,7 +132,7 @@ export function Navbar({
   query?: string;
   onQueryChange?: (value: string) => void;
 }) {
-  const { user, profile, role, isAdmin, signOut } = useAuth();
+  const { user, profile, dbUser, role, isAdmin, signOut } = useAuth();
   const [profileOpen, setProfileOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
@@ -373,11 +374,11 @@ export function Navbar({
     }
   };
 
-  const initials = profile?.username
-    ? profile.username.substring(0, 2).toUpperCase()
-    : user?.email
-      ? user.email.substring(0, 2).toUpperCase()
-      : "AK";
+  const navDisplayName = resolveChannelDisplayName({ user, profile, dbUser }, "FaceTube User");
+  const navAvatarSrc = resolveChannelAvatarUrl(
+    { user, profile, dbUser },
+    { includeAvatarFallback: true },
+  );
 
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background/85 backdrop-blur-md pt-[env(safe-area-inset-top,0px)]">
@@ -755,19 +756,8 @@ export function Navbar({
                   className="grid h-9 w-9 shrink-0 place-items-center overflow-hidden rounded-full ring-2 ring-transparent transition hover:ring-brand/30"
                 >
                   <ChannelAvatar
-                    src={
-                      profile?.channel_logo_url ||
-                      profile?.avatar_url ||
-                      (user.user_metadata?.["channel_logo_url"] as string | undefined)
-                    }
-                    name={
-                      profile?.channel_name ||
-                      profile?.full_name ||
-                      profile?.username ||
-                      user.email ||
-                      "FaceTube User"
-                    }
-                    initials={initials}
+                    src={navAvatarSrc}
+                    name={navDisplayName}
                     sizeClassName="h-9 w-9"
                     imageRingClassName=""
                     fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-brand-foreground"
@@ -778,11 +768,7 @@ export function Navbar({
                   <div className="absolute right-0 top-12 z-50 w-60 rounded-2xl border border-border bg-card p-2 shadow-2xl animate-in fade-in zoom-in-95">
                     {/* Header */}
                     <div className="border-b border-border/70 px-3 py-2.5">
-                      <p className="truncate text-xs font-bold text-foreground">
-                        {profile?.channel_name ||
-                          profile?.full_name ||
-                          `@${profile?.username || user.email?.split("@")[0]}`}
-                      </p>
+                      <p className="truncate text-xs font-bold text-foreground">{navDisplayName}</p>
                       <p className="truncate text-[11px] text-muted-foreground">{user.email}</p>
                       <div className="mt-1.5 flex items-center gap-1.5">
                         <span

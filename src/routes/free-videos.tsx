@@ -17,6 +17,7 @@ import type { Video as CatalogVideo } from "@/data/videos";
 import {
   buildPublicFeedVideos,
   fetchPublicVideosFeed,
+  getAvailableCategories,
   type UploadedVideo,
   VIDEO_CATEGORIES,
 } from "@/lib/video-service";
@@ -51,6 +52,7 @@ export function FreeVideosPage() {
   const [loading, setLoading] = useState(true);
   const [formatFilter, setFormatFilter] = useState<"all" | "short" | "long">("all");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
+  const [availableCategories, setAvailableCategories] = useState<string[]>([...VIDEO_CATEGORIES]);
 
   const loadData = async () => {
     setLoading(true);
@@ -68,6 +70,25 @@ export function FreeVideosPage() {
   useEffect(() => {
     loadData();
   }, [searchParams.refresh]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadCategories = () => {
+      getAvailableCategories()
+        .then((cats) => {
+          if (isMounted && cats && cats.length > 0) {
+            setAvailableCategories(cats);
+          }
+        })
+        .catch(() => {});
+    };
+    loadCategories();
+    window.addEventListener("facetube:categories-updated", loadCategories);
+    return () => {
+      isMounted = false;
+      window.removeEventListener("facetube:categories-updated", loadCategories);
+    };
+  }, []);
 
   // Public Free feed from live/sanitized public records only (never merged with static catalog)
   const mergedFreeVideos: CatalogVideo[] = useMemo(() => {
@@ -220,7 +241,7 @@ export function FreeVideosPage() {
               className="rounded-xl border border-border bg-secondary/60 px-3 py-1 text-xs font-semibold text-foreground focus:outline-none focus:border-sky-500"
             >
               <option value="All">All Categories</option>
-              {VIDEO_CATEGORIES.map((cat) => (
+              {availableCategories.map((cat) => (
                 <option key={cat} value={cat}>
                   {cat}
                 </option>

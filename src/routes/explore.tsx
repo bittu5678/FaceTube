@@ -10,6 +10,9 @@ import {
   Sparkles,
   Podcast,
   GraduationCap,
+  HeartPulse,
+  Trophy,
+  Theater,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
@@ -64,6 +67,21 @@ const exploreCategories = [
     label: "Learning",
     icon: GraduationCap,
     color: "text-cyan-500 bg-cyan-500/10 border-cyan-500/20",
+  },
+  {
+    label: "Health",
+    icon: HeartPulse,
+    color: "text-rose-500 bg-rose-500/10 border-rose-500/20",
+  },
+  {
+    label: "Sports",
+    icon: Trophy,
+    color: "text-orange-500 bg-orange-500/10 border-orange-500/20",
+  },
+  {
+    label: "Drama",
+    icon: Theater,
+    color: "text-violet-500 bg-violet-500/10 border-violet-500/20",
   },
 ];
 
@@ -141,6 +159,12 @@ function ExplorePage() {
         );
       }
       if (selectedTag === "Podcasts") return v.category === "Podcasts";
+      if (selectedTag === "Health") return (v.category || "").trim().toLowerCase() === "health";
+      if (selectedTag === "Sports") {
+        const norm = (v.category || "").trim().toLowerCase();
+        return norm === "sports" || norm === "sport";
+      }
+      if (selectedTag === "Drama") return (v.category || "").trim().toLowerCase() === "drama";
       return true;
     });
   }, [eligibleVideos, searchQuery, selectedTag]);
@@ -164,7 +188,7 @@ function ExplorePage() {
         </div>
 
         {/* Explore Hub Category Pills */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
           {exploreCategories.map((cat) => {
             const Icon = cat.icon;
             const isSelected = selectedTag === cat.label;

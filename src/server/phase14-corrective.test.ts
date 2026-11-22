@@ -366,6 +366,54 @@ describe("Phase 1.4 Corrective Fixes — Payment Security, Atomic Integrity & Mi
         "Locked paid-order branch must never blindly return verified:true from order status alone",
       );
     });
+
+    it("rejects Node MySQL locked status===paid without payment_transactions row (409 + rollback, zero wallet credits)", async () => {
+      enableMockMysqlEnv();
+      const orderId = "order_p14_node_orphan_paid";
+      const paymentId = "pay_p14_node_orphan_paid";
+      const harness = createPhase14MysqlHarness({
+        existingOrder: {
+          order_id: orderId,
+          user_id: "FT483921",
+          video_id: "vid_p14_1",
+          purpose: "premium_video_upload",
+          amount: 6.0,
+          currency: "INR",
+          status: "paid",
+          payment_id: paymentId,
+        },
+        existingTx: null,
+      });
+      setMysqlPoolForTesting(harness.pool);
+
+      const req = new Request("http://localhost:3000/api/payments/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_user",
+        },
+        body: JSON.stringify({
+          orderId,
+          paymentId,
+          signature: signOrderPayment(orderId, paymentId),
+          purpose: "premium_video_upload",
+          videoId: "vid_p14_1",
+        }),
+      });
+      const resp = await expectApiResponse(req, {
+        NODE_ENV: "test",
+        RAZORPAY_KEY_ID,
+        RAZORPAY_KEY_SECRET: RAZORPAY_SECRET,
+        RAZORPAY_SKIP_REMOTE_CHECK: "true",
+      });
+      const data = await resp.json();
+      assert.equal(resp.status, 409);
+      assert.equal(data.verified, false);
+      assert.match(data.error || "", /without a matching verified payment transaction record/i);
+      assert.equal(harness.getState().rolledBack, true);
+      assert.equal(harness.getState().committed, false);
+      assert.equal(harness.getState().walletCredits.length, 0);
+    });
   });
 
   describe("FIX 2 — Node Razorpay remote verification policy & fail-closed credentials", () => {
@@ -816,6 +864,62 @@ describe("Phase 1.4 Corrective Fixes — Payment Security, Atomic Integrity & Mi
       assert.notEqual(updateOrderIdx, -1);
       const aroundUpdate = phpSource.slice(updateOrderIdx - 250, updateOrderIdx + 350);
       assert.ok(!aroundUpdate.includes("try {") && !aroundUpdate.includes("catch ("));
+    });
+
+    it("fails closed with 500 when MySQL INSERT INTO payment_orders throws in non-production test env", async () => {
+      enableMockMysqlEnv();
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
+            return [
+              [
+                {
+                  id: "u-alex",
+                  user_id: "FT483921",
+                  name: "Alex Rivera",
+                  mobile: "9999999999",
+                  email: "alex@facetube.com",
+                  role: "user",
+                  referral_code: null,
+                  avatar_url: null,
+                  channel_logo_url: null,
+                  channel_name: "Channel",
+                  channel_description: null,
+                  created_at: "2026-01-01T00:00:00.000Z",
+                },
+              ],
+            ];
+          }
+          if (sql.includes("INSERT INTO payment_orders")) {
+            throw makeMysqlError(
+              "Deadlock found when trying to get lock",
+              "ER_LOCK_DEADLOCK",
+              1213,
+              "40001",
+            );
+          }
+          return [[]];
+        },
+      } as any);
+
+      const req = new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer tok_user" },
+        body: JSON.stringify({
+          purpose: "premium_video_upload",
+          userId: "FT483921",
+        }),
+      });
+      const resp = await expectApiResponse(req, {
+        NODE_ENV: "test",
+        RAZORPAY_KEY_ID,
+        RAZORPAY_KEY_SECRET: RAZORPAY_SECRET,
+        RAZORPAY_SKIP_REMOTE_CHECK: "true",
+      });
+      const data = await resp.json();
+      assert.equal(resp.status, 500);
+      assert.equal(data.success, false);
+      assert.equal(data.orderId, undefined);
     });
   });
 

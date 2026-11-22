@@ -36,7 +36,7 @@ export function getMediaBaseUrl(): string {
 
   // 3. In production browser on facetube.online, resolve to production media domain
   if (typeof window !== "undefined") {
-    const host = window.location.hostname.toLowerCase();
+    const host = window.location?.hostname?.toLowerCase() ?? "";
     if (host === "facetube.online" || host === "www.facetube.online") {
       return PRODUCTION_API_DOMAIN;
     }

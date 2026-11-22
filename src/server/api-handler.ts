@@ -1161,6 +1161,9 @@ function getInitialCategories() {
     "Travel",
     "AI",
     "Education",
+    "Health",
+    "Sports",
+    "Drama",
   ];
   return baseline.map((name, idx) => ({
     id: idx + 1,
@@ -1614,11 +1617,16 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
                 .toLowerCase(),
             ),
           );
+          let nextCatId =
+            inMemoryStore.categories.reduce(
+              (max: number, c: any) => Math.max(max, Number(c?.id) || 0),
+              0,
+            ) + 1;
           for (const base of getInitialCategories()) {
             if (!existingLower.has(base.name.trim().toLowerCase())) {
               inMemoryStore.categories.push({
                 ...base,
-                id: inMemoryStore.categories.length + 1,
+                id: nextCatId++,
               });
               existingLower.add(base.name.trim().toLowerCase());
             }
@@ -2682,7 +2690,6 @@ async function dispatchApiRequest(
               ],
             );
             if (
-              isProduction &&
               insertRes &&
               typeof insertRes.affectedRows === "number" &&
               insertRes.affectedRows < 1
@@ -2696,15 +2703,22 @@ async function dispatchApiRequest(
               );
             }
           } catch (_ePo) {
-            if (isProduction) {
+            if (isMysqlConnectionUnavailableError(_ePo)) {
               return jsonResponse(
                 {
                   success: false,
-                  error: "Database error persisting payment order. Please try again.",
+                  error: "Database connection unavailable persisting payment order.",
                 },
-                500,
+                503,
               );
             }
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database error persisting payment order. Please try again.",
+              },
+              500,
+            );
           }
         }
 
@@ -3382,6 +3396,16 @@ async function dispatchApiRequest(
                 message: "Payment already verified and credited previously (idempotent duplicate).",
               });
             }
+            return jsonResponse(
+              {
+                verified: false,
+                paymentId,
+                orderId,
+                error:
+                  "Conflict: Payment order is marked paid without a matching verified payment transaction record.",
+              },
+              409,
+            );
           }
         }
 
@@ -3660,6 +3684,20 @@ async function dispatchApiRequest(
               );
               await conn.rollback();
               return jsonResponse(dupRes.body, dupRes.status);
+            }
+
+            if (lockedOrder.status === "paid") {
+              await conn.rollback();
+              return jsonResponse(
+                {
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  error:
+                    "Conflict: Payment order is marked paid without a matching verified payment transaction record.",
+                },
+                409,
+              );
             }
 
             let lockedVideoRow: any = null;
@@ -14009,7 +14047,9 @@ async function dispatchApiRequest(
               (b) => !existingLower.has(b.name.trim().toLowerCase()),
             );
             const merged = [...rows, ...missingBaseline].sort((a: any, b: any) =>
-              String(a.name || "").localeCompare(String(b.name || "")),
+              String(a.name || "").localeCompare(String(b.name || ""), undefined, {
+                sensitivity: "base",
+              }),
             );
             return jsonResponse({
               success: true,
@@ -14056,12 +14096,15 @@ async function dispatchApiRequest(
               .toLowerCase(),
           ),
         );
+        let nextCatId =
+          store.categories.reduce((max: number, c: any) => Math.max(max, Number(c?.id) || 0), 0) +
+          1;
         let updated = false;
         for (const base of getInitialCategories()) {
           if (!existingLower.has(base.name.trim().toLowerCase())) {
             store.categories.push({
               ...base,
-              id: store.categories.length + 1,
+              id: nextCatId++,
             });
             existingLower.add(base.name.trim().toLowerCase());
             updated = true;
@@ -15275,23 +15318,25 @@ async function dispatchApiRequest(
         store.categories = getInitialCategories();
       }
 
-      const isDuplicate = store.categories.some(
+      const existingLocal = store.categories.find(
         (c) =>
           c.name.trim().toLowerCase() === name.toLowerCase() ||
           c.slug.toLowerCase() === slug.toLowerCase(),
       );
-      if (isDuplicate) {
+      if (existingLocal) {
         return jsonResponse(
           {
             success: false,
-            error: `Category "${name}" already exists.`,
+            error: `Category "${existingLocal.name}" already exists.`,
           },
           409,
         );
       }
 
+      const nextCatId =
+        store.categories.reduce((max: number, c: any) => Math.max(max, Number(c?.id) || 0), 0) + 1;
       const newCat = {
-        id: store.categories.length + 1,
+        id: nextCatId,
         name,
         slug,
         created_by: authUser.user_id,

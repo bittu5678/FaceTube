@@ -30,9 +30,11 @@ import {
   Bar,
 } from "recharts";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { DashboardSummaryCards } from "@/components/videohub/DashboardSummaryCards";
 import { DashboardCategoriesSection } from "@/components/videohub/DashboardCategoriesSection";
 import { useAuth } from "@/lib/auth-context";
+import { resolveChannelAvatarUrl, resolveChannelDisplayName } from "@/lib/channel-branding";
 import { api } from "@/lib/api";
 import {
   calculateUserVideoCounts,
@@ -141,6 +143,11 @@ function DashboardPage() {
   const [isEarningsLoading, setIsEarningsLoading] = useState(false);
 
   const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
+  const channelName = resolveChannelDisplayName({ user, profile, dbUser }, "Creator");
+  const channelLogoUrl = resolveChannelAvatarUrl(
+    { user, profile, dbUser },
+    { includeAvatarFallback: true },
+  );
 
   const [subscriberCount, setSubscriberCount] = useState<number>(0);
   const [isSubscriberLoading, setIsSubscriberLoading] = useState(true);
@@ -289,9 +296,19 @@ function DashboardPage() {
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-border pb-5">
           <div className="flex items-center gap-3">
-            <div className="grid h-12 w-12 place-items-center rounded-2xl bg-brand/10 text-brand">
-              <LayoutDashboard className="h-6 w-6" />
-            </div>
+            {userId ? (
+              <ChannelAvatar
+                src={channelLogoUrl}
+                name={channelName}
+                sizeClassName="h-12 w-12"
+                imageRingClassName="ring-2 ring-brand/30 shadow-sm"
+                fallbackClassName="bg-brand/15 text-brand font-bold text-sm ring-1 ring-brand/30"
+              />
+            ) : (
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-brand/10 text-brand">
+                <LayoutDashboard className="h-6 w-6" />
+              </div>
+            )}
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-2xl font-extrabold tracking-tight text-foreground sm:text-3xl">
@@ -309,7 +326,13 @@ function DashboardPage() {
               </div>
               <p className="text-sm text-muted-foreground">
                 Performance metrics, dynamic video classifications, and income streams for{" "}
-                <strong>{userId || "signed-in account"}</strong>
+                {userId ? (
+                  <>
+                    <strong>{channelName}</strong> ({userId})
+                  </>
+                ) : (
+                  <strong>your account</strong>
+                )}
               </p>
             </div>
           </div>
@@ -350,7 +373,7 @@ function DashboardPage() {
               </h2>
               <p className="text-xs text-muted-foreground">
                 Dynamically calculated from real uploaded video records for{" "}
-                {userId ? `User ${userId}` : "signed-in account"}.
+                {userId ? `${channelName} (${userId})` : "your account"}.
               </p>
             </div>
 

@@ -106,7 +106,7 @@ export const DigitalCertificateCard = React.forwardRef<HTMLDivElement, DigitalCe
             {/* Recipient Full Name */}
             <div className="py-1">
               <h2 className="text-3xl sm:text-5xl font-black tracking-tight text-slate-900 font-serif">
-                {userName || "Alex Rivera"}
+                {userName || "Creator"}
               </h2>
               <div className="mx-auto mt-2 h-0.5 w-52 bg-gradient-to-r from-transparent via-[#c59b27] to-transparent" />
             </div>
@@ -116,7 +116,7 @@ export const DigitalCertificateCard = React.forwardRef<HTMLDivElement, DigitalCe
               has met all governance standards and achieved creator excellence, verified under
               FaceTube creator identity{" "}
               <span className="font-mono font-bold text-[#ff3b2e] bg-red-50 px-2.5 py-0.5 rounded border border-[#ff3b2e]/30">
-                {userId || "FT483921"}
+                {userId || "Unverified"}
               </span>
               . Conferred in recognition of stellar channel growth, creator integrity, and audience
               empowerment.
@@ -148,7 +148,7 @@ export const DigitalCertificateCard = React.forwardRef<HTMLDivElement, DigitalCe
               </div>
               <div className="mt-1 flex items-center justify-center gap-1.5 text-sm sm:text-lg font-black text-slate-900">
                 <ShieldCheck className="w-4 h-4 sm:w-5 sm:h-5 text-[#ff3b2e] shrink-0" />
-                <span className="truncate">{subscriberCount || "100,000"}+ Subs</span>
+                <span className="truncate">{subscriberCount || "0"}+ Subs</span>
               </div>
               <div className="text-[9px] sm:text-[10px] text-emerald-700 mt-0.5 font-semibold flex items-center justify-center gap-1 truncate">
                 <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" /> Verified Channel

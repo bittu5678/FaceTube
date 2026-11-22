@@ -6,23 +6,14 @@ import {
   History,
   Clock,
   ThumbsUp,
-  Video,
-  ShieldCheck,
   LogOut,
-  Sparkles,
-  ArrowRight,
   ExternalLink,
-  ChevronRight,
-  Play,
-  Share2,
   Trash2,
   Edit3,
   TrendingUp,
   DollarSign,
   Eye,
-  ListVideo,
   X,
-  Check,
   Landmark,
   Link2,
   Lock,
@@ -37,8 +28,19 @@ import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
 import { resolveMediaUrl } from "@/lib/media-url";
-import { recommended, recent, type Video as VideoType } from "@/data/videos";
-import { SHORTS_LIST } from "@/data/shorts";
+import {
+  CHANNEL_BRANDING_UPDATED_EVENT,
+  resolveChannelAvatarUrl,
+  resolveChannelDisplayName,
+} from "@/lib/channel-branding";
+import {
+  fetchUploadedVideos,
+  isShortVideo,
+  resolveAuthenticatedUserId,
+  type UploadedVideo,
+} from "@/lib/video-service";
+import { resolveVideoThumbnail, SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
+import { getUserWallet } from "@/lib/ledger-service";
 import { PersonalKycTab } from "@/components/profile/PersonalKycTab";
 import { BankKycTab } from "@/components/profile/BankKycTab";
 import { ReferralLinkTab } from "@/components/profile/ReferralLinkTab";
@@ -76,7 +78,6 @@ function ProfilePage() {
     role: _role,
     isAdmin,
     signOut,
-    signIn,
     updateChannelBranding,
     allUsers,
     refreshUsers,
@@ -94,37 +95,27 @@ function ProfilePage() {
   const [editProfileOpen, setEditProfileOpen] = useState(false);
 
   const userMeta = user?.user_metadata as Record<string, unknown> | undefined;
-  const currentUserId =
-    profile?.user_id ||
-    dbUser?.user_id ||
-    (typeof userMeta?.["user_id"] === "string" ? userMeta["user_id"] : "") ||
-    "FT483921";
+  const currentUserId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const currentFullName =
     profile?.full_name ||
     profile?.name ||
     dbUser?.name ||
+    (typeof userMeta?.["full_name"] === "string" ? userMeta["full_name"] : "") ||
     (typeof userMeta?.["name"] === "string" ? userMeta["name"] : "") ||
-    "Alex Rivera";
+    "";
   const currentMobile =
     profile?.mobile ||
     dbUser?.mobile ||
     (typeof userMeta?.["mobile"] === "string" ? userMeta["mobile"] : "") ||
-    "+1 555-014-8392";
+    "";
+  const currentEmail = user?.email || profile?.email || dbUser?.email || "";
 
-  const hydratedChannelName =
-    profile?.channel_name ||
-    dbUser?.channel_name ||
-    (typeof userMeta?.["channel_name"] === "string" ? userMeta["channel_name"] : "") ||
-    profile?.full_name ||
-    profile?.name ||
-    dbUser?.name ||
-    "Alex Rivera";
-  const hydratedChannelLogo = resolveMediaUrl(
-    profile?.channel_logo_url ||
-      dbUser?.channel_logo_url ||
-      (typeof userMeta?.["channel_logo_url"] === "string" ? userMeta["channel_logo_url"] : "") ||
-      "",
+  const hydratedChannelName = resolveChannelDisplayName(
+    { user, profile, dbUser },
+    currentUserId ? "Creator" : "Sign in to view channel",
   );
+  const hydratedChannelLogo =
+    resolveChannelAvatarUrl({ user, profile, dbUser }, { includeAvatarFallback: false }) || "";
   const hydratedChannelDescription =
     typeof profile?.channel_description === "string"
       ? profile.channel_description
@@ -133,13 +124,11 @@ function ProfilePage() {
         : typeof userMeta?.["channel_description"] === "string"
           ? userMeta["channel_description"]
           : "";
+  const derivedHandle = (profile?.username || currentUserId || "").trim().toLowerCase();
 
   // Editable Profile State (Channel Logo, Channel Name & Channel Description)
   const [channelName, setChannelName] = useState(hydratedChannelName);
   const [channelLogoUrl, setChannelLogoUrl] = useState(hydratedChannelLogo);
-  const [channelHandle, setChannelHandle] = useState(
-    profile?.username || currentUserId.toLowerCase(),
-  );
   const [channelBio, setChannelBio] = useState(hydratedChannelDescription);
   const [uploadingLogo, setUploadingLogo] = useState(false);
   const [removingLogo, setRemovingLogo] = useState(false);
@@ -151,94 +140,61 @@ function ProfilePage() {
     setChannelName(hydratedChannelName);
     setChannelLogoUrl(hydratedChannelLogo);
     setChannelBio(hydratedChannelDescription);
-    if (profile?.username || currentUserId) {
-      setChannelHandle(profile?.username || currentUserId.toLowerCase());
+  }, [hydratedChannelName, hydratedChannelLogo, hydratedChannelDescription]);
+
+  const [subscriberCount, setSubscriberCount] = useState<number | null>(null);
+  const [userVideos, setUserVideos] = useState<UploadedVideo[]>([]);
+  const [loadingVideos, setLoadingVideos] = useState(false);
+  const [totalRevenue, setTotalRevenue] = useState<number | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!currentUserId) {
+      setUserVideos([]);
+      setSubscriberCount(null);
+      setTotalRevenue(null);
+      setLoadingVideos(false);
+      return;
     }
-  }, [
-    hydratedChannelName,
-    hydratedChannelLogo,
-    hydratedChannelDescription,
-    profile?.username,
-    currentUserId,
-  ]);
-  const subscriberCount =
-    (profile as any)?.subscriber_count ||
-    (profile as any)?.subscribers ||
-    (dbUser as any)?.subscriber_count ||
-    "12.4K";
 
-  // User's own videos list with deletion capability
-  const [userVideos, setUserVideos] = useState<VideoType[]>([
-    {
-      id: "uv-1",
-      title: "Building a Full-Stack YouTube Clone with React 19 & Tailwind CSS",
-      channel: channelName,
-      views: "142K views",
-      age: "3 days ago",
-      duration: "34:20",
-      category: "Coding",
-      thumb:
-        "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80",
-      description: "Full guide covering real-time chat, video player, and dark mode.",
-      initials: "AS",
-      tint: "#e11d48",
-    },
-    {
-      id: "uv-2",
-      title: "Clean Code Architecture: How to Structure High-Growth React Apps",
-      channel: channelName,
-      views: "89K views",
-      age: "2 weeks ago",
-      duration: "21:15",
-      category: "Coding",
-      thumb:
-        "https://images.unsplash.com/photo-1555066931-4365d14bab8c?auto=format&fit=crop&w=800&q=80",
-      description: "State management, modular routing, and clean architectural patterns.",
-      initials: "AS",
-      tint: "#2563eb",
-    },
-    {
-      id: "uv-3",
-      title: "Next-Gen CSS Tips & Tricks: Typography, Grid, and Fluid Scaling",
-      channel: channelName,
-      views: "54K views",
-      age: "1 month ago",
-      duration: "18:40",
-      category: "Design",
-      thumb:
-        "https://images.unsplash.com/photo-1507238691740-187a5b1d37b8?auto=format&fit=crop&w=800&q=80",
-      description: "Advanced CSS layout tricks to elevate modern web interfaces.",
-      initials: "AS",
-      tint: "#10b981",
-    },
-    {
-      id: "uv-4",
-      title: "Mastering Database Schemas & Authentication Security Rules",
-      channel: channelName,
-      views: "36K views",
-      age: "2 months ago",
-      duration: "28:10",
-      category: "Tech",
-      thumb:
-        "https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?auto=format&fit=crop&w=800&q=80",
-      description: "Step-by-step security guidelines and robust database modeling.",
-      initials: "AS",
-      tint: "#8b5cf6",
-    },
-  ]);
+    const loadProfileData = async () => {
+      setLoadingVideos(true);
+      try {
+        const [videosList, subRes, wallet] = await Promise.all([
+          fetchUploadedVideos(currentUserId).catch(() => []),
+          api.channel.getSubscriberCount(currentUserId).catch(() => null),
+          getUserWallet(currentUserId).catch(() => null),
+        ]);
+        if (!mounted) return;
+        setUserVideos(Array.isArray(videosList) ? videosList : []);
+        setSubscriberCount(subRes && subRes.success ? Number(subRes.subscriber_count) || 0 : 0);
+        setTotalRevenue(wallet ? Number(wallet.totalEarned ?? wallet.balance ?? 0) : null);
+      } finally {
+        if (mounted) setLoadingVideos(false);
+      }
+    };
 
-  const historyVideos: VideoType[] = recent.slice(0, 4);
+    void loadProfileData();
+    const handleBrandingRefresh = () => {
+      void loadProfileData();
+    };
+    window.addEventListener(CHANNEL_BRANDING_UPDATED_EVENT, handleBrandingRefresh);
+    return () => {
+      mounted = false;
+      window.removeEventListener(CHANNEL_BRANDING_UPDATED_EVENT, handleBrandingRefresh);
+    };
+  }, [currentUserId]);
+
+  const totalViews = userVideos.reduce((sum, v) => sum + (Number(v.views) || 0), 0);
+  const userShorts = userVideos.filter((v) =>
+    isShortVideo({ contentType: v.contentType, duration: v.duration }),
+  );
 
   const handleSwitchUser = (email: string) => {
     signOut();
     setDemoSwitchOpen(false);
     toast.info(`Please enter your password to sign in as ${email}`);
     window.location.href = `/auth?identifier=${encodeURIComponent(email)}`;
-  };
-
-  const handleDeleteVideo = (id: string, title: string) => {
-    setUserVideos((prev) => prev.filter((v) => v.id !== id));
-    toast.success(`Deleted "${title.slice(0, 24)}..."`);
   };
 
   const handleLogoFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -422,16 +378,15 @@ function ProfilePage() {
                 <ChannelAvatar
                   src={channelLogoUrl}
                   name={channelName}
-                  initials={(channelName || "A").charAt(0).toUpperCase()}
                   sizeClassName="h-20 w-20"
                   imageRingClassName="ring-4 ring-brand/20 shadow-md"
                   fallbackClassName="bg-gradient-to-br from-brand via-brand-dark to-black text-2xl font-bold text-white ring-4 ring-brand/20 shadow-md"
                 />
                 <button
                   type="button"
-                  disabled={uploadingLogo || removingLogo}
+                  disabled={uploadingLogo || removingLogo || !currentUserId}
                   onClick={() => logoInputRef.current?.click()}
-                  className="absolute -bottom-1 -right-1 grid h-7 w-7 place-items-center rounded-full bg-brand text-white shadow-md hover:bg-brand-dark transition active:scale-95 border-2 border-card"
+                  className="absolute -bottom-1 -right-1 grid h-7 w-7 place-items-center rounded-full bg-brand text-white shadow-md hover:bg-brand-dark transition active:scale-95 border-2 border-card disabled:opacity-50"
                   title="Upload Channel Logo"
                 >
                   <Camera className="h-3.5 w-3.5" />
@@ -450,24 +405,43 @@ function ProfilePage() {
                   )}
                 </div>
                 <p className="text-xs text-muted-foreground mt-0.5 flex flex-wrap items-center gap-1.5">
-                  <span>
-                    @{channelHandle} · {user ? user.email : "creator@facetube.app"}
-                  </span>
-                  <span className="font-mono font-bold text-brand bg-brand/10 px-2 py-0.5 rounded-md border border-brand/20">
-                    ID: {currentUserId}
-                  </span>
+                  {currentUserId || currentEmail ? (
+                    <>
+                      <span>
+                        {derivedHandle ? `@${derivedHandle}` : ""}
+                        {derivedHandle && currentEmail ? " · " : ""}
+                        {currentEmail}
+                      </span>
+                      {currentUserId && (
+                        <span className="font-mono font-bold text-brand bg-brand/10 px-2 py-0.5 rounded-md border border-brand/20">
+                          ID: {currentUserId}
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span>Not signed in</span>
+                  )}
                 </p>
                 <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                   <span className="text-brand">
-                    <strong className="text-brand">{subscriberCount}</strong> subscribers
+                    <strong className="text-brand">
+                      {subscriberCount !== null ? subscriberCount.toLocaleString() : "—"}
+                    </strong>{" "}
+                    subscribers
                   </span>
                   <span>•</span>
                   <span>
-                    <strong className="text-foreground">1.8M</strong> total views
+                    <strong className="text-foreground">
+                      {currentUserId ? totalViews.toLocaleString() : "—"}
+                    </strong>{" "}
+                    total views
                   </span>
                   <span>•</span>
                   <span>
-                    <strong className="text-foreground">{userVideos.length}</strong> videos
+                    <strong className="text-foreground">
+                      {currentUserId ? userVideos.length : "—"}
+                    </strong>{" "}
+                    videos
                   </span>
                 </div>
                 <p className="mt-2 text-xs text-foreground/80 line-clamp-2 max-w-xl whitespace-pre-line">
@@ -565,9 +539,13 @@ function ProfilePage() {
                 <span className="text-xs font-medium">Views</span>
                 <Eye className="h-4 w-4 text-blue-500" />
               </div>
-              <p className="mt-2 text-2xl font-black text-foreground">1.8M</p>
-              <p className="mt-1 text-[11px] font-semibold text-emerald-500">
-                +14.2% vs previous period
+              <p className="mt-2 text-2xl font-black text-foreground">
+                {currentUserId ? totalViews.toLocaleString() : "—"}
+              </p>
+              <p className="mt-1 text-[11px] font-medium text-muted-foreground">
+                {currentUserId
+                  ? `Across ${userVideos.length} uploaded video${userVideos.length === 1 ? "" : "s"}`
+                  : "Sign in to view channel views"}
               </p>
             </div>
 
@@ -576,9 +554,9 @@ function ProfilePage() {
                 <span className="text-xs font-medium">Watch Time</span>
                 <Clock className="h-4 w-4 text-purple-500" />
               </div>
-              <p className="mt-2 text-2xl font-black text-foreground">84.2K hrs</p>
-              <p className="mt-1 text-[11px] font-semibold text-emerald-500">
-                +9.8% vs previous period
+              <p className="mt-2 text-2xl font-black text-foreground">—</p>
+              <p className="mt-1 text-[11px] font-medium text-muted-foreground">
+                Watch-time analytics unavailable
               </p>
             </div>
 
@@ -587,8 +565,14 @@ function ProfilePage() {
                 <span className="text-xs font-medium">Estimated Revenue</span>
                 <DollarSign className="h-4 w-4 text-emerald-500" />
               </div>
-              <p className="mt-2 text-2xl font-black text-foreground">₹4,280.50</p>
-              <p className="mt-1 text-[11px] font-semibold text-emerald-500">+₹520.20 this month</p>
+              <p className="mt-2 text-2xl font-black text-foreground">
+                {totalRevenue !== null ? `₹${totalRevenue.toFixed(2)}` : "—"}
+              </p>
+              <p className="mt-1 text-[11px] font-medium text-muted-foreground">
+                {totalRevenue !== null
+                  ? "Total verified creator earnings"
+                  : "Earnings data unavailable"}
+              </p>
             </div>
           </div>
         </section>
@@ -677,7 +661,7 @@ function ProfilePage() {
             {(
               [
                 { id: "videos", label: "Videos", count: userVideos.length },
-                { id: "shorts", label: "Shorts", count: SHORTS_LIST.length },
+                { id: "shorts", label: "Shorts", count: userShorts.length },
                 { id: "playlists", label: "Playlists", count: 3 },
               ] as const
             ).map((tab) => (
@@ -702,12 +686,14 @@ function ProfilePage() {
             ))}
           </div>
 
-          {/* Tab 1: Videos Grid with Delete video option */}
+          {/* Tab 1: Real User Uploaded Videos Grid */}
           {activeTab === "videos" && (
             <div className="space-y-4">
               <div className="flex items-center justify-between">
                 <p className="text-xs text-muted-foreground">
-                  Showing {userVideos.length} uploaded videos
+                  {loadingVideos
+                    ? "Loading your uploaded videos..."
+                    : `Showing ${userVideos.length} uploaded video${userVideos.length === 1 ? "" : "s"}`}
                 </p>
                 <Link
                   to="/upload"
@@ -717,91 +703,127 @@ function ProfilePage() {
                 </Link>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {userVideos.map((v) => (
-                  <div
-                    key={v.id}
-                    className="group relative rounded-2xl border border-border bg-card p-2.5 transition-all hover:border-brand/40 hover:shadow-md flex flex-col justify-between"
-                  >
-                    <div>
-                      <Link to="/watch/$videoId" params={{ videoId: v.id }} className="block">
-                        <div className="relative aspect-video rounded-xl overflow-hidden bg-black mb-2.5">
-                          <img
-                            src={v.thumb}
-                            alt={v.title}
-                            className="h-full w-full object-cover transition duration-300 group-hover:scale-105 opacity-90"
-                          />
-                          <span className="absolute bottom-1.5 right-1.5 rounded-md bg-black/80 px-1.5 py-0.5 text-[10px] font-bold text-white">
-                            {v.duration}
-                          </span>
-                        </div>
-                        <h3 className="text-xs font-bold text-foreground line-clamp-2 group-hover:text-brand transition-colors">
-                          {v.title}
-                        </h3>
-                      </Link>
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        {v.views} · {v.age}
-                      </p>
-                    </div>
+              {userVideos.length > 0 && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {userVideos.map((v) => (
+                    <div
+                      key={v.id}
+                      className="group relative rounded-2xl border border-border bg-card p-2.5 transition-all hover:border-brand/40 hover:shadow-md flex flex-col justify-between"
+                    >
+                      <div>
+                        <Link to="/watch/$videoId" params={{ videoId: v.id }} className="block">
+                          <div className="relative aspect-video rounded-xl overflow-hidden bg-black mb-2.5">
+                            <img
+                              src={resolveVideoThumbnail(v)}
+                              alt={v.title}
+                              onError={(e) => {
+                                const target = e.currentTarget;
+                                if (target.src !== SVG_FALLBACK_THUMBNAIL) {
+                                  target.src = SVG_FALLBACK_THUMBNAIL;
+                                }
+                              }}
+                              className="h-full w-full object-cover transition duration-300 group-hover:scale-105 opacity-90"
+                            />
+                            <span className="absolute bottom-1.5 right-1.5 rounded-md bg-black/80 px-1.5 py-0.5 text-[10px] font-bold text-white">
+                              {v.duration || "0:00"}
+                            </span>
+                          </div>
+                          <h3 className="text-xs font-bold text-foreground line-clamp-2 group-hover:text-brand transition-colors">
+                            {v.title}
+                          </h3>
+                        </Link>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {(Number(v.views) || 0).toLocaleString()} views ·{" "}
+                          {v.createdAt
+                            ? new Date(v.createdAt).toLocaleDateString()
+                            : "Recently uploaded"}
+                        </p>
+                      </div>
 
-                    <div className="mt-3 flex items-center justify-between border-t border-border/50 pt-2">
-                      <span className="rounded bg-brand/10 px-1.5 py-0.5 text-[10px] font-bold text-brand">
-                        Monetized
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => handleDeleteVideo(v.id, v.title)}
-                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-destructive transition hover:bg-destructive/10 active:scale-95"
-                        title="Delete video"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Delete
-                      </button>
+                      <div className="mt-3 flex items-center justify-between border-t border-border/50 pt-2">
+                        <span
+                          className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
+                            v.videoType === "premium"
+                              ? "bg-amber-500/15 text-amber-500"
+                              : "bg-brand/10 text-brand"
+                          }`}
+                        >
+                          {v.videoType === "premium" ? "Sponsor" : "Free"}
+                        </span>
+                        <Link
+                          to="/your-videos"
+                          className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold text-muted-foreground transition hover:bg-secondary hover:text-foreground"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          Studio
+                        </Link>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
 
-              {userVideos.length === 0 && (
+              {!loadingVideos && userVideos.length === 0 && (
                 <div className="py-12 text-center rounded-2xl border border-dashed border-border p-6">
-                  <p className="text-sm font-semibold text-foreground">No videos uploaded yet</p>
+                  <p className="text-sm font-semibold text-foreground">
+                    {currentUserId ? "No videos uploaded yet" : "Sign in to view your videos"}
+                  </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    Upload your first video to grow your channel audience.
+                    {currentUserId
+                      ? "Upload your first video to grow your channel audience."
+                      : "Your uploaded channel videos will appear here once signed in."}
                   </p>
                   <Link
-                    to="/upload"
+                    to={currentUserId ? "/upload" : "/auth"}
                     className="mt-4 inline-block rounded-full bg-brand px-5 py-2 text-xs font-bold text-white"
                   >
-                    Upload Video
+                    {currentUserId ? "Upload Video" : "Sign In"}
                   </Link>
                 </div>
               )}
             </div>
           )}
 
-          {/* Tab 2: Shorts Tab */}
-          {activeTab === "shorts" && (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-              {SHORTS_LIST.map((short) => (
-                <Link
-                  key={short.id}
-                  to="/shorts"
-                  className="group relative rounded-2xl overflow-hidden border border-border bg-black aspect-[9/16] shadow-sm transition hover:scale-[1.02]"
-                >
-                  <img
-                    src={short.thumb}
-                    alt={short.title}
-                    className="h-full w-full object-cover opacity-85 transition group-hover:opacity-100"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent" />
-                  <div className="absolute bottom-3 left-3 right-3 text-white">
-                    <p className="text-xs font-bold line-clamp-2">{short.title}</p>
-                    <p className="mt-1 text-[10px] text-white/80">{short.likes} likes</p>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          )}
+          {/* Tab 2: Real User Shorts Tab */}
+          {activeTab === "shorts" &&
+            (userShorts.length > 0 ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
+                {userShorts.map((short) => (
+                  <Link
+                    key={short.id}
+                    to="/watch/$videoId"
+                    params={{ videoId: short.id }}
+                    className="group relative rounded-2xl overflow-hidden border border-border bg-black aspect-[9/16] shadow-sm transition hover:scale-[1.02]"
+                  >
+                    <img
+                      src={resolveVideoThumbnail(short)}
+                      alt={short.title}
+                      onError={(e) => {
+                        const target = e.currentTarget;
+                        if (target.src !== SVG_FALLBACK_THUMBNAIL) {
+                          target.src = SVG_FALLBACK_THUMBNAIL;
+                        }
+                      }}
+                      className="h-full w-full object-cover opacity-85 transition group-hover:opacity-100"
+                    />
+                    <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-transparent" />
+                    <div className="absolute bottom-3 left-3 right-3 text-white">
+                      <p className="text-xs font-bold line-clamp-2">{short.title}</p>
+                      <p className="mt-1 text-[10px] text-white/80">
+                        {(Number(short.views) || 0).toLocaleString()} views
+                      </p>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <div className="py-12 text-center rounded-2xl border border-dashed border-border p-6">
+                <p className="text-sm font-semibold text-foreground">No Shorts uploaded yet</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Vertical 9:16 Shorts you upload will appear in this tab.
+                </p>
+              </div>
+            ))}
 
           {/* Tab 3: Playlists Tab */}
           {activeTab === "playlists" && (
@@ -865,31 +887,19 @@ function ProfilePage() {
             </Link>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {historyVideos.map((v) => (
-              <Link
-                key={v.id}
-                to="/watch/$videoId"
-                params={{ videoId: v.id }}
-                className="group rounded-xl border border-border bg-card p-2 transition-all hover:border-brand/40"
-              >
-                <div className="relative aspect-video rounded-lg overflow-hidden bg-black mb-2">
-                  <img
-                    src={v.thumb}
-                    alt={v.title}
-                    className="h-full w-full object-cover transition duration-300 group-hover:scale-105 opacity-90"
-                  />
-                  <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 py-0.5 text-[9px] font-bold text-white">
-                    {v.duration}
-                  </span>
-                  <div className="absolute bottom-0 inset-x-0 h-0.5 bg-red-600 w-3/4" />
-                </div>
-                <h3 className="text-xs font-bold text-foreground line-clamp-1 group-hover:text-brand transition-colors">
-                  {v.title}
-                </h3>
-                <p className="text-[10px] text-muted-foreground mt-0.5 truncate">{v.channel}</p>
-              </Link>
-            ))}
+          <div className="rounded-2xl border border-dashed border-border bg-card/50 p-6 text-center">
+            <p className="text-xs font-semibold text-foreground">
+              No recent watch history recorded
+            </p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              User-specific watch history tracking is not enabled on this profile yet.
+            </p>
+            <Link
+              to="/explore"
+              className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-secondary px-4 py-1.5 text-xs font-semibold text-foreground transition hover:bg-secondary/80"
+            >
+              Explore Videos
+            </Link>
           </div>
         </section>
       </main>
@@ -920,7 +930,6 @@ function ProfilePage() {
                   <ChannelAvatar
                     src={channelLogoUrl}
                     name={channelName}
-                    initials={(channelName || "A").charAt(0).toUpperCase()}
                     sizeClassName="h-12 w-12"
                     imageRingClassName="ring-2 ring-brand/30"
                     fallbackClassName="bg-brand text-sm font-bold text-white"
@@ -988,16 +997,20 @@ function ProfilePage() {
 
               <div>
                 <label className="text-xs font-semibold text-foreground">Handle</label>
-                <div className="mt-1.5 flex items-center rounded-xl border border-border bg-secondary/60 px-3.5 py-2 text-xs text-foreground">
-                  <span className="text-muted-foreground mr-1">@</span>
+                <div className="mt-1.5 flex items-center rounded-xl border border-border bg-secondary/40 px-3.5 py-2 text-xs text-muted-foreground">
+                  <span className="mr-1">@</span>
                   <input
                     type="text"
-                    value={channelHandle}
-                    onChange={(e) => setChannelHandle(e.target.value)}
-                    required
-                    className="w-full bg-transparent outline-none text-foreground text-xs"
+                    value={derivedHandle}
+                    readOnly
+                    disabled
+                    aria-label="Channel handle (derived from User ID)"
+                    className="w-full bg-transparent outline-none text-muted-foreground text-xs cursor-not-allowed"
                   />
                 </div>
+                <p className="mt-1 text-[10px] text-muted-foreground">
+                  Derived from your FaceTube User ID.
+                </p>
               </div>
 
               <div>

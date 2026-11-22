@@ -25,6 +25,7 @@ import {
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
+import { resolveChannelAvatarUrl, resolveChannelDisplayName } from "@/lib/channel-branding";
 import { DashboardSummaryCards } from "@/components/videohub/DashboardSummaryCards";
 import {
   fetchUploadedVideos,
@@ -52,23 +53,11 @@ export const Route = createFileRoute("/your-videos")({
 function YourVideosPage() {
   const { user, profile, dbUser, isLoading: authLoading } = useAuth();
   const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
-  const metadataChannelName =
-    typeof user?.user_metadata?.["channel_name"] === "string"
-      ? user.user_metadata["channel_name"].trim()
-      : "";
-  const metadataChannelLogo =
-    typeof user?.user_metadata?.["channel_logo_url"] === "string"
-      ? user.user_metadata["channel_logo_url"]
-      : undefined;
-  const channelName =
-    profile?.channel_name ||
-    dbUser?.channel_name ||
-    metadataChannelName ||
-    profile?.name ||
-    dbUser?.name ||
-    "Creator";
-  const channelLogoUrl =
-    profile?.channel_logo_url || dbUser?.channel_logo_url || metadataChannelLogo;
+  const channelName = resolveChannelDisplayName({ user, profile, dbUser }, "Creator");
+  const channelLogoUrl = resolveChannelAvatarUrl(
+    { user, profile, dbUser },
+    { includeAvatarFallback: true },
+  );
 
   const [videos, setVideos] = useState<UploadedVideo[]>([]);
   const [videoFilter, setVideoFilter] = useState<

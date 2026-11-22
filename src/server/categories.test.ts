@@ -4,6 +4,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { handleApiRequest } from "./api-handler";
 import { buildDashboardCategoryCatalog } from "../lib/dashboard-categories";
+import { VIDEO_CATEGORIES, getAvailableCategories } from "../lib/video-service";
+import {
+  CATEGORY_THUMBNAILS,
+  getCategoryFallbackThumbnail,
+  resolveVideoThumbnail,
+} from "../lib/thumbnail-service";
 
 describe("Priority 3: Admin Category Management & Verification Tests", () => {
   let adminToken = "";
@@ -412,6 +418,307 @@ describe("Priority 3: Admin Category Management & Verification Tests", () => {
           data.videos.every((v: any) => String(v.category).toLowerCase() === catName.toLowerCase()),
         );
       }
+    });
+  });
+
+  // Test Suite 8: Health, Sports & Drama End-to-End Category Coverage
+  describe("8. Health, Sports & Drama End-to-End Category Coverage", () => {
+    it("includes Health, Sports, and Drama in shared VIDEO_CATEGORIES catalogs without duplicates while preserving existing 18 categories", () => {
+      const expectedBaseline = [
+        "Cartoon",
+        "Agriculture",
+        "Motivational",
+        "Comedy",
+        "Blog",
+        "Movie",
+        "Entertainment",
+        "Cooking",
+        "Finance",
+        "Share Market",
+        "Business",
+        "Crypto",
+        "Coding",
+        "Music",
+        "Gaming",
+        "Travel",
+        "AI",
+        "Education",
+        "Health",
+        "Sports",
+        "Drama",
+      ];
+
+      assert.deepEqual([...VIDEO_CATEGORIES], expectedBaseline);
+      const lowerSet = new Set(VIDEO_CATEGORIES.map((c) => c.toLowerCase()));
+      assert.equal(
+        lowerSet.size,
+        VIDEO_CATEGORIES.length,
+        "VIDEO_CATEGORIES must contain no case-insensitive duplicates",
+      );
+
+      const dataVideosSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/data/videos.ts"),
+        "utf-8",
+      );
+      const match = dataVideosSrc.match(/export const VIDEO_CATEGORIES = \[([\s\S]*?)\] as const;/);
+      assert.ok(match && match[1], "src/data/videos.ts must define VIDEO_CATEGORIES");
+      const parsedDataCategories = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+      assert.deepEqual(parsedDataCategories, expectedBaseline);
+      assert.match(dataVideosSrc, /export const categories = \["All", \.\.\.VIDEO_CATEGORIES\]/);
+    });
+
+    it("ensures Node and PHP baseline category APIs return Health, Sports, and Drama in parity without duplicates", async () => {
+      // 1. Node default /api/categories/list
+      const nodeRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/categories/list", { method: "GET" }),
+      );
+      assert.ok(nodeRes);
+      assert.equal(nodeRes.status, 200);
+      const nodeData = await nodeRes.json();
+      assert.equal(nodeData.success, true);
+
+      const nodeNames: string[] = nodeData.categories.map((c: any) => String(c.name));
+      const nodeLower = nodeNames.map((n) => n.toLowerCase());
+      assert.equal(
+        new Set(nodeLower).size,
+        nodeNames.length,
+        "Node categories list must have no case-insensitive duplicates",
+      );
+      for (const reqCat of ["Health", "Sports", "Drama"]) {
+        assert.ok(nodeNames.includes(reqCat), `Node categories list must include ${reqCat}`);
+      }
+
+      // 2. Node production baseline_fallback
+      const prevEnv = process.env["NODE_ENV"];
+      try {
+        process.env["NODE_ENV"] = "production";
+        const prodRes = await handleApiRequest(
+          new Request("http://localhost:3000/api/categories/list", { method: "GET" }),
+        );
+        assert.ok(prodRes);
+        assert.equal(prodRes.status, 200);
+        const prodData = await prodRes.json();
+        assert.equal(prodData.source, "baseline_fallback");
+        const prodNames: string[] = prodData.categories.map((c: any) => String(c.name));
+        for (const reqCat of VIDEO_CATEGORIES) {
+          assert.ok(
+            prodNames.includes(reqCat),
+            `Production baseline_fallback must include ${reqCat}`,
+          );
+        }
+      } finally {
+        process.env["NODE_ENV"] = prevEnv;
+      }
+
+      // 3. PHP baseline parity check in api/categories/list.php
+      const listPhp = fs.readFileSync(
+        path.resolve(process.cwd(), "api/categories/list.php"),
+        "utf-8",
+      );
+      const phpMatch = listPhp.match(/\$baselineCategories = \[([\s\S]*?)\];/);
+      assert.ok(phpMatch && phpMatch[1], "api/categories/list.php must define $baselineCategories");
+      const phpBaseline = [...phpMatch[1].matchAll(/'([^']+)'/g)].map((m) => m[1]);
+      assert.deepEqual(phpBaseline, [...VIDEO_CATEGORIES]);
+      assert.match(
+        listPhp,
+        /usort\(\$categories,\s*function\s*\(\$a,\s*\$b\)\s*\{\s*return\s+strcasecmp\(\$a\['name'\],\s*\$b\['name'\]\);/s,
+      );
+    });
+
+    it("rejects case-insensitive duplicate creation of Health, Sports, and Drama while preserving admin-created categories", async () => {
+      for (const variant of ["health", "SPORTS", "drama"]) {
+        const res = await handleApiRequest(
+          new Request("http://localhost:3000/api/admin/categories", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({ name: variant }),
+          }),
+        );
+        assert.ok(res);
+        assert.equal(res.status, 409, `Duplicate category "${variant}" must return HTTP 409`);
+        const data = await res.json();
+        assert.equal(data.success, false);
+        assert.match(data.error, /already exists/i);
+      }
+
+      // Existing custom admin category creation & persistence in listing remains functional
+      const customName = `Podcast Tech ${Date.now()}`;
+      const createRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/categories", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({ name: customName }),
+        }),
+      );
+      assert.ok(createRes);
+      assert.equal(createRes.status, 201);
+
+      const listRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/categories/list", { method: "GET" }),
+      );
+      assert.ok(listRes);
+      const listData = await listRes.json();
+      assert.ok(
+        listData.categories.some((c: any) => c.name === customName),
+        "Newly admin-created category must appear alongside baseline categories",
+      );
+    });
+
+    it("wires getAvailableCategories() to merge API categories with VIDEO_CATEGORIES case-insensitively without duplicates", async () => {
+      const originalFetch = globalThis.fetch;
+      try {
+        globalThis.fetch = (async () =>
+          new Response(
+            JSON.stringify({
+              success: true,
+              source: "database",
+              categories: [
+                { id: 1, name: "Coding", slug: "coding" },
+                { id: 2, name: "health", slug: "health" },
+                { id: 99, name: "Custom Studio", slug: "custom-studio" },
+              ],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          )) as typeof fetch;
+
+        const merged = await getAvailableCategories();
+        const lowerMerged = merged.map((c) => c.toLowerCase());
+        assert.equal(
+          new Set(lowerMerged).size,
+          merged.length,
+          "Merged categories must have zero duplicates",
+        );
+        assert.ok(merged.includes("Custom Studio"), "Admin API categories must be preserved");
+        assert.ok(lowerMerged.includes("health"));
+        assert.ok(lowerMerged.includes("sports"));
+        assert.ok(lowerMerged.includes("drama"));
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it("verifies all four upload selectors in src/routes/upload.tsx use dynamic useUploadCategories and preserve categories-updated events", () => {
+      const uploadSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/routes/upload.tsx"),
+        "utf-8",
+      );
+      const adminSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/routes/admin.tsx"),
+        "utf-8",
+      );
+
+      assert.match(uploadSrc, /function useUploadCategories\(\)/);
+      assert.match(uploadSrc, /window\.addEventListener\("facetube:categories-updated"/);
+      assert.match(
+        adminSrc,
+        /window\.dispatchEvent\(new CustomEvent\("facetube:categories-updated"\)\)/,
+      );
+
+      // Every upload view hook & dropdown uses `categories` instead of unmerged static VIDEO_CATEGORIES.map
+      const selectorOccurrences = uploadSrc.match(/categories\.map\(\(cat\)\s*=>/g) || [];
+      assert.ok(
+        selectorOccurrences.length >= 4 && selectorOccurrences.length === 5,
+        "All upload category selectors (Bulk batch + row, Free, Sponsor, Image) must iterate dynamic categories",
+      );
+      assert.equal(
+        /VIDEO_CATEGORIES\.map/.test(uploadSrc),
+        false,
+        "Upload selectors must not hardcode static VIDEO_CATEGORIES.map",
+      );
+    });
+
+    it("verifies Free, Premium, and Explore routes expose Health, Sports, and Drama filters cleanly", () => {
+      for (const routeFile of ["src/routes/free-videos.tsx", "src/routes/premium-videos.tsx"]) {
+        const src = fs.readFileSync(path.resolve(process.cwd(), routeFile), "utf-8");
+        assert.match(
+          src,
+          /getAvailableCategories\(/,
+          `${routeFile} must fetch available categories`,
+        );
+        assert.match(
+          src,
+          /facetube:categories-updated/,
+          `${routeFile} must listen for admin category updates`,
+        );
+        assert.match(
+          src,
+          /availableCategories\.map\(\(cat\)/,
+          `${routeFile} must render availableCategories`,
+        );
+      }
+
+      const exploreSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/routes/explore.tsx"),
+        "utf-8",
+      );
+      for (const label of ["Health", "Sports", "Drama"]) {
+        assert.match(
+          exploreSrc,
+          new RegExp(`label:\\s*"${label}"`),
+          `Explore pills must include ${label}`,
+        );
+        assert.match(
+          exploreSrc,
+          new RegExp(`selectedTag === "${label}"`),
+          `Explore filter logic must handle ${label}`,
+        );
+      }
+    });
+
+    it("provides distinct, offline-safe fallback thumbnails for Health, Sports, and Drama in both TS and PHP", () => {
+      const generalThumb = getCategoryFallbackThumbnail("General");
+
+      for (const cat of ["Health", "Sports", "Drama"] as const) {
+        const direct = CATEGORY_THUMBNAILS[cat];
+        assert.ok(direct, `CATEGORY_THUMBNAILS must define ${cat}`);
+        assert.ok(
+          direct.startsWith("data:image/svg+xml;base64,"),
+          `${cat} fallback must be offline-safe SVG data URI`,
+        );
+        assert.notEqual(direct, generalThumb, `${cat} fallback must be category-specific`);
+        assert.equal(
+          getCategoryFallbackThumbnail(cat.toLowerCase()),
+          direct,
+          "Fallback lookup must be case-insensitive",
+        );
+        assert.equal(resolveVideoThumbnail({ category: cat, thumbnailUrl: "" }), direct);
+      }
+
+      const createPhp = fs.readFileSync(
+        path.resolve(process.cwd(), "api/videos/create.php"),
+        "utf-8",
+      );
+      for (const cat of ["Health", "Sports", "Drama"] as const) {
+        assert.ok(
+          createPhp.includes(`'${cat}' => '${CATEGORY_THUMBNAILS[cat]}'`),
+          `api/videos/create.php must match TS fallback thumbnail for ${cat}`,
+        );
+      }
+      assert.match(createPhp, /strcasecmp\(\$catKey,\s*\$trimmedCategory\)\s*===\s*0/);
+    });
+
+    it("does not modify Go Live LIVE_SUBJECTS", () => {
+      const liveSrc = fs.readFileSync(path.resolve(process.cwd(), "src/data/live.ts"), "utf-8");
+      const match = liveSrc.match(/export const LIVE_SUBJECTS = \[([\s\S]*?)\] as const;/);
+      assert.ok(match && match[1]);
+      const subjects = [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+      assert.deepEqual(subjects, [
+        "Education & Learning",
+        "News & Politics",
+        "Entertainment & Comedy",
+        "Finance & Business",
+        "Sports & Fitness",
+        "Art & Design",
+        "Lifestyle & Vlogs",
+        "Podcasts & Talk Shows",
+        "Medical & Healthcare",
+      ]);
     });
   });
 });

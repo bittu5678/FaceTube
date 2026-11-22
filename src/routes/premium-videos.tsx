@@ -18,6 +18,7 @@ import type { Video as CatalogVideo } from "@/data/videos";
 import {
   buildPublicFeedVideos,
   fetchPublicVideosFeed,
+  getAvailableCategories,
   getVideoBadgeLabels,
   type UploadedVideo,
   VIDEO_CATEGORIES,
@@ -53,6 +54,7 @@ export function PremiumVideosPage() {
   const [loading, setLoading] = useState(true);
   const [formatFilter, setFormatFilter] = useState<"all" | "short" | "long">("all");
   const [selectedCategory, setSelectedCategory] = useState<string>("All");
+  const [availableCategories, setAvailableCategories] = useState<string[]>([...VIDEO_CATEGORIES]);
 
   const loadData = async () => {
     setLoading(true);
@@ -70,6 +72,25 @@ export function PremiumVideosPage() {
   useEffect(() => {
     loadData();
   }, [searchParams.refresh]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadCategories = () => {
+      getAvailableCategories()
+        .then((cats) => {
+          if (isMounted && cats && cats.length > 0) {
+            setAvailableCategories(cats);
+          }
+        })
+        .catch(() => {});
+    };
+    loadCategories();
+    window.addEventListener("facetube:categories-updated", loadCategories);
+    return () => {
+      isMounted = false;
+      window.removeEventListener("facetube:categories-updated", loadCategories);
+    };
+  }, []);
 
   // Verified public Sponsor videos only (paid + public + non-blocked; never merged with static catalog)
   const mergedPremiumVideos: CatalogVideo[] = useMemo(() => {
@@ -221,7 +242,7 @@ export function PremiumVideosPage() {
               className="rounded-xl border border-border bg-secondary/60 px-3 py-1 text-xs font-semibold text-foreground focus:outline-none focus:border-amber-500"
             >
               <option value="All">All Categories</option>
-              {VIDEO_CATEGORIES.map((cat) => (
+              {availableCategories.map((cat) => (
                 <option key={cat} value={cat}>
                   {cat}
                 </option>

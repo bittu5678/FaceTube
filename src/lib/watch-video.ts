@@ -3,6 +3,7 @@ import { api } from "./api";
 import { resolveMediaUrl } from "./media-url";
 import { resolveVideoThumbnail } from "./thumbnail-service";
 import { isPubliclyCacheableVideo, resolveStoredVideoVisibility } from "./video-service";
+import { computeChannelInitials } from "./channel-branding";
 
 function checkAdPromotionActive(item: {
   isPromoted?: boolean | number | null | undefined;
@@ -46,7 +47,7 @@ export function mapApiVideoToCatalogVideo(v: Record<string, any>): Video {
     channelName,
     channelLogoUrl,
     channel_logo_url: channelLogoUrl,
-    initials: channelName.slice(0, 2).toUpperCase(),
+    initials: computeChannelInitials(channelName, "FT"),
     views: `${(Number(v["views"]) || 0).toLocaleString()} views`,
     age: parsedAge,
     duration: v["duration"] || "0:00",
@@ -94,11 +95,25 @@ export function findPublicCachedVideo(id: string): Video | undefined {
         ).toLocaleDateString()
       : "Recently uploaded";
 
+    const channelName =
+      match.channelName ||
+      match.channel_name ||
+      match.creatorName ||
+      match.creator_name ||
+      "FaceTube Creator";
+    const rawChannelLogo = match.channelLogoUrl || match.channel_logo_url || "";
+    const channelLogoUrl = rawChannelLogo
+      ? resolveMediaUrl(rawChannelLogo) || undefined
+      : undefined;
+
     return {
       id: match.id,
       title: match.title,
-      channel: match.creatorName || match.creator_name || "FaceTube Creator",
-      initials: (match.creatorName || match.creator_name || "FC").slice(0, 2).toUpperCase(),
+      channel: channelName,
+      channelName,
+      channelLogoUrl,
+      channel_logo_url: channelLogoUrl,
+      initials: computeChannelInitials(channelName, "FC"),
       views: `${(Number(match.views) || 0).toLocaleString()} views`,
       age: parsedAge,
       duration: match.duration || "0:00",
@@ -113,6 +128,7 @@ export function findPublicCachedVideo(id: string): Video | undefined {
       contentType: match.contentType || match.content_type || "long",
       isPromoted: checkAdPromotionActive(match),
       visibility: resolveStoredVideoVisibility(match.visibility),
+      userId: String(match.userId || match.user_id || ""),
     };
   } catch {
     return undefined;
