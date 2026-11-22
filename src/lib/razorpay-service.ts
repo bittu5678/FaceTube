@@ -3,8 +3,11 @@ import { distributePremiumVideoIncome } from "./ledger-service";
 import {
   recordNewVideoUpload,
   markVideoPromoted,
+  normalizeVideoVisibility,
   type VideoType,
   type ContentType,
+  type VideoVisibility,
+  type UploadedVideo,
 } from "./video-service";
 
 declare global {
@@ -175,9 +178,10 @@ export interface InitiatePremiumVideoPaymentParams {
   videoId?: string;
   videoType?: VideoType;
   contentType: ContentType; // "short" | "long"
+  visibility?: VideoVisibility;
   directReferrerId?: string | null;
   onStageChange?: (stage: RazorpayCheckoutStage) => void;
-  onSuccess: (paymentIdOrVideo: unknown) => void;
+  onSuccess: (paymentIdOrVideo: unknown, createdVideo?: UploadedVideo) => void;
   onFailure: (errorMsg: string) => void;
   onCancel?: () => void;
 }
@@ -318,6 +322,7 @@ export async function initiatePremiumVideoPayment(
           paymentStatus: "paid",
           paymentId,
           paymentAmount: 6,
+          visibility: normalizeVideoVisibility(params.visibility, "public"),
         });
 
         // 4. Update local ledger cache if not a duplicate
@@ -342,7 +347,7 @@ export async function initiatePremiumVideoPayment(
         }
 
         activeCheckoutLock = false;
-        params.onSuccess(paymentId);
+        params.onSuccess(paymentId, newVideo);
       } catch (err: any) {
         console.error("Error finalizing premium payment:", err);
         activeCheckoutLock = false;

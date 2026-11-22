@@ -12,6 +12,7 @@ export type VideoType = "free" | "premium";
 export type ContentType = "short" | "long";
 export type VideoPaymentStatus = "not_required" | "pending" | "paid" | "failed";
 export type VideoPromotionStatus = "none" | "active" | "expired";
+export type VideoVisibility = "public" | "unlisted" | "private";
 
 export const VIDEO_CATEGORIES = [
   "Cartoon",
@@ -79,9 +80,10 @@ export interface UploadedVideo {
   paymentId?: string | undefined;
   paymentAmount: number; // e.g. 0 for free, 6 for premium
   isPromoted: boolean;
+  isBlocked?: boolean | undefined;
   promotionPlan?: string | undefined;
   promotionExpiresAt?: string | undefined;
-  visibility?: "public" | "unlisted" | "private";
+  visibility?: VideoVisibility | undefined;
   createdAt: string;
   updatedAt: string;
   isStale?: boolean | undefined;
@@ -98,6 +100,245 @@ export interface VideoCategoryCounts {
 }
 
 const LOCAL_STORAGE_VIDEOS_KEY = "facetube_uploaded_videos_v3";
+const OWNER_VIDEO_CACHE_PREFIX = "facetube_owner_videos_v1:";
+const OWNER_VIDEO_CACHE_INDEX_KEY = "facetube_owner_cache_users_v1";
+const SESSION_STORAGE_KEY = "facetube_session_v2";
+const AUTH_TOKEN_STORAGE_KEY = "facetube_auth_token";
+
+export function normalizeVideoVisibility(
+  value: unknown,
+  fallback: VideoVisibility = "public",
+): VideoVisibility {
+  if (typeof value === "string") {
+    const clean = value.trim().toLowerCase();
+    if (clean === "public" || clean === "unlisted" || clean === "private") {
+      return clean;
+    }
+  }
+  return fallback;
+}
+
+export function resolveInitialVideoVisibility(
+  existing?: { visibility?: unknown } | null,
+): VideoVisibility {
+  return normalizeVideoVisibility(existing?.visibility, "public");
+}
+
+export function isPubliclyCacheableVideo(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const rec = v as Record<string, unknown>;
+  const rawVis = typeof rec["visibility"] === "string" ? rec["visibility"].trim().toLowerCase() : "";
+  if (rawVis !== "" && rawVis !== "public") {
+    return false;
+  }
+  if (Boolean(rec["isBlocked"] ?? rec["is_blocked"])) {
+    return false;
+  }
+  const vType = String(rec["videoType"] ?? rec["video_type"] ?? "free")
+    .trim()
+    .toLowerCase();
+  const pStatus = String(rec["paymentStatus"] ?? rec["payment_status"] ?? "not_required")
+    .trim()
+    .toLowerCase();
+  if (vType === "premium") {
+    return pStatus === "paid" || pStatus === "not_required";
+  }
+  return pStatus === "" || pStatus === "not_required" || pStatus === "paid";
+}
+
+function sanitizeCachedVideo(v: UploadedVideo): UploadedVideo {
+  const rec = v as unknown as Record<string, unknown>;
+  const clean: UploadedVideo = {
+    id: String(v.id),
+    userId: String(v.userId || rec["user_id"] || ""),
+    creatorName: String(v.creatorName || rec["creator_name"] || "FaceTube Creator"),
+    ...(v.channelName ? { channelName: String(v.channelName) } : {}),
+    ...(v.channelLogoUrl ? { channelLogoUrl: String(v.channelLogoUrl) } : {}),
+    title: String(v.title || "Untitled Video"),
+    description: String(v.description || ""),
+    videoUrl: String(v.videoUrl || rec["video_url"] || ""),
+    thumbnailUrl: String(v.thumbnailUrl || rec["thumbnail_url"] || ""),
+    videoType: (v.videoType || rec["video_type"] || "free") as VideoType,
+    contentType: (v.contentType || rec["content_type"] || "long") as ContentType,
+    category: String(v.category || "General"),
+    duration: String(v.duration || "0:00"),
+    views: Number(v.views) || 0,
+    likes: Number(v.likes) || 0,
+    paymentStatus: (v.paymentStatus || rec["payment_status"] || "not_required") as VideoPaymentStatus,
+    ...(v.paymentId ? { paymentId: String(v.paymentId) } : {}),
+    paymentAmount: Number(v.paymentAmount ?? rec["payment_amount"]) || 0,
+    isPromoted: Boolean(v.isPromoted ?? rec["is_promoted"]),
+    ...(Boolean(v.isBlocked ?? rec["is_blocked"]) ? { isBlocked: true } : {}),
+    ...(v.promotionPlan ? { promotionPlan: String(v.promotionPlan) } : {}),
+    ...(v.promotionExpiresAt ? { promotionExpiresAt: String(v.promotionExpiresAt) } : {}),
+    ...(v.visibility ? { visibility: normalizeVideoVisibility(v.visibility, "public") } : {}),
+    createdAt: String(v.createdAt || new Date().toISOString()),
+    updatedAt: String(v.updatedAt || v.createdAt || new Date().toISOString()),
+  };
+  return clean;
+}
+
+function getCurrentAuthenticatedCacheIdentity(): { userId: string; isAdmin: boolean } | null {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return null;
+  }
+  try {
+    const rawSession = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!rawSession) return null;
+    const parsed = JSON.parse(rawSession) as {
+      user?: { user_id?: string; user_metadata?: { user_id?: string } };
+      profile?: { user_id?: string };
+      dbUser?: { user_id?: string; role?: string };
+      role?: string;
+      token?: string;
+    } | null;
+    if (!parsed) return null;
+    const tokenRaw =
+      localStorage.getItem(AUTH_TOKEN_STORAGE_KEY) ||
+      (typeof parsed.token === "string" ? parsed.token : "");
+    const token = tokenRaw ? tokenRaw.trim() : "";
+    if (!token || token === "null" || token === "undefined") {
+      return null;
+    }
+    const uid =
+      parsed.profile?.user_id ||
+      parsed.dbUser?.user_id ||
+      parsed.user?.user_id ||
+      parsed.user?.user_metadata?.user_id ||
+      "";
+    const normUid = typeof uid === "string" ? uid.trim().toUpperCase() : "";
+    if (!normUid) return null;
+    const isAdmin =
+      String(parsed.role || parsed.dbUser?.role || "")
+        .trim()
+        .toLowerCase() === "admin";
+    return { userId: normUid, isAdmin };
+  } catch {
+    return null;
+  }
+}
+
+export function getOwnerVideoCacheKey(userId: string): string {
+  return `${OWNER_VIDEO_CACHE_PREFIX}${userId.trim().toUpperCase()}`;
+}
+
+function getTrackedOwnerCacheUserIds(): string[] {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return [];
+  const tracked = new Set<string>();
+  try {
+    const indexRaw = localStorage.getItem(OWNER_VIDEO_CACHE_INDEX_KEY);
+    if (indexRaw) {
+      const arr = JSON.parse(indexRaw);
+      if (Array.isArray(arr)) {
+        for (const uid of arr) {
+          if (typeof uid === "string" && uid.trim()) {
+            tracked.add(uid.trim().toUpperCase());
+          }
+        }
+      }
+    }
+    if (typeof localStorage.length === "number" && typeof localStorage.key === "function") {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith(OWNER_VIDEO_CACHE_PREFIX)) {
+          const uid = k.slice(OWNER_VIDEO_CACHE_PREFIX.length).trim().toUpperCase();
+          if (uid) tracked.add(uid);
+        }
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return Array.from(tracked);
+}
+
+function trackOwnerCacheUserId(userId: string): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+  const norm = userId.trim().toUpperCase();
+  if (!norm) return;
+  try {
+    const existing = new Set(getTrackedOwnerCacheUserIds());
+    existing.add(norm);
+    localStorage.setItem(OWNER_VIDEO_CACHE_INDEX_KEY, JSON.stringify(Array.from(existing)));
+  } catch {
+    // ignore
+  }
+}
+
+export function getOwnerStoredVideos(userId: string): UploadedVideo[] | null {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return null;
+  const norm = userId.trim().toUpperCase();
+  if (!norm) return null;
+  const session = getCurrentAuthenticatedCacheIdentity();
+  if (!session || (session.userId !== norm && !session.isAdmin)) {
+    return null;
+  }
+  try {
+    const raw = localStorage.getItem(getOwnerVideoCacheKey(norm));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed.map((v) => sanitizeCachedVideo(v as UploadedVideo));
+  } catch {
+    return null;
+  }
+}
+
+export function saveOwnerStoredVideos(userId: string, videos: UploadedVideo[]): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+  const norm = userId.trim().toUpperCase();
+  if (!norm) return;
+  const session = getCurrentAuthenticatedCacheIdentity();
+  if (!session || (session.userId !== norm && !session.isAdmin)) {
+    return;
+  }
+  try {
+    const sanitized = videos.map((v) => sanitizeCachedVideo(v));
+    localStorage.setItem(getOwnerVideoCacheKey(norm), JSON.stringify(sanitized));
+    trackOwnerCacheUserId(norm);
+  } catch {
+    // quota error
+  }
+}
+
+/**
+ * Removes protected owner-scoped video caches on logout or user switch,
+ * and sanitizes the public cache so only harmless public eligible videos remain.
+ */
+export function clearProtectedVideoCaches(options?: { keepUserId?: string | null }): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+  const keepNorm = options?.keepUserId ? options.keepUserId.trim().toUpperCase() : "";
+  try {
+    const trackedUsers = getTrackedOwnerCacheUserIds();
+    const remainingTracked: string[] = [];
+    for (const uid of trackedUsers) {
+      if (keepNorm && uid === keepNorm) {
+        remainingTracked.push(uid);
+      } else {
+        localStorage.removeItem(getOwnerVideoCacheKey(uid));
+      }
+    }
+    if (remainingTracked.length > 0) {
+      localStorage.setItem(OWNER_VIDEO_CACHE_INDEX_KEY, JSON.stringify(remainingTracked));
+    } else {
+      localStorage.removeItem(OWNER_VIDEO_CACHE_INDEX_KEY);
+    }
+
+    // Sanitize shared public cache without discarding harmless public videos
+    const publicRaw = localStorage.getItem(LOCAL_STORAGE_VIDEOS_KEY);
+    if (publicRaw) {
+      const parsed = JSON.parse(publicRaw);
+      if (Array.isArray(parsed)) {
+        const sanitizedPublic = parsed
+          .filter(isPubliclyCacheableVideo)
+          .map((v) => sanitizeCachedVideo(v as UploadedVideo));
+        localStorage.setItem(LOCAL_STORAGE_VIDEOS_KEY, JSON.stringify(sanitizedPublic));
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
 
 // Initial seed videos reflecting real user accounts and the four required video classifications
 export const INITIAL_SEED_VIDEOS: UploadedVideo[] = [
@@ -290,29 +531,34 @@ export const INITIAL_SEED_VIDEOS: UploadedVideo[] = [
 ];
 
 /**
- * Loads uploaded videos from database or local store
+ * Loads public uploaded videos from local cache (strictly excluding private, unlisted,
+ * blocked, and unpaid Sponsor videos).
  */
 export function getStoredVideos(): UploadedVideo[] {
-  if (typeof window === "undefined") return INITIAL_SEED_VIDEOS;
+  const publicSeed = INITIAL_SEED_VIDEOS.filter(isPubliclyCacheableVideo);
+  if (typeof window === "undefined") return publicSeed;
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_VIDEOS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+      if (Array.isArray(parsed)) {
+        return parsed.filter(isPubliclyCacheableVideo).map((v) => sanitizeCachedVideo(v as UploadedVideo));
       }
     }
-    localStorage.setItem(LOCAL_STORAGE_VIDEOS_KEY, JSON.stringify(INITIAL_SEED_VIDEOS));
-    return INITIAL_SEED_VIDEOS;
+    localStorage.setItem(LOCAL_STORAGE_VIDEOS_KEY, JSON.stringify(publicSeed));
+    return publicSeed;
   } catch (_e) {
-    return INITIAL_SEED_VIDEOS;
+    return publicSeed;
   }
 }
 
 export function saveStoredVideos(videos: UploadedVideo[]): void {
   if (typeof window === "undefined") return;
   try {
-    localStorage.setItem(LOCAL_STORAGE_VIDEOS_KEY, JSON.stringify(videos));
+    const publicOnly = videos
+      .filter(isPubliclyCacheableVideo)
+      .map((v) => sanitizeCachedVideo(v));
+    localStorage.setItem(LOCAL_STORAGE_VIDEOS_KEY, JSON.stringify(publicOnly));
   } catch (_e) {
     // quota error
   }
@@ -410,23 +656,25 @@ export async function fetchUploadedVideos(
           paymentId: d.payment_id || d.paymentId,
           paymentAmount: Number(d.payment_amount || d.paymentAmount) || 0,
           isPromoted: active,
+          isBlocked: Boolean(d.is_blocked ?? d.isBlocked),
           promotionPlan: d.promotion_plan || d.promotionPlan,
           promotionExpiresAt: d.promotion_expires_at || d.promotionExpiresAt,
+          visibility: normalizeVideoVisibility(d.visibility, "public"),
           createdAt: d.created_at || d.createdAt || new Date().toISOString(),
           updatedAt: d.updated_at || d.updatedAt || d.created_at || new Date().toISOString(),
           isStale: false,
         };
       });
 
-      // Cache into local storage
-      if (
-        mapped.length > 0 &&
-        !opts.videoType &&
-        !opts.contentType &&
-        !opts.category &&
-        !opts.search
-      ) {
-        saveStoredVideos(mapped);
+      // Partition cache cleanly:
+      // - Public discovery (no userId filter): cache ONLY publicly eligible videos in global cache
+      // - Owner-scoped queries: NEVER overwrite global public cache; cache only in owner partition
+      if (!opts.videoType && !opts.contentType && !opts.category && !opts.search) {
+        if (opts.userId) {
+          saveOwnerStoredVideos(opts.userId, mapped);
+        } else if (mapped.length > 0) {
+          saveStoredVideos(mapped);
+        }
       }
 
       return mapped;
@@ -435,12 +683,22 @@ export async function fetchUploadedVideos(
     console.warn("fetchUploadedVideos API warning, reading local cache:", err);
   }
 
-  // Fallback to local stored videos cache, explicitly tagged as stale/offline
-  let all = getStoredVideos().map((v) => ({ ...v, isStale: true }));
+  // Fallback to partitioned local stored videos cache, explicitly tagged as stale/offline
+  let all: UploadedVideo[] = [];
   if (opts.userId) {
-    const norm = opts.userId.trim().toUpperCase();
-    all = all.filter((v) => v.userId.trim().toUpperCase() === norm);
+    const ownerCached = getOwnerStoredVideos(opts.userId);
+    if (ownerCached) {
+      all = ownerCached.map((v) => ({ ...v, isStale: true }));
+    } else {
+      const norm = opts.userId.trim().toUpperCase();
+      all = getStoredVideos()
+        .filter((v) => v.userId.trim().toUpperCase() === norm)
+        .map((v) => ({ ...v, isStale: true }));
+    }
+  } else {
+    all = getStoredVideos().map((v) => ({ ...v, isStale: true }));
   }
+
   if (opts.videoType) {
     all = all.filter((v) => v.videoType === opts.videoType);
   }
@@ -557,6 +815,17 @@ export async function recordNewVideoUpload(params: {
     category: resolvedCategory,
   });
 
+  let fallbackVisibility: VideoVisibility = "public";
+  if (params.id && params.visibility === undefined) {
+    const existingOwner = getOwnerStoredVideos(params.userId)?.find((v) => v.id === params.id);
+    const existingPublic = getStoredVideos().find((v) => v.id === params.id);
+    fallbackVisibility = resolveInitialVideoVisibility(existingOwner || existingPublic);
+  }
+  const resolvedVisibility: VideoVisibility = normalizeVideoVisibility(
+    params.visibility,
+    fallbackVisibility,
+  );
+
   const newVideo: UploadedVideo = {
     id: videoId,
     userId: params.userId,
@@ -575,7 +844,7 @@ export async function recordNewVideoUpload(params: {
     ...(params.paymentId ? { paymentId: params.paymentId } : {}),
     paymentAmount: isPremium ? (params.paymentAmount ?? 6) : 0,
     isPromoted: false,
-    visibility: params.visibility || "public",
+    visibility: resolvedVisibility,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -606,17 +875,45 @@ export async function recordNewVideoUpload(params: {
     );
   }
 
-  // 2. Cache newly confirmed video in local store for rapid UI transitions
-  const all = getStoredVideos();
-  const exists = all.some(
-    (v) => v.id === newVideo.id || (newVideo.paymentId && v.paymentId === newVideo.paymentId),
-  );
-  if (!exists) {
-    const updated = [newVideo, ...all];
-    saveStoredVideos(updated);
+  const serverVideo = apiRes.video as Record<string, any> | undefined;
+  const confirmedVideo: UploadedVideo = serverVideo
+    ? {
+        ...newVideo,
+        id: String(serverVideo["id"] || newVideo.id),
+        userId: String(serverVideo["user_id"] || serverVideo["userId"] || newVideo.userId),
+        paymentStatus: (serverVideo["payment_status"] ||
+          serverVideo["paymentStatus"] ||
+          newVideo.paymentStatus) as VideoPaymentStatus,
+        paymentAmount: Number(
+          serverVideo["payment_amount"] ?? serverVideo["paymentAmount"] ?? newVideo.paymentAmount,
+        ),
+        visibility: normalizeVideoVisibility(serverVideo["visibility"], resolvedVisibility),
+        isPromoted: Boolean(serverVideo["is_promoted"] ?? serverVideo["isPromoted"] ?? false),
+        isBlocked: Boolean(serverVideo["is_blocked"] ?? serverVideo["isBlocked"] ?? false),
+      }
+    : newVideo;
+
+  // 2. Partitioned caching:
+  // - Only publicly eligible videos enter the shared public cache (never private/unlisted/pending!)
+  // - Non-public videos remain isolated in the owner's partition only
+  const publicAll = getStoredVideos();
+  if (isPubliclyCacheableVideo(confirmedVideo)) {
+    const filteredPublic = publicAll.filter((v) => v.id !== confirmedVideo.id);
+    saveStoredVideos([confirmedVideo, ...filteredPublic]);
+  } else if (publicAll.some((v) => v.id === confirmedVideo.id)) {
+    // If an updated video became private/unlisted/blocked, remove it from public cache
+    saveStoredVideos(publicAll.filter((v) => v.id !== confirmedVideo.id));
   }
 
-  return newVideo;
+  const existingOwnerCache = getOwnerStoredVideos(confirmedVideo.userId);
+  if (existingOwnerCache) {
+    const filteredOwner = existingOwnerCache.filter((v) => v.id !== confirmedVideo.id);
+    saveOwnerStoredVideos(confirmedVideo.userId, [confirmedVideo, ...filteredOwner]);
+  } else {
+    saveOwnerStoredVideos(confirmedVideo.userId, [confirmedVideo]);
+  }
+
+  return confirmedVideo;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -873,6 +1170,22 @@ export async function markVideoPromoted(params: {
     }
   }
 
+  const session = getCurrentAuthenticatedCacheIdentity();
+  if (session) {
+    const ownerVideos = getOwnerStoredVideos(session.userId);
+    if (ownerVideos) {
+      const ownerIdx = ownerVideos.findIndex((v) => v.id === params.videoId);
+      const ownerVideo = ownerIdx !== -1 ? ownerVideos[ownerIdx] : undefined;
+      if (ownerVideo) {
+        ownerVideo.isPromoted = true;
+        ownerVideo.promotionPlan = params.planId;
+        ownerVideo.promotionExpiresAt = expiresAt;
+        ownerVideo.updatedAt = new Date().toISOString();
+        saveOwnerStoredVideos(session.userId, ownerVideos);
+      }
+    }
+  }
+
   return true;
 }
 
@@ -917,6 +1230,7 @@ export function convertUploadedToCatalogVideo(v: UploadedVideo): Video {
       (isShortVideo({ contentType: v.contentType, duration: v.duration }) ? "short" : "long"),
     isPromoted: isPromotionActive(v),
     userId: v.userId || (v as any).user_id || "FT483921",
+    ...(v.visibility ? { visibility: normalizeVideoVisibility(v.visibility, "public") } : {}),
   };
 }
 

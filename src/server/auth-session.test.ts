@@ -2224,13 +2224,14 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
         );
         assert.equal(loginNoPoolRes.status, 503);
 
-        // Even a store-reading route must not crash, must not seed demo videos, and must not touch disk
+        // Counts route must fail closed with 503 in production without MySQL pool and must not touch disk
         const countsRes = await handleApiRequest(
           new Request("https://facetube.online/api/videos/counts", { method: "GET" }),
         );
-        assert.equal(countsRes?.status, 200);
+        assert.equal(countsRes?.status, 503);
         const countsData = (await countsRes!.json()) as any;
-        assert.equal(countsData.counts?.totalUploaded, 0);
+        assert.equal(countsData.success, false);
+        assert.equal(countsData.counts, undefined);
 
         // With healthy MySQL pool returning empty rows: no demo videos/users leaked, no disk touch
         process.env["DB_HOST"] = "127.0.0.1";
@@ -2351,9 +2352,10 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
         const countsRes = await handleApiRequest(
           new Request("http://localhost:3000/api/videos/counts", { method: "GET" }),
         );
-        assert.equal(countsRes?.status, 200);
+        assert.equal(countsRes?.status, 503);
         const countsData = (await countsRes!.json()) as any;
-        assert.equal(countsData.counts?.totalUploaded, 0);
+        assert.equal(countsData.success, false);
+        assert.equal(countsData.counts, undefined);
 
         assert.deepEqual(spy.ops, { existsChecks: 0, statChecks: 0, reads: 0, writes: 0 });
       } finally {
@@ -2384,12 +2386,13 @@ describe("Priority 1: Persistent Login Robustness & Password Reset Link Tests", 
         const countsRes = await handleApiRequest(
           new Request("https://facetube.online/api/videos/counts", { method: "GET" }),
         );
-        assert.equal(countsRes?.status, 200);
+        assert.equal(countsRes?.status, 503);
         const countsData = (await countsRes!.json()) as any;
+        assert.equal(countsData.success, false);
         assert.equal(
-          countsData.counts?.totalUploaded,
-          0,
-          "Production must not leak cached demo videos",
+          countsData.counts,
+          undefined,
+          "Production must not leak cached demo videos via counts",
         );
 
         const loginRes = await handleApiRequest(

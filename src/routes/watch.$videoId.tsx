@@ -21,10 +21,10 @@ import { VideoCard } from "@/components/videohub/VideoCard";
 import { ImageCard } from "@/components/videohub/ImageCard";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { FaceTubeVideoPlayer } from "@/components/videohub/FaceTubeVideoPlayer";
-import { allVideos, findVideo, findVideoAsync, type Video } from "@/data/videos";
+import { allVideos, findVideoAsync, resolveWatchVideo, type Video } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
 import { buildVideoSharePayload, persistPendingReferral } from "@/lib/referral-service";
-import { api } from "@/lib/api";
+import { api, getStoredAuthToken } from "@/lib/api";
 import {
   fetchUploadedVideos,
   convertUploadedToCatalogVideo,
@@ -42,12 +42,25 @@ import { AdMobBanner } from "@/components/admob/AdMobBanner";
 
 export const Route = createFileRoute("/watch/$videoId")({
   loader: async ({ params }) => {
-    const video = await findVideoAsync(params.videoId);
-    if (!video) throw notFound();
-    return { video };
+    const resolution = await resolveWatchVideo(params.videoId);
+    if (resolution.status === "ok") {
+      return {
+        video: resolution.video,
+        needsClientAuth: false,
+        videoId: params.videoId,
+      };
+    }
+    if (resolution.status === "needs_client_auth") {
+      return {
+        video: null as Video | null,
+        needsClientAuth: true,
+        videoId: params.videoId,
+      };
+    }
+    throw notFound();
   },
   head: ({ loaderData }) => {
-    if (!loaderData) {
+    if (!loaderData || !loaderData.video) {
       return {
         meta: [{ title: "Video unavailable — FaceTube" }, { name: "robots", content: "noindex" }],
       };
@@ -87,10 +100,58 @@ function WatchNotFound() {
 }
 
 function WatchPage() {
-  const { video } = Route.useLoaderData();
-  const watchLabels = getVideoBadgeLabels(video);
+  const { video: initialVideo, needsClientAuth, videoId } = Route.useLoaderData();
+  const [video, setVideo] = useState<Video | null>(initialVideo);
+  const [verifyingAccess, setVerifyingAccess] = useState<boolean>(() =>
+    Boolean(needsClientAuth && !initialVideo),
+  );
+  const [accessDenied, setAccessDenied] = useState<boolean>(false);
+
   const router = useRouter();
   const { user, profile } = useAuth();
+
+  useEffect(() => {
+    setVideo(initialVideo);
+    setAccessDenied(false);
+
+    if (!needsClientAuth || initialVideo) {
+      setVerifyingAccess(false);
+      return;
+    }
+
+    const token = getStoredAuthToken();
+    if (!token) {
+      setVerifyingAccess(false);
+      setAccessDenied(true);
+      return;
+    }
+
+    let active = true;
+    setVerifyingAccess(true);
+    findVideoAsync(videoId)
+      .then((authorizedVideo) => {
+        if (!active) return;
+        if (authorizedVideo) {
+          setVideo(authorizedVideo);
+          setAccessDenied(false);
+        } else {
+          setVideo(null);
+          setAccessDenied(true);
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setVideo(null);
+        setAccessDenied(true);
+      })
+      .finally(() => {
+        if (active) setVerifyingAccess(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [videoId, initialVideo, needsClientAuth]);
 
   const handleBack = (e?: React.MouseEvent) => {
     if (e) {
@@ -111,10 +172,11 @@ function WatchPage() {
     }
   };
 
-  const creatorUserId =
-    (video as any).userId ||
-    (video as any).user_id ||
-    (video.channel ? video.channel.toLowerCase().replace(/\s+/g, "_") : "FT483921");
+  const creatorUserId = video
+    ? (video as any).userId ||
+      (video as any).user_id ||
+      (video.channel ? video.channel.toLowerCase().replace(/\s+/g, "_") : "FT483921")
+    : "";
 
   const [subscribed, setSubscribed] = useState(false);
   const [subscriberCount, setSubscriberCount] = useState<number | null>(null);
@@ -122,6 +184,7 @@ function WatchPage() {
   const [isSelfChannel, setIsSelfChannel] = useState(false);
 
   useEffect(() => {
+    if (!video || !creatorUserId) return;
     let mounted = true;
     api.channel
       .getStatus(creatorUserId)
@@ -136,9 +199,10 @@ function WatchPage() {
     return () => {
       mounted = false;
     };
-  }, [creatorUserId]);
+  }, [video, creatorUserId]);
 
   const handleToggleSubscribe = async () => {
+    if (!video) return;
     if (isSelfChannel) {
       toast.error("You cannot subscribe to your own channel.");
       return;
@@ -207,6 +271,7 @@ function WatchPage() {
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
 
   useEffect(() => {
+    if (!video) return;
     fetchUploadedVideos()
       .then((vids) => {
         if (vids && vids.length > 0) setUploadedVideos(vids);
@@ -218,7 +283,24 @@ function WatchPage() {
         if (imgs && imgs.length > 0) setUploadedImages(imgs);
       })
       .catch((err) => console.error("Error loading images for related feed:", err));
-  }, []);
+  }, [video]);
+
+  if (verifyingAccess) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-background px-6 text-center font-sans">
+        <div className="space-y-3">
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-brand border-t-transparent" />
+          <p className="text-sm font-medium text-muted-foreground">Verifying video access...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!video || accessDenied) {
+    return <WatchNotFound />;
+  }
+
+  const watchLabels = getVideoBadgeLabels(video);
 
   const allAvailableVideos: Video[] = [
     ...uploadedVideos.map(convertUploadedToCatalogVideo),

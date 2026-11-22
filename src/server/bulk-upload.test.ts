@@ -259,9 +259,42 @@ describe("Task 10: Bulk Video Upload Verification & Integration Tests", () => {
       assert.equal(data.video.videoType || data.video.video_type, "free");
     });
 
-    it("verifies both bulk uploaded videos appear in the video feed via /api/videos/list", async () => {
+    it("verifies both bulk uploaded videos appear in the owner video feed via /api/videos/list while unlisted is excluded from public list", async () => {
+      // Unauthenticated public list must return public shortVidId and exclude unlisted longVidId
+      const publicRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/list?userId=FT483921", {
+          method: "GET",
+        }),
+      );
+      assert.ok(publicRes);
+      assert.equal(publicRes.status, 200);
+      const publicData = await publicRes.json();
+      assert.equal(publicData.success, true);
+      assert.ok(
+        publicData.videos.find((v: any) => v.id === shortVidId),
+        "Public bulk uploaded short video must appear in public list",
+      );
+      assert.equal(
+        publicData.videos.find((v: any) => v.id === longVidId),
+        undefined,
+        "Unlisted bulk uploaded long video must be excluded from public list",
+      );
+
+      // Direct videos/get by ID must still allow unauthenticated access to unlisted video
+      const directUnlistedRes = await handleApiRequest(
+        new Request(`http://localhost:3000/api/videos/get?id=${longVidId}`, {
+          method: "GET",
+        }),
+      );
+      assert.ok(directUnlistedRes);
+      assert.equal(directUnlistedRes.status, 200);
+
+      // Authenticated owner dashboard list must include both public and unlisted videos
       const req = new Request("http://localhost:3000/api/videos/list?userId=FT483921", {
         method: "GET",
+        headers: {
+          Authorization: `Bearer ${userToken}`,
+        },
       });
       const res = await handleApiRequest(req);
       assert.ok(res);
@@ -272,11 +305,11 @@ describe("Task 10: Bulk Video Upload Verification & Integration Tests", () => {
       assert.ok(Array.isArray(data.videos), "Must return videos array");
 
       const foundShort = data.videos.find((v: any) => v.id === shortVidId);
-      assert.ok(foundShort, "Bulk uploaded short video must be found in catalog");
+      assert.ok(foundShort, "Bulk uploaded short video must be found in owner catalog");
       assert.equal(foundShort.content_type || foundShort.contentType, "short");
 
       const foundLong = data.videos.find((v: any) => v.id === longVidId);
-      assert.ok(foundLong, "Bulk uploaded long video must be found in catalog");
+      assert.ok(foundLong, "Bulk uploaded long video must be found in owner catalog");
       assert.equal(foundLong.content_type || foundLong.contentType, "long");
     });
   });

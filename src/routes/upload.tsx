@@ -44,8 +44,10 @@ import {
   validateVideoFileForUpload,
   uploadSingleBulkVideoItem,
   getAvailableCategories,
+  normalizeVideoVisibility,
   type VideoType,
   type ContentType,
+  type VideoVisibility,
   type UploadedVideo,
   VIDEO_CATEGORIES,
 } from "@/lib/video-service";
@@ -797,6 +799,7 @@ export function BulkVideoUploadView({
       if (item.videoType === "premium") {
         setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 85 } : it)));
         let paymentId: string | undefined;
+        let serverCreatedVideo: UploadedVideo | undefined;
         await new Promise<void>((resolve, reject) => {
           initiatePremiumVideoPayment({
             userId,
@@ -806,12 +809,16 @@ export function BulkVideoUploadView({
             videoUrl: uploadRes.url,
             thumbnailUrl: posterUrl,
             contentType: item.contentType,
+            visibility: normalizeVideoVisibility(item.visibility, "public"),
             category: item.category,
             duration: item.detectedDuration || (item.contentType === "short" ? "0:45" : "12:30"),
             directReferrerId: profile?.referral_code || dbUser?.referral_code || null,
-            onSuccess: (res: unknown) => {
+            onSuccess: (res: unknown, createdVideo?: UploadedVideo) => {
               if (typeof res === "string") {
                 paymentId = res;
+              }
+              if (createdVideo) {
+                serverCreatedVideo = createdVideo;
               }
               resolve();
             },
@@ -820,7 +827,7 @@ export function BulkVideoUploadView({
           });
         });
 
-        published = {
+        published = serverCreatedVideo ?? {
           id: `vid-${Date.now()}`,
           userId,
           creatorName,
@@ -838,7 +845,7 @@ export function BulkVideoUploadView({
           ...(paymentId !== undefined ? { paymentId } : {}),
           paymentAmount: 6,
           isPromoted: false,
-          visibility: item.visibility,
+          visibility: normalizeVideoVisibility(item.visibility, "public"),
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         };
@@ -1446,11 +1453,12 @@ export function BulkVideoUploadView({
                   {/* Visibility Selector */}
                   <div>
                     <select
+                      aria-label="Video visibility"
                       value={item.visibility}
                       disabled={item.status === "uploading" || item.status === "success"}
                       onChange={(e) =>
                         updateItem(item.id, {
-                          visibility: e.target.value as "public" | "unlisted" | "private",
+                          visibility: normalizeVideoVisibility(e.target.value, "public"),
                         })
                       }
                       className="w-full rounded-xl border border-border bg-secondary/30 px-3 py-2 text-xs text-foreground focus:border-sky-500 focus:outline-none disabled:opacity-60"
@@ -1596,6 +1604,7 @@ function FreeVideoUploadView({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<string>("Coding");
+  const [visibility, setVisibility] = useState<VideoVisibility>("public");
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [capturedThumbnail, setCapturedThumbnail] = useState<string>("");
@@ -1801,6 +1810,7 @@ function FreeVideoUploadView({
         duration: detectedDuration || (format === "short" ? "0:45" : "14:20"),
         paymentStatus: "not_required",
         paymentAmount: 0,
+        visibility,
       });
 
       setPublishedVideo(newVideo);
@@ -1868,6 +1878,7 @@ function FreeVideoUploadView({
             onClick={() => {
               setTitle("");
               setDescription("");
+              setVisibility("public");
               setVideoFile(null);
               setPreviewUrl("");
               setCapturedThumbnail("");
@@ -2062,6 +2073,25 @@ function FreeVideoUploadView({
           </div>
 
           <div>
+            <label
+              htmlFor="free-video-visibility"
+              className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5"
+            >
+              Video Visibility <span className="text-brand">*</span>
+            </label>
+            <select
+              id="free-video-visibility"
+              value={visibility}
+              onChange={(e) => setVisibility(normalizeVideoVisibility(e.target.value, "public"))}
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-sky-500 focus:outline-none"
+            >
+              <option value="public">Public (Visible in feeds &amp; search)</option>
+              <option value="unlisted">Unlisted (Anyone with the link)</option>
+              <option value="private">Private (Only you)</option>
+            </select>
+          </div>
+
+          <div>
             <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
               Description
             </label>
@@ -2174,6 +2204,7 @@ function PremiumVideoUploadView({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [category, setCategory] = useState<string>("Coding");
+  const [visibility, setVisibility] = useState<VideoVisibility>("public");
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [capturedThumbnail, setCapturedThumbnail] = useState<string>("");
@@ -2376,6 +2407,7 @@ function PremiumVideoUploadView({
         thumbnailUrl: posterUrl,
         category,
         contentType: format,
+        visibility,
         duration: detectedDuration || (format === "short" ? "0:45" : "14:20"),
         ...(referrerId ? { directReferrerId: referrerId } : {}),
         onStageChange: (stage) => {
@@ -2451,6 +2483,7 @@ function PremiumVideoUploadView({
             onClick={() => {
               setTitle("");
               setDescription("");
+              setVisibility("public");
               setVideoFile(null);
               setPreviewUrl("");
               setCapturedThumbnail("");
@@ -2621,6 +2654,25 @@ function PremiumVideoUploadView({
                   {cat}
                 </option>
               ))}
+            </select>
+          </div>
+
+          <div>
+            <label
+              htmlFor="sponsor-video-visibility"
+              className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5"
+            >
+              Video Visibility <span className="text-brand">*</span>
+            </label>
+            <select
+              id="sponsor-video-visibility"
+              value={visibility}
+              onChange={(e) => setVisibility(normalizeVideoVisibility(e.target.value, "public"))}
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-pink-500 focus:outline-none"
+            >
+              <option value="public">Public (Visible in feeds &amp; search)</option>
+              <option value="unlisted">Unlisted (Anyone with the link)</option>
+              <option value="private">Private (Only you)</option>
             </select>
           </div>
 

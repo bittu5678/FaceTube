@@ -4,8 +4,13 @@ import thumb3 from "@/assets/thumb-3.jpg";
 import thumb4 from "@/assets/thumb-4.jpg";
 import thumb5 from "@/assets/thumb-5.jpg";
 import thumb6 from "@/assets/thumb-6.jpg";
-import { resolveVideoThumbnail } from "@/lib/thumbnail-service";
-import { resolveMediaUrl } from "@/lib/media-url";
+import { type VideoVisibility } from "@/lib/video-service";
+import {
+  findPublicCachedVideo,
+  findVideoAsync,
+  resolveWatchVideo,
+  type WatchVideoResolution,
+} from "@/lib/watch-video";
 
 export type Video = {
   id: string;
@@ -25,6 +30,7 @@ export type Video = {
   videoType?: "free" | "premium";
   contentType?: "short" | "long";
   isPromoted?: boolean;
+  visibility?: VideoVisibility;
   uploadedAt?: string;
   userId?: string;
   channelLogoUrl?: string | undefined;
@@ -405,6 +411,7 @@ export const seedVideos: Video[] = [
   },
 ];
 
+export const staticShowcaseVideos: Video[] = [...recommended, ...trending, ...recent];
 export const allVideos: Video[] = [...recommended, ...trending, ...recent, ...seedVideos];
 
 export const findVideo = (id: string): Video | undefined => {
@@ -418,139 +425,8 @@ export const findVideo = (id: string): Video | undefined => {
     };
   }
 
-  if (typeof window !== "undefined") {
-    try {
-      const stored = localStorage.getItem("facetube_uploaded_videos_v3");
-      if (stored) {
-        const list = JSON.parse(stored);
-        if (Array.isArray(list)) {
-          const match = list.find((v: any) => v.id === id);
-          if (match) {
-            const thumbUrl = resolveVideoThumbnail({
-              thumbnailUrl: match.thumbnailUrl || match.thumbnail_url,
-              category: match.category,
-            });
-            const created = match.createdAt || match.created_at;
-            const parsedAge = created
-              ? new Date(
-                  created.includes("T") ? created : created.replace(" ", "T") + "Z",
-                ).toLocaleDateString()
-              : "Recently uploaded";
-
-            return {
-              id: match.id,
-              title: match.title,
-              channel: match.creatorName || match.creator_name || "FaceTube Creator",
-              initials: (match.creatorName || match.creator_name || "FC").slice(0, 2).toUpperCase(),
-              views: `${(Number(match.views) || 0).toLocaleString()} views`,
-              age: parsedAge,
-              duration: match.duration || "0:00",
-              thumb: thumbUrl,
-              thumbnail: thumbUrl,
-              thumbnailUrl: thumbUrl,
-              tint: match.videoType === "premium" ? "oklch(0.6 0.22 45)" : "oklch(0.5 0.18 20)",
-              category: match.category || "General",
-              description: match.description || "",
-              videoUrl: resolveMediaUrl(match.videoUrl || match.video_url),
-              videoType: match.videoType || match.video_type || "free",
-              contentType: match.contentType || match.content_type || "long",
-              isPromoted: checkAdPromotionActive(match),
-            };
-          }
-        }
-      }
-    } catch (_e) {
-      // ignore
-    }
-  }
-
-  return undefined;
+  return findPublicCachedVideo(id);
 };
 
-function checkAdPromotionActive(item: {
-  isPromoted?: boolean | number | null | undefined;
-  is_promoted?: boolean | number | null | undefined;
-  promotionExpiresAt?: string | null | undefined;
-  promotion_expires_at?: string | null | undefined;
-}): boolean {
-  const isMarked = Boolean(item.isPromoted ?? item.is_promoted);
-  if (!isMarked) return false;
-  const expiry = item.promotionExpiresAt || item.promotion_expires_at;
-  if (!expiry) return false;
-  const t = new Date(expiry).getTime();
-  return !Number.isNaN(t) && t > Date.now();
-}
+export { findVideoAsync, resolveWatchVideo, type WatchVideoResolution };
 
-/**
- * Asynchronously locates a video by ID, querying the live PHP REST API / MySQL database
- * if the video is not present in local static assets or cache.
- */
-export async function findVideoAsync(id: string): Promise<Video | undefined> {
-  const localMatch = findVideo(id);
-  if (localMatch) return localMatch;
-
-  try {
-    const { api } = await import("@/lib/api");
-    const res = await api.videos.get(id);
-    if (res && res.success && res.video) {
-      const v = res.video;
-      const thumbUrl = resolveVideoThumbnail({
-        thumbnailUrl: v.thumbnail_url || v.thumbnailUrl,
-        category: v.category,
-      });
-      const created = v.created_at || v.createdAt;
-      const parsedAge = created
-        ? new Date(
-            created.includes("T") ? created : created.replace(" ", "T") + "Z",
-          ).toLocaleDateString()
-        : "Recently uploaded";
-
-      const channelName =
-        v.channel_name || v.channelName || v.creator_name || v.creatorName || "FaceTube Creator";
-      const rawChannelLogo = v.channel_logo_url || v.channelLogoUrl || "";
-      const channelLogoUrl = rawChannelLogo
-        ? resolveMediaUrl(rawChannelLogo) || undefined
-        : undefined;
-
-      return {
-        id: String(v.id),
-        title: v.title || "Untitled Video",
-        channel: channelName,
-        channelName,
-        channelLogoUrl,
-        channel_logo_url: channelLogoUrl,
-        initials: channelName.slice(0, 2).toUpperCase(),
-        views: `${(Number(v.views) || 0).toLocaleString()} views`,
-        age: parsedAge,
-        duration: v.duration || "0:00",
-        thumb: thumbUrl,
-        thumbnail: thumbUrl,
-        thumbnailUrl: thumbUrl,
-        tint: v.video_type === "premium" ? "oklch(0.6 0.22 45)" : "oklch(0.5 0.18 20)",
-        category: v.category || "General",
-        description: v.description || "",
-        videoUrl: resolveMediaUrl(v.video_url || v.videoUrl),
-        videoType: v.video_type || v.videoType || "free",
-        contentType: v.content_type || v.contentType || "long",
-        isPromoted: checkAdPromotionActive(v),
-        userId: v.user_id || v.userId || "FT483921",
-      };
-    }
-  } catch (err) {
-    console.warn("findVideoAsync database lookup failed:", err);
-  }
-
-  // Fallback to local stored videos cache
-  try {
-    const { getStoredVideos, convertUploadedToCatalogVideo } = await import("@/lib/video-service");
-    const storedList = getStoredVideos();
-    const storedMatch = storedList.find((v) => v.id === id);
-    if (storedMatch) {
-      return convertUploadedToCatalogVideo(storedMatch);
-    }
-  } catch (_e) {
-    // ignore
-  }
-
-  return undefined;
-}

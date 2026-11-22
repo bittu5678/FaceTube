@@ -27,7 +27,11 @@ import {
 import { toast } from "sonner";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { useAuth } from "@/lib/auth-context";
-import { type UploadedVideo } from "@/lib/video-service";
+import {
+  recordNewVideoUpload,
+  normalizeVideoVisibility,
+  type UploadedVideo,
+} from "@/lib/video-service";
 import { resolveVideoThumbnail, SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
 import { resolveMediaUrl } from "@/lib/media-url";
 import { api } from "@/lib/api";
@@ -246,6 +250,7 @@ function AdsPromotionsPage() {
           isPromoted: isActive,
           promotionPlan: v.promotionPlan || v.promotion_plan,
           promotionExpiresAt: expiryRaw,
+          visibility: normalizeVideoVisibility(v.visibility, "public"),
           createdAt: v.createdAt || v.created_at || new Date().toISOString(),
           updatedAt: v.updatedAt || v.updated_at || new Date().toISOString(),
         };
@@ -376,11 +381,60 @@ function AdsPromotionsPage() {
       return;
     }
 
-    const attemptKey = `${selectedVideoId || "camp-vid"}:${selectedPlan.id}:${Date.now()}`;
     isActivatingRef.current = true;
     setIsActivating(true);
 
     try {
+      let targetVideoId = selectedVideoId.trim();
+
+      if (!targetVideoId) {
+        let resolvedVideoUrl = "";
+
+        if (videoFile) {
+          setIsUploading(true);
+          try {
+            const uploadRes = await api.uploads.uploadVideo(videoFile);
+            if (!uploadRes?.success || !uploadRes.url) {
+              throw new Error("Failed to upload advertisement video file.");
+            }
+            resolvedVideoUrl = uploadRes.url;
+          } finally {
+            setIsUploading(false);
+          }
+        } else if (videoPreviewUrl && !videoPreviewUrl.startsWith("blob:")) {
+          resolvedVideoUrl = videoPreviewUrl.trim();
+        } else {
+          isActivatingRef.current = false;
+          setIsActivating(false);
+          toast.error("Please upload or select a video before activating promotion.");
+          return;
+        }
+
+        const createdVideo = await recordNewVideoUpload({
+          userId: effectiveUserId,
+          creatorName: userName,
+          title: campaignTitle.trim(),
+          description: destinationUrl.trim()
+            ? `Ad Promotion Campaign — ${destinationUrl.trim()}`
+            : "Ad Promotion Campaign",
+          videoUrl: resolvedVideoUrl,
+          videoType: "free",
+          contentType: "long",
+          category: category || "Entertainment",
+          visibility: "public",
+        });
+
+        targetVideoId = createdVideo.id;
+        setSelectedVideoId(targetVideoId);
+        setVideoFile(null);
+        setVideoPreviewUrl(createdVideo.videoUrl || resolvedVideoUrl);
+        setUserVideos((prev) =>
+          prev.some((v) => v.id === createdVideo.id) ? prev : [createdVideo, ...prev],
+        );
+      }
+
+      const attemptKey = `${targetVideoId}:${selectedPlan.id}:${Date.now()}`;
+
       preloadRazorpayScript();
       const userEmail = user?.email || undefined;
       const userMobile = profile?.mobile || dbUser?.mobile || undefined;
@@ -390,7 +444,7 @@ function AdsPromotionsPage() {
         userName,
         ...(userEmail ? { userEmail } : {}),
         ...(userMobile ? { userMobile } : {}),
-        videoId: selectedVideoId || `camp-vid-${Date.now()}`,
+        videoId: targetVideoId,
         planId: selectedPlan.id,
         planName: selectedPlan.name,
         durationDays: selectedPlan.days,
@@ -431,10 +485,11 @@ function AdsPromotionsPage() {
           toast.info("Payment cancelled. Promotion was not activated.");
         },
       });
-    } catch (_err: unknown) {
+    } catch (err: any) {
       isActivatingRef.current = false;
       setIsActivating(false);
-      toast.error("Failed to connect with payment gateway.");
+      setIsUploading(false);
+      toast.error(err?.message || "Failed to connect with payment gateway.");
     }
   };
 

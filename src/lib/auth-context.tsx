@@ -21,6 +21,7 @@ import { verifyPassword } from "./password";
 import { api, setStoredAuthToken, getStoredAuthToken } from "./api";
 import { resolveMediaUrl } from "./media-url";
 import { computeUpdatedChannelSession, LOCAL_STORAGE_SESSION_KEY } from "./channel-branding";
+import { clearProtectedVideoCaches } from "./video-service";
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -227,6 +228,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           } catch (_e) {
             // Storage unavailable
           }
+          clearProtectedVideoCaches({ keepUserId: u.user_id });
         } else {
           // Server explicitly responded that session is not authenticated (HTTP 200 with authenticated: false)
           setUser(null);
@@ -239,6 +241,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           } catch (_e) {
             // Ignore storage removal errors
           }
+          clearProtectedVideoCaches();
         }
       })
       .catch((err: unknown) => {
@@ -255,6 +258,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           } catch (_e) {
             // Ignore storage removal errors
           }
+          clearProtectedVideoCaches();
         } else {
           // Transient network failure, timeout, HTTP 5xx, or temporary server unavailability:
           // Do NOT erase stored token or cached user session. If a restored session is present, keep it.
@@ -337,6 +341,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // storage disabled
       }
 
+      clearProtectedVideoCaches({ keepUserId: userId });
       syncUsersList();
 
       let cleanEmailDelivery: SignUpResult["emailDelivery"] | undefined = undefined;
@@ -502,6 +507,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // storage disabled
       }
 
+      clearProtectedVideoCaches({ keepUserId: authenticatedUser.user_id });
+
       return {
         success: true,
         error: null,
@@ -533,6 +540,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (_e) {
       // Storage unavailable
     }
+    clearProtectedVideoCaches();
   };
 
   /**

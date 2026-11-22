@@ -163,7 +163,23 @@ describe("Task 2 - Phase 2B: Paid Subscription Payment Verification & Activation
     });
 
     it("rejects payment verification when requested amount does not match plan price", async () => {
-      const orderId = `order_sub_mismatch_${Date.now()}`;
+      const createReq = new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${userToken}`,
+        },
+        body: JSON.stringify({
+          purpose: "paid_subscription",
+          userId: standardUserId,
+          planId: "member-monthly",
+        }),
+      });
+      const createRes = await handleApiRequest(createReq, testEnv);
+      assert.ok(createRes);
+      assert.equal(createRes.status, 200);
+      const { orderId } = await createRes.json();
+
       const paymentId = `pay_sub_mismatch_${Date.now()}`;
       const signature = crypto
         .createHmac("sha256", secret)

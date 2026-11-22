@@ -7,13 +7,40 @@
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../response.php';
 
-$id = trim($_GET['id'] ?? '');
+if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
+    jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
+}
+
+$id = trim((string)($_GET['id'] ?? ''));
 
 if (empty($id)) {
     jsonResponse(['success' => false, 'error' => 'Video ID is required.'], 400);
 }
 
 $pdo = getDatabaseConnection();
+
+$isConnectionUnavailable = static function (Throwable $e): bool {
+    if (function_exists('isDatabaseConnectionUnavailableError')) {
+        return isDatabaseConnectionUnavailableError($e);
+    }
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 1042, 1053, 1129, 1203, 1927, 2002, 2003, 2005, 2006, 2013, 2026], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+};
+
+// Optional authentication: supports public visitors while propagating DB auth errors
+try {
+    $authUser = getAuthUser($pdo, true);
+} catch (Throwable $authErr) {
+    error_log('[videos/get.php] Auth Database Exception: ' . $authErr->getMessage());
+    if ($isConnectionUnavailable($authErr)) {
+        jsonResponse(['success' => false, 'error' => 'Database connection unavailable during authentication. Please try again.'], 503);
+    }
+    jsonResponse(['success' => false, 'error' => 'Authentication service error while loading video.'], 500);
+}
 
 try {
     $stmt = $pdo->prepare('
@@ -33,16 +60,51 @@ try {
         jsonResponse(['success' => false, 'error' => 'Video not found.'], 404);
     }
 
+    // Blocked videos return 403 for everyone by default (including owners) before incrementing views
     if (!empty($row['is_blocked'])) {
         jsonResponse([
             'success' => false,
             'error' => 'This video has been blocked by administrators for content moderation.',
             'is_blocked' => true,
+            'isBlocked' => true,
             'block_reason' => $row['block_reason'] ?? 'Content moderation',
         ], 403);
     }
 
-    // Increment views counter
+    $isAdmin = $authUser && isset($authUser['role']) && strtolower((string)$authUser['role']) === 'admin';
+    $isOwner = $authUser && (
+        strcasecmp((string)($row['user_id'] ?? ''), (string)($authUser['user_id'] ?? '')) === 0
+        || (!empty($authUser['id']) && strcasecmp((string)($row['user_id'] ?? ''), (string)$authUser['id']) === 0)
+    );
+
+    $visibility = strtolower(trim((string)($row['visibility'] ?? 'public')));
+    if (!in_array($visibility, ['public', 'unlisted', 'private'], true)) {
+        $visibility = 'public';
+    }
+
+    $videoType = strtolower(trim((string)($row['video_type'] ?? 'free')));
+    $paymentStatus = strtolower(trim((string)($row['payment_status'] ?? '')));
+    if ($paymentStatus === '') {
+        $paymentStatus = $videoType === 'free' ? 'not_required' : 'pending';
+    }
+    $isPaymentEligible = ($videoType === 'free' && in_array($paymentStatus, ['not_required', 'paid'], true))
+        || ($videoType === 'premium' && $paymentStatus === 'paid');
+
+    if ($visibility === 'private' && !$isOwner && !$isAdmin) {
+        if (!$authUser) {
+            jsonResponse(['success' => false, 'error' => 'Authentication required to access this private video.'], 401);
+        }
+        jsonResponse(['success' => false, 'error' => 'Unauthorized: This private video is only accessible to its creator or administrators.'], 403);
+    }
+
+    if (!$isPaymentEligible && !$isOwner && !$isAdmin) {
+        if (!$authUser) {
+            jsonResponse(['success' => false, 'error' => 'Authentication required to access this unpaid Sponsor video.'], 401);
+        }
+        jsonResponse(['success' => false, 'error' => 'Unauthorized: Unpaid Sponsor videos are only accessible to their creator or administrators.'], 403);
+    }
+
+    // Increment views ONLY after access authorization succeeds
     $pdo->prepare('UPDATE uploaded_videos SET views = views + 1 WHERE id = ?')->execute([$id]);
 
     $expiryTime = !empty($row['promotion_expires_at']) ? strtotime($row['promotion_expires_at']) : false;
@@ -76,6 +138,7 @@ try {
         'content_type' => $row['content_type'],
         'category' => $row['category'] ?? 'General',
         'duration' => $row['duration'] ?? '0:00',
+        'visibility' => $visibility,
         'views' => (int)$row['views'] + 1,
         'likes' => (int)$row['likes'],
         'paymentStatus' => $row['payment_status'],
@@ -90,8 +153,16 @@ try {
         'is_active_promoted' => (bool)$isActivePromoted,
         'rawIsPromoted' => (bool)$row['is_promoted'],
         'raw_is_promoted' => (bool)$row['is_promoted'],
+        'isBlocked' => false,
+        'is_blocked' => false,
+        'blockReason' => $row['block_reason'] ?? null,
+        'block_reason' => $row['block_reason'] ?? null,
+        'blockedAt' => $row['blocked_at'] ?? null,
+        'blocked_at' => $row['blocked_at'] ?? null,
         'promotionPlan' => $row['promotion_plan'],
+        'promotion_plan' => $row['promotion_plan'],
         'promotionExpiresAt' => $row['promotion_expires_at'],
+        'promotion_expires_at' => $row['promotion_expires_at'],
         'createdAt' => $row['created_at'],
         'created_at' => $row['created_at'],
         'updatedAt' => $row['updated_at'],
@@ -99,6 +170,10 @@ try {
     ];
 
     jsonResponse(['success' => true, 'video' => $video]);
-} catch (PDOException $e) {
-    jsonResponse(['success' => false, 'error' => 'Database error: ' . $e->getMessage()], 500);
+} catch (Throwable $e) {
+    error_log('[videos/get.php] Database Exception: ' . $e->getMessage());
+    if ($isConnectionUnavailable($e)) {
+        jsonResponse(['success' => false, 'error' => 'Database connection unavailable while loading video.'], 503);
+    }
+    jsonResponse(['success' => false, 'error' => 'Database error while fetching video.'], 500);
 }

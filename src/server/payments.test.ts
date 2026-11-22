@@ -423,7 +423,28 @@ describe("API Handler Authentication & Authorization Security Tests", () => {
     });
     const token = login.data.token;
 
-    const ordId = "ord_test_val_1";
+    const orderRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          purpose: "premium_video_upload",
+          userId: "FT483921",
+        }),
+      }),
+      {
+        RAZORPAY_KEY_ID: "rzp_test_api_123456",
+        RAZORPAY_KEY_SECRET: envConfig.RAZORPAY_KEY_SECRET,
+        RAZORPAY_SKIP_REMOTE_CHECK: "true",
+      },
+    );
+    assert.ok(orderRes);
+    assert.equal(orderRes.status, 200);
+    const orderData = await orderRes.json();
+    const ordId = orderData.orderId;
     const payId = `pay_val_${Date.now()}`;
     const sig = crypto
       .createHmac("sha256", envConfig.RAZORPAY_KEY_SECRET)
@@ -446,7 +467,7 @@ describe("API Handler Authentication & Authorization Security Tests", () => {
     assert.equal(badAmount.status, 400);
     assert.match(badAmount.data.error, /does not match expected fee/i);
 
-    // Unsupported purpose
+    // Unsupported purpose (client purpose does not match server order purpose)
     const badPurpose = await makeApiCall(
       "/api/payments/verify.php",
       "POST",
@@ -459,7 +480,7 @@ describe("API Handler Authentication & Authorization Security Tests", () => {
       token,
     );
     assert.equal(badPurpose.status, 400);
-    assert.match(badPurpose.data.error, /Unsupported payment purpose/i);
+    assert.match(badPurpose.data.error, /purpose does not match|Unsupported payment purpose/i);
   });
 
   it("12. Rejects payment verification when user attempts to verify video owned by another creator", async () => {
@@ -470,7 +491,28 @@ describe("API Handler Authentication & Authorization Security Tests", () => {
     });
     const token = login.data.token;
 
-    const ordId = "ord_test_vid_owner";
+    const orderRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          purpose: "premium_video_upload",
+          userId: "FT900431",
+        }),
+      }),
+      {
+        RAZORPAY_KEY_ID: "rzp_test_api_123456",
+        RAZORPAY_KEY_SECRET: envConfig.RAZORPAY_KEY_SECRET,
+        RAZORPAY_SKIP_REMOTE_CHECK: "true",
+      },
+    );
+    assert.ok(orderRes);
+    assert.equal(orderRes.status, 200);
+    const orderData = await orderRes.json();
+    const ordId = orderData.orderId;
     const payId = `pay_vid_${Date.now()}`;
     const sig = crypto
       .createHmac("sha256", envConfig.RAZORPAY_KEY_SECRET)
@@ -866,6 +908,22 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
   });
 
   it("4. Verifies all four ads promotion tiers with exact authoritative pricing via metadata or planId", async () => {
+    const loginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+      }),
+    );
+    assert.ok(loginRes);
+    const { token } = await loginRes.json();
+
+    const rzpEnv = {
+      RAZORPAY_KEY_ID: testKeyId,
+      RAZORPAY_KEY_SECRET: testSecret,
+      RAZORPAY_SKIP_REMOTE_CHECK: "true",
+    };
+
     const testCases: Array<{
       planId: "plan-7-days" | "plan-15-days" | "plan-monthly" | "plan-yearly";
       expectedAmount: number;
@@ -877,7 +935,26 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
     ];
 
     for (const { planId, expectedAmount } of testCases) {
-      const orderId = `ord_test_ads_${planId}_${Date.now()}`;
+      const orderRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/payments/create-order", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            purpose: "ads_promotion",
+            userId: "FT483921",
+            videoId: "vid-seed-002",
+            planId,
+          }),
+        }),
+        rzpEnv,
+      );
+      assert.ok(orderRes);
+      assert.equal(orderRes.status, 200);
+      const { orderId } = await orderRes.json();
+
       const paymentId = `pay_test_ads_${planId}_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
       const signature = crypto
         .createHmac("sha256", testSecret)
@@ -887,23 +964,23 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
       // Verify sending planId inside metadata (as frontend ads-promotions.tsx does)
       const req = new Request("http://localhost:3000/api/payments/verify", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
           orderId,
           paymentId,
           signature,
           userId: "FT483921",
+          videoId: "vid-seed-002",
           purpose: "ads_promotion",
           metadata: { planId },
           amount: expectedAmount,
         }),
       });
 
-      const res = await handleApiRequest(req, {
-        RAZORPAY_KEY_ID: testKeyId,
-        RAZORPAY_KEY_SECRET: testSecret,
-        RAZORPAY_SKIP_REMOTE_CHECK: "true",
-      });
+      const res = await handleApiRequest(req, rzpEnv);
 
       assert.ok(res);
       assert.equal(res.status, 200, `Plan ${planId} verification should return 200`);
@@ -917,7 +994,24 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
     }
 
     // Verify amount mismatch rejection: e.g. claiming ₹100 for yearly ₹3,000 plan
-    const badOrderId = `ord_test_mismatch_${Date.now()}`;
+    const badOrderRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          purpose: "ads_promotion",
+          userId: "FT483921",
+          videoId: "vid-seed-002",
+          planId: "plan-yearly",
+        }),
+      }),
+      rzpEnv,
+    );
+    assert.ok(badOrderRes);
+    const { orderId: badOrderId } = await badOrderRes.json();
     const badPayId = `pay_test_mismatch_${Date.now()}`;
     const badSig = crypto
       .createHmac("sha256", testSecret)
@@ -926,23 +1020,23 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
 
     const mismatchReq = new Request("http://localhost:3000/api/payments/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({
         orderId: badOrderId,
         paymentId: badPayId,
         signature: badSig,
         userId: "FT483921",
+        videoId: "vid-seed-002",
         purpose: "ads_promotion",
         metadata: { planId: "plan-yearly" },
         amount: 100.0, // Fraudulent claim: ₹100 instead of ₹3,000
       }),
     });
 
-    const mismatchRes = await handleApiRequest(mismatchReq, {
-      RAZORPAY_KEY_ID: testKeyId,
-      RAZORPAY_KEY_SECRET: testSecret,
-      RAZORPAY_SKIP_REMOTE_CHECK: "true",
-    });
+    const mismatchRes = await handleApiRequest(mismatchReq, rzpEnv);
 
     assert.ok(mismatchRes);
     assert.equal(mismatchRes.status, 400, "Mismatched amount must return 400");
@@ -995,7 +1089,42 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
   });
 
   it("6. Activates promotion with renewal logic and prevents duplicate re-extension on repeated verification", async () => {
-    const orderId = `ord_test_renewal_${Date.now()}`;
+    const loginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+      }),
+    );
+    assert.ok(loginRes);
+    const { token } = await loginRes.json();
+
+    const rzpEnv = {
+      RAZORPAY_KEY_ID: testKeyId,
+      RAZORPAY_KEY_SECRET: testSecret,
+      RAZORPAY_SKIP_REMOTE_CHECK: "true",
+    };
+
+    const createOrderRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          purpose: "ads_promotion",
+          userId: "FT483921",
+          videoId: "vid-seed-002",
+          planId: "plan-7-days",
+        }),
+      }),
+      rzpEnv,
+    );
+    assert.ok(createOrderRes);
+    assert.equal(createOrderRes.status, 200);
+    const { orderId } = await createOrderRes.json();
+
     const paymentId = `pay_test_renewal_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const signature = crypto
       .createHmac("sha256", testSecret)
@@ -1005,7 +1134,10 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
     // First verification (Alex promotes his own video vid-seed-002 for 7 days)
     const verifyReq1 = new Request("http://localhost:3000/api/payments/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({
         orderId,
         paymentId,
@@ -1018,11 +1150,7 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
       }),
     });
 
-    const res1 = await handleApiRequest(verifyReq1, {
-      RAZORPAY_KEY_ID: testKeyId,
-      RAZORPAY_KEY_SECRET: testSecret,
-      RAZORPAY_SKIP_REMOTE_CHECK: "true",
-    });
+    const res1 = await handleApiRequest(verifyReq1, rzpEnv);
 
     assert.ok(res1);
     assert.equal(res1.status, 200);
@@ -1041,7 +1169,10 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
     // Second repeated verification of the exact same paymentId
     const verifyReq2 = new Request("http://localhost:3000/api/payments/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({
         orderId,
         paymentId,
@@ -1054,11 +1185,7 @@ describe("Razorpay Real Order Creation & Gateway Verification Tests", () => {
       }),
     });
 
-    const res2 = await handleApiRequest(verifyReq2, {
-      RAZORPAY_KEY_ID: testKeyId,
-      RAZORPAY_KEY_SECRET: testSecret,
-      RAZORPAY_SKIP_REMOTE_CHECK: "true",
-    });
+    const res2 = await handleApiRequest(verifyReq2, rzpEnv);
 
     assert.ok(res2);
     assert.equal(res2.status, 200);
@@ -1376,19 +1503,52 @@ describe("Task 33: 7-Level Ads Referral Distribution & Counter Isolation Tests",
   });
 
   it("6. API endpoint /api/payments/verify processes ads promotion and returns 7-level distribution breakdown", async () => {
-    const orderId = `ord_api_ads_${Date.now()}`;
+    const loginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+      }),
+    );
+    assert.ok(loginRes);
+    const { token } = await loginRes.json();
+
+    const orderRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          purpose: "ads_promotion",
+          userId: "FT483921",
+          videoId: "vid-seed-002",
+          planId: "plan-yearly",
+        }),
+      }),
+      env,
+    );
+    assert.ok(orderRes);
+    assert.equal(orderRes.status, 200);
+    const { orderId } = await orderRes.json();
+
     const paymentId = `pay_api_ads_${Date.now()}`;
     const sig = crypto.createHmac("sha256", secret).update(`${orderId}|${paymentId}`).digest("hex");
 
     const req = new Request("http://localhost:3000/api/payments/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({
         orderId,
         paymentId,
         signature: sig,
         userId: "FT483921",
         userName: "Alex Rivera",
+        videoId: "vid-seed-002",
         purpose: "ads_promotion",
         planId: "plan-yearly",
         metadata: { planId: "plan-yearly" },
@@ -1920,13 +2080,43 @@ describe("Task 34: Premium Video Global Pool & Admin Ledger Verification Tests",
   });
 
   it("14. API handler /api/payments/verify returns complete server-authoritative distribution breakdown for Premium Video", async () => {
-    const orderId = `ord_t34_api_${Date.now()}`;
+    const loginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+      }),
+    );
+    assert.ok(loginRes);
+    const { token } = await loginRes.json();
+
+    const orderRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          purpose: "premium_video_upload",
+          userId: "FT483921",
+        }),
+      }),
+      env,
+    );
+    assert.ok(orderRes);
+    assert.equal(orderRes.status, 200);
+    const { orderId } = await orderRes.json();
+
     const paymentId = `pay_t34_api_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const sig = crypto.createHmac("sha256", secret).update(`${orderId}|${paymentId}`).digest("hex");
 
     const req = new Request("http://localhost:3000/api/payments/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
       body: JSON.stringify({
         orderId,
         paymentId,
@@ -3784,10 +3974,23 @@ describe("Task 5J-V2: Payment Create-Order Production Fail-Closed Tests", () => 
     process.env["NODE_ENV"] = "test";
     delete process.env["APP_ENV"];
 
+    const loginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+      }),
+    );
+    assert.ok(loginRes);
+    const { token } = await loginRes.json();
+
     const res = await handleApiRequest(
       new Request("http://localhost:3000/api/payments/create-order", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
           purpose: "paid_subscription",
           planId: "member-monthly",
@@ -4657,7 +4860,7 @@ describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction 
       inTransaction = true;
       const orderRecord = options.orderRecord;
 
-      // Mirrors $suppliedBearerToken = getBearerToken(); $authUser = getAuthUser($pdo, true);
+      // Mirrors $authUser = getAuthUser($pdo, true); if (!$authUser) -> 401
       const suppliedBearerToken = options.bearerToken;
       let authUser: { user_id: string; role: string } | null = null;
       if (suppliedBearerToken !== null) {
@@ -4673,13 +4876,13 @@ describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction 
         }
       }
 
-      if (suppliedBearerToken !== null && !authUser) {
+      if (!authUser) {
         safeRollback();
         return {
           status: 401,
           body: {
             verified: false,
-            error: "Invalid or expired authentication session. Please log in again.",
+            error: "Authentication required. Please log in to verify payment.",
           },
           rollbackAttempts,
           paymentVerifyProceeded,
@@ -4746,17 +4949,13 @@ describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction 
     }
   }
 
-  it("1. Preserves legitimate guest checkout without Bearer token and enforces 401 for invalid supplied Bearer token", () => {
+  it("1. Enforces strict Bearer authentication (rejects missing and invalid Bearer tokens with 401)", () => {
     const { verifyPhp, responsePhp } = loadVerifyAndResponsePhp();
 
-    assert.match(
-      verifyPhp,
-      /\$suppliedBearerToken\s*=\s*function_exists\('getBearerToken'\)\s*\?\s*getBearerToken\(\)\s*:\s*null;/,
-    );
     assert.match(verifyPhp, /\$authUser\s*=\s*getAuthUser\(\$pdo,\s*true\);/);
-    assert.match(verifyPhp, /if\s*\(\s*\$suppliedBearerToken\s*!==\s*null\s*&&\s*!\$authUser\s*\)/);
+    assert.match(verifyPhp, /if\s*\(\s*!\$authUser\s*\)/);
 
-    const guestResult = createVerifyAuthHarness({
+    const missingTokenResult = createVerifyAuthHarness({
       responsePhp,
       verifyPhp,
       orderRecord: {
@@ -4768,8 +4967,9 @@ describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction 
       bearerToken: null,
       sessionLookupBehavior: { kind: "guest" },
     });
-    assert.equal(guestResult.status, 200);
-    assert.equal(guestResult.paymentVerifyProceeded, true);
+    assert.equal(missingTokenResult.status, 401);
+    assert.equal(missingTokenResult.body.verified, false);
+    assert.equal(missingTokenResult.paymentVerifyProceeded, false);
 
     const invalidTokenResult = createVerifyAuthHarness({
       responsePhp,
@@ -4919,20 +5119,56 @@ describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction 
       /hash_hmac\('sha256',\s*"\{\$orderId\}\|\{\$paymentId\}",\s*\$secret\)/,
     );
     assert.match(verifyPhp, /https:\/\/api\.razorpay\.com\/v1\/payments\/\{\$paymentId\}/);
-    assert.match(verifyPhp, /\$amount\s*=\s*6\.00;/);
+    assert.match(verifyPhp, /\$authoritativeAmount\s*=\s*6\.00;/);
     assert.match(verifyPhp, /'member-monthly'\s*=>\s*\['price'\s*=>\s*49\.00/);
     assert.match(verifyPhp, /\$referralCommission\s*=\s*\$hasReferrer\s*\?\s*1\.00\s*:\s*0\.00;/);
 
+    const loginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+      }),
+    );
+    assert.ok(loginRes);
+    const { token } = await loginRes.json();
+
+    const secret = "test_secret_for_api_tests_123456";
+    const rzpEnv = {
+      RAZORPAY_KEY_ID: "rzp_test_v4l_123456",
+      RAZORPAY_KEY_SECRET: secret,
+      RAZORPAY_SKIP_REMOTE_CHECK: "true",
+    };
+
+    const orderRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          purpose: "premium_video_upload",
+          userId: "FT483921",
+        }),
+      }),
+      rzpEnv,
+    );
+    assert.ok(orderRes);
+    assert.equal(orderRes.status, 200);
+    const { orderId } = await orderRes.json();
+
     // Also run Node handler verification for ₹6 upload to confirm zero behavioral regression
     const payId = `pay_v4l_preserve_${Date.now()}`;
-    const orderId = `order_v4l_preserve_${Date.now()}`;
-    const secret = "test_secret_for_api_tests_123456";
     const sig = crypto.createHmac("sha256", secret).update(`${orderId}|${payId}`).digest("hex");
 
     const res = await handleApiRequest(
       new Request("http://localhost:3000/api/payments/verify", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
           orderId,
           paymentId: payId,
@@ -4941,7 +5177,7 @@ describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction 
           purpose: "premium_video_upload",
         }),
       }),
-      { RAZORPAY_KEY_SECRET: secret },
+      rzpEnv,
     );
     assert.equal(res?.status, 200);
     const data = await res?.json();
