@@ -298,13 +298,11 @@ export async function getEligibleGlobalIncomeUsers(): Promise<string[]> {
 }
 
 /**
- * Checks if a premium transaction sequence number is a Special Transaction:
- * 11th, 21st, 31st, 41st, 51st... and every 10th transaction after 11th.
- * Formula: transactionNumber >= 11 AND (transactionNumber - 11) % 10 === 0
+ * Legacy helper preserved for backwards compatibility.
+ * Every ₹6 premium transaction now follows the uniform ₹6 distribution.
  */
-export function isSpecialGlobalTransaction(txNumber: number): boolean {
-  if (txNumber < 11) return false;
-  return (txNumber - 11) % 10 === 0;
+export function isSpecialGlobalTransaction(_txNumber: number): boolean {
+  return false;
 }
 
 export interface PremiumDistributionParams {
@@ -329,247 +327,20 @@ export interface PremiumDistributionResult {
 }
 
 /**
- * Processes premium video payment distribution (Referral + Admin + Global Pool)
- * - Normal: ₹1 Direct Referral, ₹1 Admin, ₹3 Global Income Pool, ₹1 GST/PG
- * - Special (11th, 21st, 31st...): ₹1 Direct Referral (if valid referrer), ₹4 Admin, ₹0 Global Pool
+ * Client-side premium income distribution is intentionally disabled.
+ * All ₹6 financial splits (Referral ₹1.00, Admin ₹1.00, GST ₹0.90 + PG ₹0.10,
+ * and Global Pool ₹3.00 weighted by ad_earnings) are executed atomically on the server.
  */
 export async function distributePremiumVideoIncome(
   params: PremiumDistributionParams,
 ): Promise<PremiumDistributionResult> {
-  const ledger = getStoredLedger();
-  const wallets = getStoredWallets();
-
-  // Deduplication check: Prevent duplicate processing of the same Razorpay payment
-  const duplicate = ledger.some(
-    (t) =>
-      (t.videoId === params.videoId && t.transactionId.includes(params.paymentId)) ||
-      t.transactionId.endsWith(params.paymentId) ||
-      t.transactionId === `TX_SPEC_${params.paymentId}` ||
-      t.transactionId === `TX_REF_${params.paymentId}` ||
-      t.transactionId === `TX_ADM_${params.paymentId}`,
-  );
-  if (duplicate) {
-    const duplicateResult: PremiumDistributionResult = {
-      globalTransactions: [],
-      isSpecial: Boolean(params.isSpecialTransaction),
-    };
-    if (params.txNumber !== undefined) {
-      duplicateResult.txNumber = params.txNumber;
-    }
-    return duplicateResult;
-  }
-
-  // Determine special transaction state
-  const isSpecial =
-    typeof params.isSpecialTransaction === "boolean"
-      ? params.isSpecialTransaction
-      : params.txNumber
-        ? isSpecialGlobalTransaction(params.txNumber)
-        : false;
-
-  const txSeqLabel = params.txNumber ? `#${params.txNumber}` : "";
-
-  let referralTransaction: LedgerTransaction | undefined;
-  let specialAuditTransaction: LedgerTransaction | undefined;
-  const globalTransactions: LedgerTransaction[] = [];
-
-  // 1. Direct Referral Commission (₹1.00)
-  // If uploader has a valid direct referrer: credit ₹1 to referrer
-  // If no valid referrer: do NOT create fake referral recipient; record safely for audit
-  const normalizedReferrerId = params.directReferrerId?.trim().toUpperCase() || null;
-  if (normalizedReferrerId && normalizedReferrerId.length > 0) {
-    const txId = `TX_REF_${params.paymentId}`;
-    referralTransaction = {
-      id: `ref-tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      transactionId: txId,
-      userId: normalizedReferrerId,
-      sourceUserId: params.uploaderUserId,
-      sourceUserName: params.uploaderName,
-      videoId: params.videoId,
-      incomeType: "referral_income",
-      amount: 1.0, // ₹1
-      status: "settled",
-      description: `Direct Referral Commission (₹1) for Premium Video ${txSeqLabel} upload by ${params.uploaderName} (${params.uploaderUserId})`,
-      createdAt: new Date().toISOString(),
-    };
-    ledger.unshift(referralTransaction);
-
-    // Credit referrer wallet
-    if (!wallets[normalizedReferrerId]) {
-      wallets[normalizedReferrerId] = {
-        userId: normalizedReferrerId,
-        balance: 1.0,
-        totalEarned: 1.0,
-        totalWithdrawn: 0,
-        referralIncome: 1.0,
-        globalIncome: 0,
-        adsenseIncome: 0,
-        affiliateIncome: 0,
-        updatedAt: new Date().toISOString(),
-      };
-    } else {
-      wallets[normalizedReferrerId].balance += 1.0;
-      wallets[normalizedReferrerId].totalEarned += 1.0;
-      wallets[normalizedReferrerId].referralIncome += 1.0;
-      wallets[normalizedReferrerId].updatedAt = new Date().toISOString();
-    }
-  }
-
-  // 2. Admin Allocation & Global Pool Calculation (Server-Authoritative Option A)
-  const normUploader = params.uploaderUserId.trim().toUpperCase();
-  const allEligible = await getEligibleGlobalIncomeUsers();
-  // Strictly EXCLUDE current uploader from their own transaction's global pool
-  const eligibleUsers = Array.from(
-    new Set(allEligible.map((id) => id.trim().toUpperCase()).filter((id) => id !== normUploader)),
-  );
-  const eligibleCount = eligibleUsers.length;
-
-  const hasValidReferrer = Boolean(normalizedReferrerId && normalizedReferrerId.length > 0);
-  const unallocatedReferrerPaise = hasValidReferrer ? 0 : 100; // Option A: unallocated ₹1 to Admin
-
-  let adminAmount = 0.0;
-  let globalPoolAllocation = 0.0;
-  let perUserShare = 0.0;
-
-  if (isSpecial) {
-    // Special: ₹4 Admin + ₹1 (if no referrer redirected to Admin) = ₹4 or ₹5
-    adminAmount = hasValidReferrer ? 4.0 : 5.0;
-    globalPoolAllocation = 0.0;
-  } else {
-    const baseAdminPaise = 100 + unallocatedReferrerPaise;
-
-    if (eligibleCount === 0) {
-      // First transaction / no previous eligible creators: redirect entire ₹3 pool to Admin
-      adminAmount = (baseAdminPaise + 300) / 100;
-      globalPoolAllocation = 0.0;
-    } else {
-      // Distribute 300 paise in integer paise; residual paise goes to Admin
-      const poolPaise = 300;
-      const perCreatorPaise = Math.floor(poolPaise / eligibleCount);
-      const distributedPaise = perCreatorPaise * eligibleCount;
-      const residualPaise = poolPaise - distributedPaise;
-
-      adminAmount = (baseAdminPaise + residualPaise) / 100;
-      globalPoolAllocation = distributedPaise / 100;
-      perUserShare = perCreatorPaise / 100;
-    }
-  }
-
-  const adminTransaction: LedgerTransaction = {
-    id: `adm-tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-    transactionId: `TX_ADM_${params.paymentId}`,
-    userId: "ADMIN",
-    sourceUserId: params.uploaderUserId,
-    sourceUserName: params.uploaderName,
-    videoId: params.videoId,
-    incomeType: "admin_allocation",
-    amount: adminAmount,
-    status: "settled",
-    ...(isSpecial ? { specialTag: "SPECIAL_GLOBAL_RULE" as const } : {}),
-    description: isSpecial
-      ? `Special Premium Transaction ${txSeqLabel}: Admin Allocation (₹${adminAmount.toFixed(2)}) under rule SPECIAL_GLOBAL_RULE`
-      : `Admin Allocation (₹${adminAmount.toFixed(2)}) for Premium Video ${txSeqLabel}`,
-    createdAt: new Date().toISOString(),
-  };
-  ledger.unshift(adminTransaction);
-
-  // Credit Admin wallet
-  const adminWalletKey = "ADMIN";
-  if (!wallets[adminWalletKey]) {
-    wallets[adminWalletKey] = {
-      userId: adminWalletKey,
-      balance: adminAmount,
-      totalEarned: adminAmount,
-      totalWithdrawn: 0,
-      referralIncome: 0,
-      globalIncome: 0,
-      adsenseIncome: 0,
-      affiliateIncome: 0,
-      updatedAt: new Date().toISOString(),
-    };
-  } else {
-    wallets[adminWalletKey].balance += adminAmount;
-    wallets[adminWalletKey].totalEarned += adminAmount;
-    wallets[adminWalletKey].updatedAt = new Date().toISOString();
-  }
-
-  // 3. Global Income Pool
-  if (isSpecial) {
-    specialAuditTransaction = {
-      id: `spec-tx-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      transactionId: `TX_SPEC_${params.paymentId}`,
-      userId: params.uploaderUserId,
-      sourceUserId: params.uploaderUserId,
-      sourceUserName: params.uploaderName,
-      videoId: params.videoId,
-      incomeType: "global_income",
-      amount: 0.0,
-      status: "settled",
-      specialTag: "SPECIAL_GLOBAL_RULE",
-      description: `Special Premium Transaction ${txSeqLabel}: Rule SPECIAL_GLOBAL_RULE applied (₹${adminAmount.toFixed(2)} Admin, ₹0 Global Pool, standard pool distribution bypassed)`,
-      createdAt: new Date().toISOString(),
-    };
-    ledger.unshift(specialAuditTransaction);
-  } else if (eligibleCount > 0 && perUserShare > 0) {
-    for (const uid of eligibleUsers) {
-      const gTx: LedgerTransaction = {
-        id: `glb-tx-${Date.now()}-${uid}`,
-        transactionId: `TX_GLB_${params.paymentId}_${uid}`,
-        userId: uid,
-        sourceUserId: params.uploaderUserId,
-        sourceUserName: params.uploaderName,
-        videoId: params.videoId,
-        incomeType: "global_income",
-        amount: perUserShare,
-        status: "settled",
-        description: `Global Income Pool distribution (₹${perUserShare.toFixed(2)} share of ₹3 pool across ${eligibleCount} eligible creators for Premium Video ${txSeqLabel})`,
-        createdAt: new Date().toISOString(),
-      };
-      ledger.unshift(gTx);
-      globalTransactions.push(gTx);
-
-      // Update eligible user wallet
-      if (!wallets[uid]) {
-        wallets[uid] = {
-          userId: uid,
-          balance: perUserShare,
-          totalEarned: perUserShare,
-          totalWithdrawn: 0,
-          referralIncome: 0,
-          globalIncome: perUserShare,
-          adsenseIncome: 0,
-          affiliateIncome: 0,
-          updatedAt: new Date().toISOString(),
-        };
-      } else {
-        wallets[uid].balance += perUserShare;
-        wallets[uid].totalEarned += perUserShare;
-        wallets[uid].globalIncome += perUserShare;
-        wallets[uid].updatedAt = new Date().toISOString();
-      }
-    }
-  }
-
-  saveStoredLedger(ledger);
-  saveStoredWallets(wallets);
-
   const result: PremiumDistributionResult = {
-    globalTransactions,
-    isSpecial,
+    globalTransactions: [],
+    isSpecial: false,
   };
-  if (referralTransaction !== undefined) {
-    result.referralTransaction = referralTransaction;
-  }
-  if (adminTransaction !== undefined) {
-    result.adminTransaction = adminTransaction;
-  }
-  if (specialAuditTransaction !== undefined) {
-    result.specialAuditTransaction = specialAuditTransaction;
-  }
   if (params.txNumber !== undefined) {
     result.txNumber = params.txNumber;
   }
-
   return result;
 }
 

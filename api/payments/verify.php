@@ -234,6 +234,19 @@ $hasAdEarningsCol = false;
 $hasIsBlockedCol = false;
 $hasPromoPaymentIdCol = false;
 $hasPromoAppliedAtCol = false;
+$hasPtGstCol = false;
+$hasPtPgFeeCol = false;
+$hasPtRefStatusCol = false;
+$hasPtPoolDistCol = false;
+$hasPtPoolResCol = false;
+$hasPtPoolStatusCol = false;
+$hasPremGstCol = false;
+$hasPremPgFeeCol = false;
+$hasPremRefStatusCol = false;
+$hasPremPoolDistCol = false;
+$hasPremPoolResCol = false;
+$hasPremPoolStatusCol = false;
+$hasGlobalPoolReservesTable = false;
 try {
     $colStmt = $pdo->query("
         SELECT TABLE_NAME, COLUMN_NAME
@@ -242,6 +255,8 @@ try {
           AND (
             (TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME IN ('ad_earnings', 'is_blocked', 'promotion_payment_id'))
             OR (TABLE_NAME = 'payment_orders' AND COLUMN_NAME = 'promotion_applied_at')
+            OR (TABLE_NAME = 'payment_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status'))
+            OR (TABLE_NAME = 'premium_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status'))
           )
     ");
     if ($colStmt) {
@@ -258,12 +273,55 @@ try {
                 }
             } elseif ($tbl === 'payment_orders' && $normalizedCol === 'promotion_applied_at') {
                 $hasPromoAppliedAtCol = true;
+            } elseif ($tbl === 'payment_transactions') {
+                if ($normalizedCol === 'gst_amount') {
+                    $hasPtGstCol = true;
+                } elseif ($normalizedCol === 'pg_fee') {
+                    $hasPtPgFeeCol = true;
+                } elseif ($normalizedCol === 'referral_status') {
+                    $hasPtRefStatusCol = true;
+                } elseif ($normalizedCol === 'global_pool_distributed') {
+                    $hasPtPoolDistCol = true;
+                } elseif ($normalizedCol === 'global_pool_reserve') {
+                    $hasPtPoolResCol = true;
+                } elseif ($normalizedCol === 'global_pool_status') {
+                    $hasPtPoolStatusCol = true;
+                }
+            } elseif ($tbl === 'premium_transactions') {
+                if ($normalizedCol === 'gst_amount') {
+                    $hasPremGstCol = true;
+                } elseif ($normalizedCol === 'pg_fee') {
+                    $hasPremPgFeeCol = true;
+                } elseif ($normalizedCol === 'referral_status') {
+                    $hasPremRefStatusCol = true;
+                } elseif ($normalizedCol === 'global_pool_distributed') {
+                    $hasPremPoolDistCol = true;
+                } elseif ($normalizedCol === 'global_pool_reserve') {
+                    $hasPremPoolResCol = true;
+                } elseif ($normalizedCol === 'global_pool_status') {
+                    $hasPremPoolStatusCol = true;
+                }
             }
         }
     }
 } catch (Exception $eColCheck) {
     // Keep safe false defaults if metadata query fails
 }
+try {
+    $tblStmt = $pdo->query("
+        SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'global_pool_reserves'
+    ");
+    if ($tblStmt && count($tblStmt->fetchAll(PDO::FETCH_ASSOC)) > 0) {
+        $hasGlobalPoolReservesTable = true;
+    }
+} catch (Exception $eTblCheck) {
+    // Keep safe false default
+}
+$hasPtAccountingCols = ($hasPtGstCol && $hasPtPgFeeCol && $hasPtRefStatusCol);
+$hasPtPoolBreakdownCols = ($hasPtPoolDistCol && $hasPtPoolResCol && $hasPtPoolStatusCol);
+$hasPremAccountingCols = ($hasPremGstCol && $hasPremPgFeeCol && $hasPremRefStatusCol);
+$hasPremPoolBreakdownCols = ($hasPremPoolDistCol && $hasPremPoolResCol && $hasPremPoolStatusCol);
 
 $safeRollback = static function (PDO $conn): void {
     try {
@@ -509,6 +567,36 @@ try {
             'duplicate' => true,
             'message' => 'Payment already verified and credited previously (idempotent duplicate).'
         ];
+        if ($existingTx['purpose'] === 'premium_video_upload') {
+            $dupGst = isset($existingTx['gst_amount']) && floatval($existingTx['gst_amount']) > 0 ? floatval($existingTx['gst_amount']) : 0.90;
+            $dupPg = isset($existingTx['pg_fee']) && floatval($existingTx['pg_fee']) > 0 ? floatval($existingTx['pg_fee']) : 0.10;
+            $dupRefStatus = !empty($existingTx['referral_status']) && $existingTx['referral_status'] !== 'not_applicable'
+                ? (string)$existingTx['referral_status']
+                : (floatval($existingTx['referral_commission'] ?? 0) > 0 ? 'credited' : 'unassigned_pending');
+            $dupPoolAllocated = floatval($existingTx['global_pool_allocation']);
+            $dupPoolDistributed = isset($existingTx['global_pool_distributed'])
+                ? floatval($existingTx['global_pool_distributed'])
+                : $dupPoolAllocated;
+            $dupPoolReserve = isset($existingTx['global_pool_reserve'])
+                ? floatval($existingTx['global_pool_reserve'])
+                : max(0.0, round($dupPoolAllocated - $dupPoolDistributed, 2));
+            $dupPoolStatus = !empty($existingTx['global_pool_status']) && $existingTx['global_pool_status'] !== 'not_applicable'
+                ? (string)$existingTx['global_pool_status']
+                : ($dupPoolReserve <= 0 ? 'settled' : ($dupPoolDistributed <= 0 ? 'pending_reserve' : 'partial_reserve'));
+            $duplicateResp['distribution'] = [
+                'directReferralAmount' => floatval($existingTx['referral_commission']),
+                'referralStatus' => $dupRefStatus,
+                'adminAmount' => floatval($existingTx['admin_allocation']),
+                'globalPoolAmount' => $dupPoolAllocated,
+                'globalPoolDistributedAmount' => $dupPoolDistributed,
+                'globalPoolReserveAmount' => $dupPoolReserve,
+                'globalPoolStatus' => $dupPoolStatus,
+                'gstAmount' => $dupGst,
+                'pgFeeAmount' => $dupPg,
+                'taxAndFees' => round($dupGst + $dupPg, 2),
+                'totalAmount' => floatval($existingTx['amount']),
+            ];
+        }
         if ($existingSub) {
             $duplicateResp['subscription'] = $existingSub;
         }
@@ -567,6 +655,17 @@ try {
 
     $createdSubscription = null;
     $isPremiumUpload = ($purpose === 'premium_video_upload');
+    $gstAmount = 0.00;
+    $pgFeeAmount = 0.00;
+    $taxAndFees = 0.00;
+    $referralStatus = 'not_applicable';
+    $globalPoolDistributed = 0.00;
+    $globalPoolReserve = 0.00;
+    $globalPoolStatus = 'not_applicable';
+    $globalPoolReserveReason = null;
+    $globalPoolReserveId = null;
+    $creatorPayouts = [];
+    $eligibleCreatorCount = 0;
 
     if ($isPremiumUpload) {
         // 3.3 Premium Video sequence allocation under row lock (isolating counter to premium uploads only)
@@ -574,9 +673,13 @@ try {
         $countRow = $stmtCount->fetch();
         $txNumber = intval($countRow['total'] ?? 0) + 1;
 
-        // Special 11th-formula rule: txNumber >= 11 AND (txNumber - 11) % 10 === 0
-        $isSpecial = ($txNumber >= 11 && ($txNumber - 11) % 10 === 0);
-        $specialTag = $isSpecial ? 'SPECIAL_GLOBAL_RULE' : 'NORMAL_PREMIUM';
+        // Uniform Phase 1.1 ₹6 business rule for every premium transaction (including #11, #21, #31, #41...):
+        // - Referral allocation: ₹1.00 ('credited' to referrer OR 'unassigned_pending' if no valid referrer)
+        // - Admin allocation: ₹1.00 ALWAYS (never receives 0-eligible fallback or rounding residual paise)
+        // - GST + Payment Gateway: ₹1.00 (GST ₹0.90 + PG Fee ₹0.10)
+        // - Global Distribution Pool: ₹3.00 ALWAYS (distributed + pending reserve = ₹3.00)
+        $isSpecial = false;
+        $specialTag = 'NORMAL_PREMIUM';
 
         // Verify direct referral sponsor strictly from users table
         $verifiedReferrerId = null;
@@ -604,119 +707,153 @@ try {
         $adminRow = $stmtAdmin->fetch();
         $adminUserId = $adminRow['user_id'] ?? 'FT102857';
 
-        // Option A Approved Allocation:
-        // Every verified payment is exactly ₹6.
-        // GST/Payment Gateway reporting allocation = ₹1.00 (implicit in ₹6 - ₹5 base).
-        // If valid referrer: Referrer = ₹1.00.
-        // If NO valid referrer: unallocated ₹1.00 redirects to Admin.
         $hasReferrer = !empty($verifiedReferrerId);
-        $referralCommission = $hasReferrer ? 1.00 : 0.00;
-        $unallocatedReferrerPaise = $hasReferrer ? 0 : 100; // 100 paise if no referrer
+        $referralCommission = 1.00;
+        $referralStatus = $hasReferrer ? 'credited' : 'unassigned_pending';
+        $adminAllocation = 1.00;
+        $globalPoolAllocation = 3.00;
+        $gstAmount = 0.90;
+        $pgFeeAmount = 0.10;
+        $taxAndFees = 1.00;
 
         $creatorPayouts = [];
         $eligibleCreatorCount = 0;
 
-        if ($isSpecial) {
-            // Special transaction (11th, 21st, 31st...):
-            // Global Pool receives ₹0.
-            // If valid referrer: Referrer = ₹1.00, Admin = ₹4.00.
-            // If no valid referrer: Admin receives ₹5.00 (base ₹4 + unallocated ₹1).
-            $adminAllocation = $hasReferrer ? 4.00 : 5.00;
-            $globalPoolAllocation = 0.00;
+        // Per-video weighted Ads Earnings Share distribution of the ₹3.00 pool (300 paise).
+        // Query eligible previous videos from uploaded_videos, strictly excluding videos by the current uploader:
+        $adEarningsExpr = $hasAdEarningsCol ? 'COALESCE(ad_earnings, 0.00) AS ad_earnings' : '0.00 AS ad_earnings';
+        $blockedFilter = $hasIsBlockedCol ? "\n                  AND (is_blocked = 0 OR is_blocked IS NULL)" : '';
+        $stmtEligibleVideos = $pdo->prepare('
+            SELECT id AS video_id, user_id, ' . $adEarningsExpr . '
+            FROM uploaded_videos
+            WHERE (video_type = "premium" OR payment_status = "paid")
+              AND UPPER(user_id) != UPPER(?)' . $blockedFilter . '
+            ORDER BY created_at ASC, id ASC
+        ');
+        $stmtEligibleVideos->execute([$userId]);
+        $eligibleVideos = $stmtEligibleVideos->fetchAll(PDO::FETCH_ASSOC);
+        $eligibleVideoCount = count($eligibleVideos);
+        $eligibleCreatorCount = $eligibleVideoCount;
+
+        $poolPaise = 300;
+        $distributedPaise = 0;
+        $reservePaise = $poolPaise;
+
+        if ($eligibleVideoCount === 0) {
+            // Zero eligible previous videos: hold entire ₹3.00 in pending Global Pool reserve
+            $distributedPaise = 0;
+            $reservePaise = $poolPaise;
         } else {
-            // Normal transaction:
-            // Base Admin = ₹1.00 (+ ₹1.00 if no valid referrer)
-            $baseAdminPaise = 100 + $unallocatedReferrerPaise;
+            // Scale DECIMAL(14,4) ad_earnings to integer micro-units (x 10,000) to avoid IEEE 754 float drift
+            $scaledUnits = [];
+            $totalUnits = 0;
+            foreach ($eligibleVideos as $idx => $ev) {
+                $units = (int)round(max(0.0, floatval($ev['ad_earnings'] ?? 0)) * 10000);
+                $scaledUnits[$idx] = $units;
+                $totalUnits += $units;
+            }
 
-            // Company Requirement: Per-video weighted Ads Earnings Share distribution of the ₹3 pool (300 paise).
-            // Query eligible previous videos from uploaded_videos, strictly excluding videos by the current uploader:
-            $adEarningsExpr = $hasAdEarningsCol ? 'COALESCE(ad_earnings, 0.00) AS ad_earnings' : '0.00 AS ad_earnings';
-            $blockedFilter = $hasIsBlockedCol ? "\n                  AND (is_blocked = 0 OR is_blocked IS NULL)" : '';
-            $stmtEligibleVideos = $pdo->prepare('
-                SELECT id AS video_id, user_id, ' . $adEarningsExpr . '
-                FROM uploaded_videos
-                WHERE (video_type = "premium" OR payment_status = "paid")
-                  AND UPPER(user_id) != UPPER(?)' . $blockedFilter . '
-                ORDER BY created_at ASC, id ASC
-            ');
-            $stmtEligibleVideos->execute([$userId]);
-            $eligibleVideos = $stmtEligibleVideos->fetchAll(PDO::FETCH_ASSOC);
-            $eligibleVideoCount = count($eligibleVideos);
+            if ($totalUnits > 0) {
+                $allocatedPaise = 0;
+                foreach ($eligibleVideos as $idx => $ev) {
+                    $units = $scaledUnits[$idx];
+                    $amountPaise = intdiv($units * $poolPaise, $totalUnits);
+                    $allocatedPaise += $amountPaise;
 
-            if ($eligibleVideoCount === 0) {
-                // If there are no eligible previous videos, redirect the entire ₹3 pool to Admin
-                $adminPaise = $baseAdminPaise + 300;
-                $adminAllocation = $adminPaise / 100;
-                $globalPoolAllocation = 0.00;
-            } else {
-                $poolPaise = 300;
-                $totalAdEarnings = 0.0;
-                foreach ($eligibleVideos as $ev) {
-                    $totalAdEarnings += max(0.0, floatval($ev['ad_earnings'] ?? 0));
+                    $creatorPayouts[] = [
+                        'userId' => $ev['user_id'],
+                        'videoId' => $ev['video_id'],
+                        'amount' => $amountPaise / 100,
+                        'amountPaise' => $amountPaise,
+                        'weight' => $units / $totalUnits,
+                        'adEarnings' => max(0.0, floatval($ev['ad_earnings'] ?? 0)),
+                    ];
                 }
+                $distributedPaise = $allocatedPaise;
+                $reservePaise = max(0, $poolPaise - $allocatedPaise);
+            } else {
+                // Fallback to equal per-video integer distribution if total ad earnings is 0
+                $perVideoPaise = intdiv($poolPaise, $eligibleVideoCount);
+                $distributedPaise = $perVideoPaise * $eligibleVideoCount;
+                $reservePaise = $poolPaise - $distributedPaise;
 
-                if ($totalAdEarnings > 0) {
-                    // Weighted allocation based on actual eligible uploaded_videos.ad_earnings
-                    $allocatedPaise = 0;
-                    foreach ($eligibleVideos as $ev) {
-                        $vEarnings = max(0.0, floatval($ev['ad_earnings'] ?? 0));
-                        $weight = $vEarnings / $totalAdEarnings;
-                        $amountPaise = intval(floor($weight * $poolPaise));
-                        $allocatedPaise += $amountPaise;
-
-                        $creatorPayouts[] = [
-                            'userId' => $ev['user_id'],
-                            'videoId' => $ev['video_id'],
-                            'amount' => $amountPaise / 100,
-                            'amountPaise' => $amountPaise,
-                            'weight' => $weight,
-                            'adEarnings' => $vEarnings,
-                        ];
-                    }
-                    $residualPaise = max(0, $poolPaise - $allocatedPaise);
-                    $adminPaise = $baseAdminPaise + $residualPaise;
-                    $adminAllocation = $adminPaise / 100;
-                    $globalPoolAllocation = $allocatedPaise / 100;
-                } else {
-                    // Fallback to equal per-video integer distribution if total ad earnings is 0
-                    $perVideoPaise = intdiv($poolPaise, $eligibleVideoCount);
-                    $distributedPaise = $perVideoPaise * $eligibleVideoCount;
-                    $residualPaise = $poolPaise - $distributedPaise;
-
-                    $adminPaise = $baseAdminPaise + $residualPaise;
-                    $adminAllocation = $adminPaise / 100;
-                    $globalPoolAllocation = $distributedPaise / 100;
-
-                    foreach ($eligibleVideos as $ev) {
-                        $creatorPayouts[] = [
-                            'userId' => $ev['user_id'],
-                            'videoId' => $ev['video_id'],
-                            'amount' => $perVideoPaise / 100,
-                            'amountPaise' => $perVideoPaise,
-                            'weight' => 1 / $eligibleVideoCount,
-                            'adEarnings' => 0.0,
-                        ];
-                    }
+                foreach ($eligibleVideos as $ev) {
+                    $creatorPayouts[] = [
+                        'userId' => $ev['user_id'],
+                        'videoId' => $ev['video_id'],
+                        'amount' => $perVideoPaise / 100,
+                        'amountPaise' => $perVideoPaise,
+                        'weight' => 1 / $eligibleVideoCount,
+                        'adEarnings' => 0.0,
+                    ];
                 }
             }
         }
 
+        $globalPoolDistributed = $distributedPaise / 100;
+        $globalPoolReserve = $reservePaise / 100;
+        $globalPoolStatus = ($reservePaise === 0)
+            ? 'settled'
+            : (($distributedPaise === 0) ? 'pending_reserve' : 'partial_reserve');
+        $globalPoolReserveReason = ($reservePaise === 0)
+            ? null
+            : (($distributedPaise === 0) ? 'no_eligible_videos' : 'rounding_residual');
+
         // Insert into payment_transactions (protected by UNIQUE key on payment_id)
-        $stmtTx = $pdo->prepare('
-            INSERT INTO payment_transactions (
-                order_id, payment_id, user_id, user_name, video_id, purpose, amount,
-                tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation,
-                created_at
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?,
-                NOW()
-            )
-        ');
-        $stmtTx->execute([
-            $orderId, $paymentId, $userId, $userName, $videoId ?: null, $purpose, $amount,
-            $txNumber, $isSpecial ? 1 : 0, $specialTag, $referralCommission, $adminAllocation, $globalPoolAllocation
-        ]);
+        if ($hasPtAccountingCols && $hasPtPoolBreakdownCols) {
+            $stmtTx = $pdo->prepare('
+                INSERT INTO payment_transactions (
+                    order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+                    tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation,
+                    global_pool_distributed, global_pool_reserve, global_pool_status,
+                    gst_amount, pg_fee, referral_status, created_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, 0, ?, ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?, NOW()
+                )
+            ');
+            $stmtTx->execute([
+                $orderId, $paymentId, $userId, $userName, $videoId ?: null, $purpose, $amount,
+                $txNumber, $specialTag, $referralCommission, $adminAllocation, $globalPoolAllocation,
+                $globalPoolDistributed, $globalPoolReserve, $globalPoolStatus,
+                $gstAmount, $pgFeeAmount, $referralStatus
+            ]);
+        } elseif ($hasPtAccountingCols) {
+            $stmtTx = $pdo->prepare('
+                INSERT INTO payment_transactions (
+                    order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+                    tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation,
+                    gst_amount, pg_fee, referral_status, created_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, 0, ?, ?, ?, ?,
+                    ?, ?, ?, NOW()
+                )
+            ');
+            $stmtTx->execute([
+                $orderId, $paymentId, $userId, $userName, $videoId ?: null, $purpose, $amount,
+                $txNumber, $specialTag, $referralCommission, $adminAllocation, $globalPoolAllocation,
+                $gstAmount, $pgFeeAmount, $referralStatus
+            ]);
+        } else {
+            $stmtTx = $pdo->prepare('
+                INSERT INTO payment_transactions (
+                    order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+                    tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation,
+                    created_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, 0, ?, ?, ?, ?,
+                    NOW()
+                )
+            ');
+            $stmtTx->execute([
+                $orderId, $paymentId, $userId, $userName, $videoId ?: null, $purpose, $amount,
+                $txNumber, $specialTag, $referralCommission, $adminAllocation, $globalPoolAllocation
+            ]);
+        }
 
         // Insert into premium_transactions audit sequence
         try {
@@ -724,28 +861,69 @@ try {
                 mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff),
                 mt_rand(0, 0x0fff) | 0x4000, mt_rand(0, 0x3fff) | 0x8000,
                 mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff));
-            $stmtPt = $pdo->prepare('
-                INSERT INTO premium_transactions (
-                    id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
-                    amount, transaction_type, is_special, special_tag, referral_commission,
-                    admin_allocation, global_pool_allocation, created_at
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?,
-                    ?, "premium_upload", ?, ?, ?,
-                    ?, ?, NOW()
-                )
-            ');
-            $stmtPt->execute([
-                $ptId, $txNumber, $paymentId, $orderId, $videoId ?: 'vid_unknown', $userId, $verifiedReferrerId,
-                $amount, $isSpecial ? 1 : 0, $specialTag, $referralCommission,
-                $adminAllocation, $globalPoolAllocation
-            ]);
+            if ($hasPremAccountingCols && $hasPremPoolBreakdownCols) {
+                $stmtPt = $pdo->prepare('
+                    INSERT INTO premium_transactions (
+                        id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+                        amount, transaction_type, is_special, special_tag, referral_commission,
+                        admin_allocation, global_pool_allocation, global_pool_distributed, global_pool_reserve, global_pool_status,
+                        gst_amount, pg_fee, referral_status, created_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?,
+                        ?, "premium_upload", 0, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, NOW()
+                    )
+                ');
+                $stmtPt->execute([
+                    $ptId, $txNumber, $paymentId, $orderId, $videoId ?: 'vid_unknown', $userId, $verifiedReferrerId,
+                    $amount, $specialTag, $referralCommission,
+                    $adminAllocation, $globalPoolAllocation, $globalPoolDistributed, $globalPoolReserve, $globalPoolStatus,
+                    $gstAmount, $pgFeeAmount, $referralStatus
+                ]);
+            } elseif ($hasPremAccountingCols) {
+                $stmtPt = $pdo->prepare('
+                    INSERT INTO premium_transactions (
+                        id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+                        amount, transaction_type, is_special, special_tag, referral_commission,
+                        admin_allocation, global_pool_allocation, gst_amount, pg_fee, referral_status, created_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?,
+                        ?, "premium_upload", 0, ?, ?,
+                        ?, ?, ?, ?, ?, NOW()
+                    )
+                ');
+                $stmtPt->execute([
+                    $ptId, $txNumber, $paymentId, $orderId, $videoId ?: 'vid_unknown', $userId, $verifiedReferrerId,
+                    $amount, $specialTag, $referralCommission,
+                    $adminAllocation, $globalPoolAllocation, $gstAmount, $pgFeeAmount, $referralStatus
+                ]);
+            } else {
+                $stmtPt = $pdo->prepare('
+                    INSERT INTO premium_transactions (
+                        id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+                        amount, transaction_type, is_special, special_tag, referral_commission,
+                        admin_allocation, global_pool_allocation, created_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?, ?,
+                        ?, "premium_upload", 0, ?, ?,
+                        ?, ?, NOW()
+                    )
+                ');
+                $stmtPt->execute([
+                    $ptId, $txNumber, $paymentId, $orderId, $videoId ?: 'vid_unknown', $userId, $verifiedReferrerId,
+                    $amount, $specialTag, $referralCommission,
+                    $adminAllocation, $globalPoolAllocation
+                ]);
+            }
         } catch (Exception $ePt) {
             // Table optional
         }
 
-        // 1. Credit direct referral commission (₹1.00) in income_ledger and wallet_balances if valid
-        if (!empty($verifiedReferrerId) && $referralCommission > 0) {
+        // 1. Direct referral commission (₹1.00)
+        // If valid referrer: credit income_ledger (settled) & wallet_balances (+₹1.00).
+        // If no valid referrer: preserve ₹1.00 in explicit 'unassigned_pending' ledger entry without crediting Admin or fake wallets.
+        if (!empty($verifiedReferrerId)) {
             $txRefId = 'TX_REF_' . $paymentId;
             $ledgerUuid = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
                 mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff),
@@ -782,18 +960,40 @@ try {
                     updated_at = NOW()
             ');
             $stmtCredit->execute([$verifiedReferrerId]);
+        } else {
+            $txRefPendingId = 'TX_REF_PENDING_' . $paymentId;
+            $pendingLedgerUuid = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+                mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+                mt_rand(0, 0x0fff) | 0x4000, mt_rand(0, 0x3fff) | 0x8000,
+                mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff));
+
+            $stmtPendingRefLedger = $pdo->prepare('
+                INSERT INTO income_ledger (
+                    id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+                    income_type, amount, status, special_tag, description, created_at
+                ) VALUES (
+                    ?, ?, "UNASSIGNED_REFERRAL", ?, ?, ?,
+                    "referral_income", 1.0000, "pending", "REFERRAL_UNASSIGNED_PENDING", ?, NOW()
+                )
+            ');
+            $stmtPendingRefLedger->execute([
+                $pendingLedgerUuid,
+                $txRefPendingId,
+                $userId,
+                $userName,
+                $videoId ?: null,
+                "Unassigned referral allocation (₹1.00 pending) — no valid referrer for Premium Video #{$txNumber} upload by {$userName} ({$userId})"
+            ]);
         }
 
-        // 2. Credit Admin allocation in income_ledger and wallet_balances
+        // 2. Credit Admin allocation (strictly ₹1.00) in income_ledger and wallet_balances
         if ($adminAllocation > 0) {
             $txAdmId = 'TX_ADM_' . $paymentId;
             $admLedgerUuid = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
                 mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff),
                 mt_rand(0, 0x0fff) | 0x4000, mt_rand(0, 0x3fff) | 0x8000,
                 mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff));
-            $admDesc = $isSpecial
-                ? "Admin Allocation (₹{$adminAllocation}) for Special Premium Video #{$txNumber} upload by {$userName} ({$userId})"
-                : "Admin Allocation (₹{$adminAllocation}) for Premium Video #{$txNumber} upload by {$userName} ({$userId})";
+            $admDesc = "Admin Allocation (₹{$adminAllocation}) for Premium Video #{$txNumber} upload by {$userName} ({$userId})";
 
             $stmtAdmLedger = $pdo->prepare('
                 INSERT INTO income_ledger (
@@ -876,6 +1076,62 @@ try {
                     $payout['amount'],
                     $payout['amount'],
                     $payout['amount']
+                ]);
+            }
+        }
+
+        // 3b. Preserve any unallocated ₹3.00 or rounding residual in Global Pool pending reserve
+        if ($reservePaise > 0 && $globalPoolReserveReason !== null) {
+            $txGlbReserveId = 'TX_GLB_RESERVE_' . $paymentId;
+            $glbResLedgerUuid = sprintf('%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+                mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff),
+                mt_rand(0, 0x0fff) | 0x4000, mt_rand(0, 0x3fff) | 0x8000,
+                mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff));
+            $reserveDesc = ($globalPoolReserveReason === 'no_eligible_videos')
+                ? "Global Pool pending reserve (₹{$globalPoolReserve} — 0 eligible previous videos for Premium Video #{$txNumber})"
+                : "Global Pool pending reserve (₹{$globalPoolReserve} — integer-paise rounding residual for Premium Video #{$txNumber})";
+
+            $stmtGlbResLedger = $pdo->prepare('
+                INSERT INTO income_ledger (
+                    id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+                    income_type, amount, status, special_tag, description, created_at
+                ) VALUES (
+                    ?, ?, "GLOBAL_POOL_RESERVE", ?, ?, ?,
+                    "global_income", ?, "pending", "GLOBAL_POOL_PENDING_RESERVE", ?, NOW()
+                )
+            ');
+            $stmtGlbResLedger->execute([
+                $glbResLedgerUuid,
+                $txGlbReserveId,
+                $userId,
+                $userName,
+                $videoId ?: null,
+                $globalPoolReserve,
+                $reserveDesc
+            ]);
+
+            if ($hasGlobalPoolReservesTable) {
+                $globalPoolReserveId = 'gpr_' . round(microtime(true) * 1000) . '_' . substr(bin2hex(random_bytes(4)), 0, 8);
+                $stmtReserve = $pdo->prepare('
+                    INSERT INTO global_pool_reserves (
+                        id, payment_id, order_id, tx_number, source_user_id, source_video_id,
+                        reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
+                    ) VALUES (
+                        ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, "pending", ?, NOW(), NOW()
+                    )
+                ');
+                $stmtReserve->execute([
+                    $globalPoolReserveId,
+                    $paymentId,
+                    $orderId,
+                    $txNumber,
+                    strtoupper($userId),
+                    $videoId ?: null,
+                    $globalPoolReserve,
+                    $reservePaise,
+                    $globalPoolReserveReason,
+                    $reserveDesc
                 ]);
             }
         }
@@ -1354,19 +1610,30 @@ try {
         'txNumber' => $txNumber,
         'isSpecialTransaction' => $isSpecial,
         'specialTag' => $specialTag,
-        'distribution' => [
+        'distribution' => array_merge([
             'directReferralAmount' => $verifiedReferrerId && !empty($levelPayouts[0]) ? $levelPayouts[0]['amount'] : $referralCommission,
             'referrerId' => $verifiedReferrerId,
+            'referralStatus' => $referralStatus,
             'adminAmount' => $adminAllocation,
             'adminPercent' => $adminPercent,
             'globalPoolAmount' => $globalPoolAllocation,
+            'gstAmount' => $gstAmount,
+            'pgFeeAmount' => $pgFeeAmount,
+            'taxAndFees' => $taxAndFees,
+            'totalAmount' => $amount,
             'eligibleMembersCount' => $isPremiumUpload ? $eligibleCreatorCount : 0,
             'perMemberShare' => $isPremiumUpload && $eligibleCreatorCount > 0 && !empty($creatorPayouts[0]) ? $creatorPayouts[0]['amount'] : 0.0,
             'creatorPayouts' => $creatorPayouts,
             'totalReferralAmount' => $totalReferralAmount,
             'levelPayouts' => $levelPayouts,
             'missingLevels' => $missingLevels,
-        ]
+        ], $isPremiumUpload ? [
+            'globalPoolDistributedAmount' => $globalPoolDistributed,
+            'globalPoolReserveAmount' => $globalPoolReserve,
+            'globalPoolStatus' => $globalPoolStatus,
+            'globalPoolReserveReason' => $globalPoolReserveReason,
+            'globalPoolReserveId' => $globalPoolReserveId,
+        ] : [])
     ]);
 } catch (Throwable $e) {
     $safeRollback($pdo);
@@ -1419,6 +1686,36 @@ try {
                     'duplicate' => true,
                     'message' => 'Concurrent duplicate detected and resolved safely without double crediting.'
                 ];
+                if ($existingTx['purpose'] === 'premium_video_upload') {
+                    $dupGst = isset($existingTx['gst_amount']) && floatval($existingTx['gst_amount']) > 0 ? floatval($existingTx['gst_amount']) : 0.90;
+                    $dupPg = isset($existingTx['pg_fee']) && floatval($existingTx['pg_fee']) > 0 ? floatval($existingTx['pg_fee']) : 0.10;
+                    $dupRefStatus = !empty($existingTx['referral_status']) && $existingTx['referral_status'] !== 'not_applicable'
+                        ? (string)$existingTx['referral_status']
+                        : (floatval($existingTx['referral_commission'] ?? 0) > 0 ? 'credited' : 'unassigned_pending');
+                    $dupPoolAllocated = floatval($existingTx['global_pool_allocation']);
+                    $dupPoolDistributed = isset($existingTx['global_pool_distributed'])
+                        ? floatval($existingTx['global_pool_distributed'])
+                        : $dupPoolAllocated;
+                    $dupPoolReserve = isset($existingTx['global_pool_reserve'])
+                        ? floatval($existingTx['global_pool_reserve'])
+                        : max(0.0, round($dupPoolAllocated - $dupPoolDistributed, 2));
+                    $dupPoolStatus = !empty($existingTx['global_pool_status']) && $existingTx['global_pool_status'] !== 'not_applicable'
+                        ? (string)$existingTx['global_pool_status']
+                        : ($dupPoolReserve <= 0 ? 'settled' : ($dupPoolDistributed <= 0 ? 'pending_reserve' : 'partial_reserve'));
+                    $duplicateResp['distribution'] = [
+                        'directReferralAmount' => floatval($existingTx['referral_commission']),
+                        'referralStatus' => $dupRefStatus,
+                        'adminAmount' => floatval($existingTx['admin_allocation']),
+                        'globalPoolAmount' => $dupPoolAllocated,
+                        'globalPoolDistributedAmount' => $dupPoolDistributed,
+                        'globalPoolReserveAmount' => $dupPoolReserve,
+                        'globalPoolStatus' => $dupPoolStatus,
+                        'gstAmount' => $dupGst,
+                        'pgFeeAmount' => $dupPg,
+                        'taxAndFees' => round($dupGst + $dupPg, 2),
+                        'totalAmount' => floatval($existingTx['amount']),
+                    ];
+                }
                 if ($existingSub) {
                     $duplicateResp['subscription'] = $existingSub;
                 }

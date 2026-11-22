@@ -1,5 +1,4 @@
 import { api } from "./api";
-import { distributePremiumVideoIncome } from "./ledger-service";
 import {
   recordNewVideoUpload,
   markVideoPromoted,
@@ -188,8 +187,7 @@ export interface InitiatePremiumVideoPaymentParams {
 
 /**
  * Initiates Razorpay payment flow for Premium Video Upload (₹6 total deduction)
- * Normal: ₹1 Direct Referral, ₹1 Admin, ₹3 Global Pool, ₹1 GST/PG
- * Special: ₹1 Direct Referral (if referrer), ₹4 Admin, ₹0 Global Pool
+ * Uniform split: ₹1.00 Referral, ₹1.00 Admin, ₹3.00 Global Pool, ₹0.90 GST + ₹0.10 PG Fee
  */
 export async function initiatePremiumVideoPayment(
   params: InitiatePremiumVideoPaymentParams,
@@ -331,26 +329,7 @@ export async function initiatePremiumVideoPayment(
           visibility: normalizeVideoVisibility(params.visibility, "public"),
         });
 
-        // 4. Update local ledger cache if not a duplicate
-        const isDuplicate =
-          "duplicate" in res ? Boolean((res as { duplicate?: boolean })["duplicate"]) : false;
-        if (!isDuplicate) {
-          await distributePremiumVideoIncome({
-            uploaderUserId: effectiveUserId,
-            uploaderName: effectiveUserName,
-            videoId: newVideo.id || effectiveVideoId,
-            paymentId,
-            directReferrerId: params.directReferrerId ?? null,
-            ...(res.txNumber !== undefined && { txNumber: res.txNumber }),
-            ...(res.isSpecialTransaction !== undefined && {
-              isSpecialTransaction: res.isSpecialTransaction,
-            }),
-            ...(res.specialTag !== undefined && { specialTag: res.specialTag }),
-            ...(res.distribution?.adminAmount !== undefined && {
-              adminAmount: res.distribution.adminAmount,
-            }),
-          });
-        }
+        // 4. Financial distribution (Referral, Admin, GST+PG, Global Pool) is settled authoritatively on the server during api.payments.verify
 
         activeCheckoutLock = false;
         params.onSuccess(paymentId, newVideo);

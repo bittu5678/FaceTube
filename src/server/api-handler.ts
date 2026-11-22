@@ -16,6 +16,10 @@ import {
   resolveUplineSponsors,
   type AdsUplineSponsor,
   calculateWeightedPoolPayouts,
+  getPersistentGlobalPoolState,
+  settlePersistentGlobalPoolReserves,
+  type GlobalPoolStatus,
+  type GlobalPoolReserveReason,
   executeRazorpayRefund,
   getPersistentRefundRequests,
   savePersistentRefundRequest,
@@ -3138,12 +3142,27 @@ async function dispatchApiRequest(
         if (pool) {
           let hasPromoPaymentIdCol = false;
           let hasPromoAppliedAtCol = false;
+          let hasPtGstCol = false;
+          let hasPtPgFeeCol = false;
+          let hasPtRefStatusCol = false;
+          let hasPtPoolDistCol = false;
+          let hasPtPoolResCol = false;
+          let hasPtPoolStatusCol = false;
+          let hasPremGstCol = false;
+          let hasPremPgFeeCol = false;
+          let hasPremRefStatusCol = false;
+          let hasPremPoolDistCol = false;
+          let hasPremPoolResCol = false;
+          let hasPremPoolStatusCol = false;
+          let hasGlobalPoolReservesTable = false;
           try {
             const [colRows]: any = await pool.query(
               `SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
                WHERE TABLE_SCHEMA = DATABASE()
                  AND ((TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME = 'promotion_payment_id')
-                   OR (TABLE_NAME = 'payment_orders' AND COLUMN_NAME = 'promotion_applied_at'))`,
+                   OR (TABLE_NAME = 'payment_orders' AND COLUMN_NAME = 'promotion_applied_at')
+                   OR (TABLE_NAME = 'payment_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status'))
+                   OR (TABLE_NAME = 'premium_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status')))`,
             );
             for (const colRow of colRows || []) {
               const tbl = String(colRow.TABLE_NAME || "").toLowerCase();
@@ -3152,11 +3171,41 @@ async function dispatchApiRequest(
                 hasPromoPaymentIdCol = true;
               } else if (tbl === "payment_orders" && col === "promotion_applied_at") {
                 hasPromoAppliedAtCol = true;
+              } else if (tbl === "payment_transactions") {
+                if (col === "gst_amount") hasPtGstCol = true;
+                else if (col === "pg_fee") hasPtPgFeeCol = true;
+                else if (col === "referral_status") hasPtRefStatusCol = true;
+                else if (col === "global_pool_distributed") hasPtPoolDistCol = true;
+                else if (col === "global_pool_reserve") hasPtPoolResCol = true;
+                else if (col === "global_pool_status") hasPtPoolStatusCol = true;
+              } else if (tbl === "premium_transactions") {
+                if (col === "gst_amount") hasPremGstCol = true;
+                else if (col === "pg_fee") hasPremPgFeeCol = true;
+                else if (col === "referral_status") hasPremRefStatusCol = true;
+                else if (col === "global_pool_distributed") hasPremPoolDistCol = true;
+                else if (col === "global_pool_reserve") hasPremPoolResCol = true;
+                else if (col === "global_pool_status") hasPremPoolStatusCol = true;
               }
             }
           } catch (_eCols) {
             // Keep false defaults if schema metadata check fails
           }
+          try {
+            const [tblRows]: any = await pool.query(
+              `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+               WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'global_pool_reserves'`,
+            );
+            if (Array.isArray(tblRows) && tblRows.length > 0) {
+              hasGlobalPoolReservesTable = true;
+            }
+          } catch (_eTbl) {
+            // Keep false if table check fails
+          }
+          const hasPtAccountingCols = hasPtGstCol && hasPtPgFeeCol && hasPtRefStatusCol;
+          const hasPtPoolBreakdownCols = hasPtPoolDistCol && hasPtPoolResCol && hasPtPoolStatusCol;
+          const hasPremAccountingCols = hasPremGstCol && hasPremPgFeeCol && hasPremRefStatusCol;
+          const hasPremPoolBreakdownCols =
+            hasPremPoolDistCol && hasPremPoolResCol && hasPremPoolStatusCol;
 
           const conn = await pool.getConnection();
           try {
@@ -3275,6 +3324,47 @@ async function dispatchApiRequest(
                     "Payment already verified and credited previously (idempotent duplicate).",
                 });
               }
+              const dupIsPremium = existingTx.purpose === "premium_video_upload";
+              const dupGst = dupIsPremium
+                ? Number(existingTx.gst_amount) > 0
+                  ? Number(existingTx.gst_amount)
+                  : 0.9
+                : 0;
+              const dupPg = dupIsPremium
+                ? Number(existingTx.pg_fee) > 0
+                  ? Number(existingTx.pg_fee)
+                  : 0.1
+                : 0;
+              const dupRefStatus = dupIsPremium
+                ? existingTx.referral_status && existingTx.referral_status !== "not_applicable"
+                  ? String(existingTx.referral_status)
+                  : Number(existingTx.referral_commission) > 0
+                    ? "credited"
+                    : "unassigned_pending"
+                : "not_applicable";
+              const dupPoolAllocated = Number(existingTx.global_pool_allocation);
+              const dupPoolDistributed = dupIsPremium
+                ? existingTx.global_pool_distributed !== undefined &&
+                  existingTx.global_pool_distributed !== null
+                  ? Number(existingTx.global_pool_distributed)
+                  : dupPoolAllocated
+                : 0;
+              const dupPoolReserve = dupIsPremium
+                ? existingTx.global_pool_reserve !== undefined &&
+                  existingTx.global_pool_reserve !== null
+                  ? Number(existingTx.global_pool_reserve)
+                  : Math.max(0, Number((dupPoolAllocated - dupPoolDistributed).toFixed(2)))
+                : 0;
+              const dupPoolStatus = dupIsPremium
+                ? existingTx.global_pool_status &&
+                  existingTx.global_pool_status !== "not_applicable"
+                  ? String(existingTx.global_pool_status)
+                  : dupPoolReserve <= 0
+                    ? "settled"
+                    : dupPoolDistributed <= 0
+                      ? "pending_reserve"
+                      : "partial_reserve"
+                : "not_applicable";
               return jsonResponse({
                 verified: true,
                 paymentId: existingTx.payment_id,
@@ -3287,8 +3377,20 @@ async function dispatchApiRequest(
                 distribution: {
                   directReferralAmount: Number(existingTx.referral_commission),
                   referrerId: existingTx.user_id,
+                  referralStatus: dupRefStatus,
                   adminAmount: Number(existingTx.admin_allocation),
-                  globalPoolAmount: Number(existingTx.global_pool_allocation),
+                  globalPoolAmount: dupPoolAllocated,
+                  ...(dupIsPremium
+                    ? {
+                        globalPoolDistributedAmount: dupPoolDistributed,
+                        globalPoolReserveAmount: dupPoolReserve,
+                        globalPoolStatus: dupPoolStatus,
+                        gstAmount: dupGst,
+                        pgFeeAmount: dupPg,
+                        taxAndFees: Number((dupGst + dupPg).toFixed(2)),
+                        totalAmount: Number(existingTx.amount),
+                      }
+                    : {}),
                 },
                 duplicate: true,
                 message: "Payment already verified and credited previously (idempotent duplicate).",
@@ -3422,12 +3524,22 @@ async function dispatchApiRequest(
 
             const isPremiumUpload = purpose === "premium_video_upload";
             let txNumber = 0;
-            let isSpecial = false;
+            const isSpecial = false;
             let specialTag = "NORMAL_PREMIUM";
             let verifiedReferrerId: string | null = null;
             let referralCommission = 0.0;
+            let referralStatus: "not_applicable" | "credited" | "unassigned_pending" =
+              "not_applicable";
             let adminAllocation = 0.0;
             let globalPoolAllocation = 0.0;
+            let globalPoolDistributed = 0.0;
+            let globalPoolReserve = 0.0;
+            let globalPoolStatus: GlobalPoolStatus = "not_applicable";
+            let globalPoolReserveReason: GlobalPoolReserveReason | null = null;
+            let globalPoolReserveId: string | null = null;
+            let gstAmount = 0.0;
+            let pgFeeAmount = 0.0;
+            let taxAndFees = 0.0;
             let levelPayouts: any[] = [];
             let missingLevels: number[] = [];
             let adminPercent = 60;
@@ -3452,8 +3564,7 @@ async function dispatchApiRequest(
                 `SELECT COUNT(*) as total FROM payment_transactions WHERE purpose = 'premium_video_upload' FOR UPDATE`,
               );
               txNumber = Number(cntRows?.[0]?.total || 0) + 1;
-              isSpecial = txNumber >= 11 && (txNumber - 11) % 10 === 0;
-              specialTag = isSpecial ? "SPECIAL_GLOBAL_RULE" : "NORMAL_PREMIUM";
+              specialTag = "NORMAL_PREMIUM";
 
               // Verify direct sponsor strictly from users table
               const [uRows]: any = await conn.query(
@@ -3475,129 +3586,248 @@ async function dispatchApiRequest(
                 }
               }
 
-              // Option A Approved Allocation:
-              // Every verified payment is exactly ₹6.
-              // GST/Payment Gateway reporting allocation = ₹1.00.
-              // If valid referrer: Referrer = ₹1.00.
-              // If NO valid referrer: unallocated ₹1.00 redirects to Admin.
+              // Uniform Phase 1.1 ₹6 rule across every premium transaction (including #11, #21, #31, #41...):
+              // - Referral = ₹1.00 ('credited' if valid referrer, 'unassigned_pending' if missing — NEVER transferred to Admin)
+              // - Admin = ₹1.00 ALWAYS (NEVER +₹3.00 on 0 eligible videos, NEVER +residualPaise on rounding)
+              // - GST = ₹0.90, PG Fee = ₹0.10
+              // - Global Distribution Pool = ₹3.00 ALWAYS (distributed + pending reserve = ₹3.00)
               const hasReferrer = Boolean(verifiedReferrerId);
-              referralCommission = hasReferrer ? 1.0 : 0.0;
-              const unallocatedReferrerPaise = hasReferrer ? 0 : 100;
+              referralCommission = 1.0;
+              referralStatus = hasReferrer ? "credited" : "unassigned_pending";
+              adminAllocation = 1.0;
+              globalPoolAllocation = 3.0;
+              gstAmount = 0.9;
+              pgFeeAmount = 0.1;
+              taxAndFees = 1.0;
               totalReferralAmount = referralCommission;
 
-              if (isSpecial) {
-                // Special transaction:
-                // Global pool = ₹0.00
-                // If referrer: Admin = ₹4.00; If no referrer: Admin = ₹5.00
-                adminAllocation = hasReferrer ? 4.0 : 5.0;
-                globalPoolAllocation = 0.0;
+              // Query eligible previous Premium videos, strictly excluding current uploader:
+              const [eligibleRows]: any = await conn.query(
+                `SELECT id AS video_id, user_id, COALESCE(ad_earnings, 0.00) AS ad_earnings
+                 FROM uploaded_videos
+                 WHERE (video_type = 'premium' OR payment_status = 'paid')
+                   AND UPPER(user_id) != UPPER(?)
+                   AND (is_blocked = 0 OR is_blocked IS NULL)
+                 ORDER BY created_at ASC, id ASC`,
+                [uploaderId],
+              );
+              const eligibleVideos: Array<{
+                userId: string;
+                videoId: string;
+                adEarnings: number;
+              }> = Array.isArray(eligibleRows)
+                ? eligibleRows.map((r: any) => ({
+                    userId: String(r.user_id).trim().toUpperCase(),
+                    videoId: String(r.video_id).trim(),
+                    adEarnings: Math.max(0, Number(r.ad_earnings) || 0),
+                  }))
+                : [];
+              eligibleCreatorCount = eligibleVideos.length;
+
+              const poolPaise = 300;
+              let distributedPaise = 0;
+              let reservePaise = poolPaise;
+
+              if (eligibleCreatorCount === 0) {
+                // Zero eligible previous videos: preserve entire ₹3.00 in pending Global Pool reserve
+                distributedPaise = 0;
+                reservePaise = poolPaise;
               } else {
-                // Normal transaction:
-                // Base Admin = ₹1.00 (+ ₹1.00 if no valid referrer)
-                const baseAdminPaise = 100 + unallocatedReferrerPaise;
+                // Distribute ₹3 pool (300 paise) via per-video weighted Ads Earnings Share; residuals stay in reserve
+                const weighted = calculateWeightedPoolPayouts(poolPaise, eligibleVideos);
+                distributedPaise = weighted.distributedPaise;
+                reservePaise = weighted.residualPaise;
 
-                // Query eligible previous Premium videos, strictly excluding current uploader:
-                const [eligibleRows]: any = await conn.query(
-                  `SELECT id AS video_id, user_id, COALESCE(ad_earnings, 0.00) AS ad_earnings
-                   FROM uploaded_videos
-                   WHERE (video_type = 'premium' OR payment_status = 'paid')
-                     AND UPPER(user_id) != UPPER(?)
-                     AND (is_blocked = 0 OR is_blocked IS NULL)
-                   ORDER BY created_at ASC, id ASC`,
-                  [uploaderId],
-                );
-                const eligibleVideos: Array<{
-                  userId: string;
-                  videoId: string;
-                  adEarnings: number;
-                }> = Array.isArray(eligibleRows)
-                  ? eligibleRows.map((r: any) => ({
-                      userId: String(r.user_id).trim().toUpperCase(),
-                      videoId: String(r.video_id).trim(),
-                      adEarnings: Math.max(0, Number(r.ad_earnings) || 0),
-                    }))
-                  : [];
-                eligibleCreatorCount = eligibleVideos.length;
-
-                if (eligibleCreatorCount === 0) {
-                  // Redirect entire ₹3 pool to Admin if no eligible previous creators
-                  const adminPaise = baseAdminPaise + 300;
-                  adminAllocation = adminPaise / 100;
-                  globalPoolAllocation = 0.0;
-                } else {
-                  // Distribute ₹3 pool (300 paise) via per-video weighted Ads Earnings Share
-                  const poolPaise = 300;
-                  const weighted = calculateWeightedPoolPayouts(poolPaise, eligibleVideos);
-
-                  adminAllocation = (baseAdminPaise + weighted.residualPaise) / 100;
-                  globalPoolAllocation = weighted.distributedPaise / 100;
-
-                  for (const p of weighted.payouts) {
-                    creatorPayouts.push({
-                      userId: p.userId,
-                      videoId: p.videoId,
-                      amount: p.amount,
-                      amountPaise: p.amountPaise,
-                    });
-                  }
+                for (const p of weighted.payouts) {
+                  creatorPayouts.push({
+                    userId: p.userId,
+                    videoId: p.videoId,
+                    amount: p.amount,
+                    amountPaise: p.amountPaise,
+                  });
                 }
               }
+
+              globalPoolDistributed = distributedPaise / 100;
+              globalPoolReserve = reservePaise / 100;
+              globalPoolStatus =
+                reservePaise === 0
+                  ? "settled"
+                  : distributedPaise === 0
+                    ? "pending_reserve"
+                    : "partial_reserve";
+              globalPoolReserveReason =
+                reservePaise === 0
+                  ? null
+                  : distributedPaise === 0
+                    ? "no_eligible_videos"
+                    : "rounding_residual";
 
               adminPercent = Math.round((adminAllocation / amount) * 100);
 
               // 1. Insert into payment_transactions
-              await conn.query(
-                `INSERT INTO payment_transactions (
-                  order_id, payment_id, user_id, user_name, video_id, purpose, amount,
-                  tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-                [
-                  orderId,
-                  paymentId,
-                  uploaderId,
-                  userName,
-                  videoId || null,
-                  purpose,
-                  amount,
-                  txNumber,
-                  isSpecial ? 1 : 0,
-                  specialTag,
-                  referralCommission,
-                  adminAllocation,
-                  globalPoolAllocation,
-                ],
-              );
-
-              // 2. Insert into premium_transactions audit table
-              try {
+              if (hasPtAccountingCols && hasPtPoolBreakdownCols) {
                 await conn.query(
-                  `INSERT INTO premium_transactions (
-                    id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
-                    amount, transaction_type, is_special, special_tag, referral_commission,
-                    admin_allocation, global_pool_allocation, created_at
-                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'premium_upload', ?, ?, ?, ?, ?, NOW())`,
+                  `INSERT INTO payment_transactions (
+                    order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+                    tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation,
+                    global_pool_distributed, global_pool_reserve, global_pool_status,
+                    gst_amount, pg_fee, referral_status, created_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
                   [
-                    crypto.randomUUID(),
-                    txNumber,
-                    paymentId,
                     orderId,
-                    videoId || null,
+                    paymentId,
                     uploaderId,
-                    verifiedReferrerId,
+                    userName,
+                    videoId || null,
+                    purpose,
                     amount,
-                    isSpecial ? 1 : 0,
+                    txNumber,
+                    specialTag,
+                    referralCommission,
+                    adminAllocation,
+                    globalPoolAllocation,
+                    globalPoolDistributed,
+                    globalPoolReserve,
+                    globalPoolStatus,
+                    gstAmount,
+                    pgFeeAmount,
+                    referralStatus,
+                  ],
+                );
+              } else if (hasPtAccountingCols) {
+                await conn.query(
+                  `INSERT INTO payment_transactions (
+                    order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+                    tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation,
+                    gst_amount, pg_fee, referral_status, created_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                  [
+                    orderId,
+                    paymentId,
+                    uploaderId,
+                    userName,
+                    videoId || null,
+                    purpose,
+                    amount,
+                    txNumber,
+                    specialTag,
+                    referralCommission,
+                    adminAllocation,
+                    globalPoolAllocation,
+                    gstAmount,
+                    pgFeeAmount,
+                    referralStatus,
+                  ],
+                );
+              } else {
+                await conn.query(
+                  `INSERT INTO payment_transactions (
+                    order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+                    tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation, created_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NOW())`,
+                  [
+                    orderId,
+                    paymentId,
+                    uploaderId,
+                    userName,
+                    videoId || null,
+                    purpose,
+                    amount,
+                    txNumber,
                     specialTag,
                     referralCommission,
                     adminAllocation,
                     globalPoolAllocation,
                   ],
                 );
+              }
+
+              // 2. Insert into premium_transactions audit table
+              try {
+                if (hasPremAccountingCols && hasPremPoolBreakdownCols) {
+                  await conn.query(
+                    `INSERT INTO premium_transactions (
+                      id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+                      amount, transaction_type, is_special, special_tag, referral_commission,
+                      admin_allocation, global_pool_allocation, global_pool_distributed, global_pool_reserve, global_pool_status,
+                      gst_amount, pg_fee, referral_status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'premium_upload', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                    [
+                      crypto.randomUUID(),
+                      txNumber,
+                      paymentId,
+                      orderId,
+                      videoId || null,
+                      uploaderId,
+                      verifiedReferrerId,
+                      amount,
+                      specialTag,
+                      referralCommission,
+                      adminAllocation,
+                      globalPoolAllocation,
+                      globalPoolDistributed,
+                      globalPoolReserve,
+                      globalPoolStatus,
+                      gstAmount,
+                      pgFeeAmount,
+                      referralStatus,
+                    ],
+                  );
+                } else if (hasPremAccountingCols) {
+                  await conn.query(
+                    `INSERT INTO premium_transactions (
+                      id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+                      amount, transaction_type, is_special, special_tag, referral_commission,
+                      admin_allocation, global_pool_allocation, gst_amount, pg_fee, referral_status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'premium_upload', 0, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+                    [
+                      crypto.randomUUID(),
+                      txNumber,
+                      paymentId,
+                      orderId,
+                      videoId || null,
+                      uploaderId,
+                      verifiedReferrerId,
+                      amount,
+                      specialTag,
+                      referralCommission,
+                      adminAllocation,
+                      globalPoolAllocation,
+                      gstAmount,
+                      pgFeeAmount,
+                      referralStatus,
+                    ],
+                  );
+                } else {
+                  await conn.query(
+                    `INSERT INTO premium_transactions (
+                      id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+                      amount, transaction_type, is_special, special_tag, referral_commission,
+                      admin_allocation, global_pool_allocation, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'premium_upload', 0, ?, ?, ?, ?, NOW())`,
+                    [
+                      crypto.randomUUID(),
+                      txNumber,
+                      paymentId,
+                      orderId,
+                      videoId || null,
+                      uploaderId,
+                      verifiedReferrerId,
+                      amount,
+                      specialTag,
+                      referralCommission,
+                      adminAllocation,
+                      globalPoolAllocation,
+                    ],
+                  );
+                }
               } catch (_ePt) {
                 // Audit table optional
               }
 
-              // 3. Insert into income_ledger & credit wallet_balances for Referrer
-              if (verifiedReferrerId && referralCommission > 0) {
+              // 3. Insert into income_ledger & credit wallet_balances for Referrer (or preserve unassigned_pending)
+              if (verifiedReferrerId) {
                 const txRefId = `TX_REF_${paymentId}`;
                 await conn.query(
                   `INSERT INTO income_ledger (
@@ -3626,14 +3856,28 @@ async function dispatchApiRequest(
                      updated_at = NOW()`,
                   [verifiedReferrerId],
                 );
+              } else {
+                const txRefPendingId = `TX_REF_PENDING_${paymentId}`;
+                await conn.query(
+                  `INSERT INTO income_ledger (
+                    id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+                    income_type, amount, status, special_tag, description, created_at
+                  ) VALUES (?, ?, 'UNASSIGNED_REFERRAL', ?, ?, ?, 'referral_income', 1.0000, 'pending', 'REFERRAL_UNASSIGNED_PENDING', ?, NOW())`,
+                  [
+                    crypto.randomUUID(),
+                    txRefPendingId,
+                    uploaderId,
+                    userName,
+                    videoId || null,
+                    `Unassigned referral allocation (₹1.00 pending) — no valid referrer for Premium Video #${txNumber} upload by ${userName} (${uploaderId})`,
+                  ],
+                );
               }
 
-              // 4. Insert into income_ledger & credit wallet_balances for Admin
+              // 4. Insert into income_ledger & credit wallet_balances for Admin (strictly ₹1.00)
               if (adminAllocation > 0) {
                 const txAdmId = `TX_ADM_${paymentId}`;
-                const admDesc = isSpecial
-                  ? `Admin Allocation (₹${adminAllocation.toFixed(2)}) for Special Premium Video #${txNumber} upload by ${userName} (${uploaderId})`
-                  : `Admin Allocation (₹${adminAllocation.toFixed(2)}) for Premium Video #${txNumber} upload by ${userName} (${uploaderId})`;
+                const admDesc = `Admin Allocation (₹${adminAllocation.toFixed(2)}) for Premium Video #${txNumber} upload by ${userName} (${uploaderId})`;
 
                 await conn.query(
                   `INSERT INTO income_ledger (
@@ -3703,10 +3947,56 @@ async function dispatchApiRequest(
                   );
                 }
               }
+
+              // 5b. Preserve any unallocated ₹3.00 or rounding residual in Global Pool pending reserve
+              if (reservePaise > 0 && globalPoolReserveReason) {
+                const txGlbReserveId = `TX_GLB_RESERVE_${paymentId}`;
+                const reserveDesc =
+                  globalPoolReserveReason === "no_eligible_videos"
+                    ? `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — 0 eligible previous videos for Premium Video #${txNumber})`
+                    : `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — integer-paise rounding residual for Premium Video #${txNumber})`;
+
+                await conn.query(
+                  `INSERT INTO income_ledger (
+                    id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+                    income_type, amount, status, special_tag, description, created_at
+                  ) VALUES (?, ?, 'GLOBAL_POOL_RESERVE', ?, ?, ?, 'global_income', ?, 'pending', 'GLOBAL_POOL_PENDING_RESERVE', ?, NOW())`,
+                  [
+                    crypto.randomUUID(),
+                    txGlbReserveId,
+                    uploaderId,
+                    userName,
+                    videoId || null,
+                    globalPoolReserve,
+                    reserveDesc,
+                  ],
+                );
+
+                if (hasGlobalPoolReservesTable) {
+                  globalPoolReserveId = `gpr_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+                  await conn.query(
+                    `INSERT INTO global_pool_reserves (
+                      id, payment_id, order_id, tx_number, source_user_id, source_video_id,
+                      reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NOW(), NOW())`,
+                    [
+                      globalPoolReserveId,
+                      paymentId,
+                      orderId,
+                      txNumber,
+                      uploaderId,
+                      videoId || null,
+                      globalPoolReserve,
+                      reservePaise,
+                      globalPoolReserveReason,
+                      reserveDesc,
+                    ],
+                  );
+                }
+              }
             } else {
               // Task 33: 7-Level Ads Promotion Referral Distribution
               txNumber = 0;
-              isSpecial = false;
               specialTag = "ADS_PROMOTION";
               globalPoolAllocation = 0.0;
 
@@ -3902,9 +4192,23 @@ async function dispatchApiRequest(
                   ? referralCommission
                   : levelPayouts.find((p) => p.level === 1)?.amount || 0,
                 referrerId: verifiedReferrerId,
+                referralStatus,
                 adminAmount: adminAllocation,
                 adminPercent,
                 globalPoolAmount: globalPoolAllocation,
+                ...(isPremiumUpload
+                  ? {
+                      globalPoolDistributedAmount: globalPoolDistributed,
+                      globalPoolReserveAmount: globalPoolReserve,
+                      globalPoolStatus,
+                      globalPoolReserveReason,
+                      globalPoolReserveId,
+                    }
+                  : {}),
+                gstAmount,
+                pgFeeAmount,
+                taxAndFees,
+                totalAmount: amount,
                 eligibleMembersCount: isPremiumUpload ? eligibleCreatorCount : 0,
                 perMemberShare:
                   isPremiumUpload && eligibleCreatorCount > 0 && creatorPayouts.length > 0
@@ -4022,7 +4326,11 @@ async function dispatchApiRequest(
                   (t.transactionId === `TX_ADM_${result.paymentId}` ||
                     t.transaction_id === `TX_ADM_${result.paymentId}` ||
                     t.transactionId === `TX_REF_${result.paymentId}` ||
-                    t.transaction_id === `TX_REF_${result.paymentId}`)),
+                    t.transaction_id === `TX_REF_${result.paymentId}` ||
+                    t.transactionId === `TX_REF_PENDING_${result.paymentId}` ||
+                    t.transaction_id === `TX_REF_PENDING_${result.paymentId}` ||
+                    t.transactionId === `TX_GLB_RESERVE_${result.paymentId}` ||
+                    t.transaction_id === `TX_GLB_RESERVE_${result.paymentId}`)),
             ),
           );
 
@@ -4030,7 +4338,7 @@ async function dispatchApiRequest(
             if (!store.wallets) store.wallets = {};
 
             if (purpose === "premium_video_upload" && result.distribution) {
-              // 1. Credit direct referral commission if valid
+              // 1. Credit direct referral commission if valid, or preserve unassigned_pending ledger record
               if (
                 verifiedReferrerId &&
                 result.distribution.directReferralAmount &&
@@ -4078,6 +4386,30 @@ async function dispatchApiRequest(
                   createdAt: new Date().toISOString(),
                   created_at: new Date().toISOString(),
                 });
+              } else if (result.distribution.directReferralAmount > 0) {
+                const comm = Number(result.distribution.directReferralAmount);
+                const txRefPendingId = `TX_REF_PENDING_${result.paymentId}`;
+                store.walletTransactions.unshift({
+                  id: `tx-ref-pending-${Date.now()}`,
+                  transactionId: txRefPendingId,
+                  transaction_id: txRefPendingId,
+                  userId: "UNASSIGNED_REFERRAL",
+                  user_id: "UNASSIGNED_REFERRAL",
+                  sourceUserId: uploaderId,
+                  source_user_id: uploaderId,
+                  sourceUserName: userName,
+                  source_user_name: userName,
+                  videoId: videoId || "",
+                  video_id: videoId || "",
+                  incomeType: "referral_income",
+                  income_type: "referral_income",
+                  amount: comm,
+                  status: "pending",
+                  specialTag: "REFERRAL_UNASSIGNED_PENDING",
+                  description: `Unassigned referral allocation (₹${comm.toFixed(2)} pending) — no valid referrer for Premium Video #${result.txNumber || 0} upload by ${userName} (${uploaderId})`,
+                  createdAt: new Date().toISOString(),
+                  created_at: new Date().toISOString(),
+                });
               }
 
               // 2. Credit Admin allocation
@@ -4106,9 +4438,7 @@ async function dispatchApiRequest(
                 w.updated_at = new Date().toISOString();
 
                 const txAdmId = `TX_ADM_${result.paymentId}`;
-                const admDesc = result.isSpecialTransaction
-                  ? `Admin Allocation (₹${adminAmount.toFixed(2)}) for Special Premium Video #${result.txNumber || 0} upload by ${userName} (${uploaderId})`
-                  : `Admin Allocation (₹${adminAmount.toFixed(2)}) for Premium Video #${result.txNumber || 0} upload by ${userName} (${uploaderId})`;
+                const admDesc = `Admin Allocation (₹${adminAmount.toFixed(2)}) for Premium Video #${result.txNumber || 0} upload by ${userName} (${uploaderId})`;
 
                 store.walletTransactions.unshift({
                   id: `tx-adm-${Date.now()}`,
@@ -4179,6 +4509,38 @@ async function dispatchApiRequest(
                   status: "settled",
                   specialTag: result.specialTag,
                   description: glbDesc,
+                  createdAt: new Date().toISOString(),
+                  created_at: new Date().toISOString(),
+                });
+              }
+
+              // 4. Preserve any unallocated ₹3.00 or rounding residual in Global Pool pending reserve
+              const reserveAmt = Number(result.distribution.globalPoolReserveAmount || 0);
+              if (reserveAmt > 0) {
+                const txGlbReserveId = `TX_GLB_RESERVE_${result.paymentId}`;
+                const reserveDesc =
+                  result.distribution.globalPoolReserveReason === "no_eligible_videos"
+                    ? `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — 0 eligible previous videos for Premium Video #${result.txNumber || 0})`
+                    : `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — integer-paise rounding residual for Premium Video #${result.txNumber || 0})`;
+
+                store.walletTransactions.unshift({
+                  id: `tx-glb-reserve-${Date.now()}`,
+                  transactionId: txGlbReserveId,
+                  transaction_id: txGlbReserveId,
+                  userId: "GLOBAL_POOL_RESERVE",
+                  user_id: "GLOBAL_POOL_RESERVE",
+                  sourceUserId: uploaderId,
+                  source_user_id: uploaderId,
+                  sourceUserName: userName,
+                  source_user_name: userName,
+                  videoId: videoId || "",
+                  video_id: videoId || "",
+                  incomeType: "global_income",
+                  income_type: "global_income",
+                  amount: reserveAmt,
+                  status: "pending",
+                  specialTag: "GLOBAL_POOL_PENDING_RESERVE",
+                  description: reserveDesc,
                   createdAt: new Date().toISOString(),
                   created_at: new Date().toISOString(),
                 });
@@ -15348,6 +15710,606 @@ async function dispatchApiRequest(
       reportMonth: normalizedMonth,
       referenceId,
     });
+  }
+
+  // 20c-1b. Admin Global Pool Pending Reserves & Safe Idempotent Settlement
+  if (route === "admin/global-pool-settle" || route === "admin/global-pool-reserves") {
+    if (method !== "POST" && method !== "GET") {
+      return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
+    }
+    const isProduction = isFailClosedProductionEnv(
+      readEnvValue(env, "APP_ENV"),
+      readEnvValue(env, "NODE_ENV"),
+    );
+    const pool = getMysqlPool();
+    if (isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. Persistent database storage is required for Global Pool reserve operations in production.",
+        },
+        503,
+      );
+    }
+
+    const authUser = await getAuthUserFromRequest(request, store, pool, env);
+    if (!authUser) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Authentication required. Please provide a valid Bearer session token.",
+        },
+        401,
+      );
+    }
+    if (authUser.role !== "admin") {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Admin authorization required. Only verified administrators can manage or settle Global Pool reserves.",
+        },
+        403,
+      );
+    }
+
+    if (method === "GET") {
+      if (pool) {
+        try {
+          const [reserveRows]: any = await pool.query(
+            `SELECT id, payment_id, order_id, tx_number, source_user_id, source_video_id,
+                    reserve_amount, reserve_paise, reserve_reason, status, settled_batch_id,
+                    settled_at, settled_by, notes, created_at, updated_at
+             FROM global_pool_reserves
+             ORDER BY tx_number ASC, created_at ASC`,
+          );
+          let settlementRows: any[] = [];
+          try {
+            const [sRows]: any = await pool.query(
+              `SELECT id, idempotency_key, total_reserve_amount, distributed_amount, carry_forward_amount,
+                      reserve_count, eligible_video_count, payout_count, settled_by, notes, created_at
+               FROM global_pool_settlements
+               ORDER BY created_at DESC`,
+            );
+            settlementRows = sRows || [];
+          } catch (sErr: unknown) {
+            if (!isMysqlMissingTableError(sErr)) {
+              throw sErr;
+            }
+          }
+          const reserves = Array.isArray(reserveRows) ? reserveRows : [];
+          const pendingReserves = reserves.filter((r: any) => r.status === "pending");
+          const totalPendingAmount = Number(
+            pendingReserves
+              .reduce((sum: number, r: any) => sum + Number(r.reserve_amount || 0), 0)
+              .toFixed(2),
+          );
+          return jsonResponse({
+            success: true,
+            pendingCount: pendingReserves.length,
+            totalPendingAmount,
+            reserves,
+            settlements: settlementRows,
+          });
+        } catch (dbErr: unknown) {
+          if (isMysqlMissingTableError(dbErr)) {
+            return jsonResponse({
+              success: true,
+              pendingCount: 0,
+              totalPendingAmount: 0,
+              reserves: [],
+              settlements: [],
+            });
+          }
+          if (isMysqlConnectionUnavailableError(dbErr)) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database connection unavailable while loading Global Pool reserves.",
+              },
+              503,
+            );
+          }
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database error loading Global Pool reserves.",
+            },
+            500,
+          );
+        }
+      }
+
+      const gpState = await getPersistentGlobalPoolState();
+      const pendingReserves = gpState.reserves.filter((r) => r.status === "pending");
+      const totalPendingAmount = Number(
+        pendingReserves.reduce((sum, r) => sum + Number(r.reserveAmount || 0), 0).toFixed(2),
+      );
+      return jsonResponse({
+        success: true,
+        pendingCount: pendingReserves.length,
+        totalPendingAmount,
+        reserves: gpState.reserves,
+        settlements: gpState.settlements,
+      });
+    }
+
+    // POST: Execute idempotent, locked settlement of pending Global Pool reserves
+    try {
+      const body = await request.json().catch(() => ({}));
+      const rawKey = String(
+        body?.idempotencyKey ||
+          body?.idempotency_key ||
+          request.headers.get("x-idempotency-key") ||
+          "",
+      ).trim();
+      if (!rawKey) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "idempotencyKey is required to safely settle Global Pool reserves without duplicate crediting.",
+          },
+          400,
+        );
+      }
+      const notes = body?.notes ? String(body.notes).trim() : null;
+      const adminUserId = String(authUser.user_id || "FT102857")
+        .trim()
+        .toUpperCase();
+
+      if (pool) {
+        const conn = await pool.getConnection();
+        try {
+          await conn.beginTransaction();
+
+          // 1. Idempotency lock check on global_pool_settlements
+          const [existingBatches]: any = await conn.query(
+            `SELECT id, idempotency_key, total_reserve_amount, distributed_amount, carry_forward_amount,
+                    reserve_count, eligible_video_count, payout_count, settled_by, notes, created_at
+             FROM global_pool_settlements WHERE idempotency_key = ? FOR UPDATE`,
+            [rawKey],
+          );
+          if (existingBatches && existingBatches.length > 0) {
+            await conn.rollback();
+            const existing = existingBatches[0];
+            return jsonResponse({
+              success: true,
+              duplicate: true,
+              settledCount: Number(existing.reserve_count || 0),
+              settlement: {
+                id: existing.id,
+                idempotencyKey: existing.idempotency_key,
+                totalReserveAmount: Number(existing.total_reserve_amount),
+                distributedAmount: Number(existing.distributed_amount),
+                carryForwardAmount: Number(existing.carry_forward_amount),
+                reserveCount: Number(existing.reserve_count),
+                eligibleVideoCount: Number(existing.eligible_video_count),
+                payoutCount: Number(existing.payout_count),
+                settledBy: existing.settled_by,
+                notes: existing.notes,
+                createdAt: existing.created_at,
+              },
+              message: "Settlement batch already processed (idempotent replay).",
+            });
+          }
+
+          // 2. Lock pending Global Pool reserve rows
+          const [pendingRows]: any = await conn.query(
+            `SELECT id, payment_id, order_id, tx_number, source_user_id, source_video_id,
+                    reserve_amount, reserve_paise, reserve_reason
+             FROM global_pool_reserves
+             WHERE status = 'pending'
+             ORDER BY tx_number ASC, created_at ASC
+             FOR UPDATE`,
+          );
+          const pendingReserves = Array.isArray(pendingRows) ? pendingRows : [];
+          if (pendingReserves.length === 0) {
+            await conn.rollback();
+            return jsonResponse({
+              success: true,
+              duplicate: false,
+              settledCount: 0,
+              remainingPendingCount: 0,
+              totalSettledAmount: 0,
+              settlement: null,
+              message: "No pending Global Pool reserves available to settle.",
+            });
+          }
+
+          // 3. Query eligible Sponsor/Premium videos
+          const [videoRows]: any = await conn.query(
+            `SELECT id AS video_id, user_id, COALESCE(ad_earnings, 0.00) AS ad_earnings
+             FROM uploaded_videos
+             WHERE (video_type = 'premium' OR payment_status = 'paid')
+               AND (is_blocked = 0 OR is_blocked IS NULL)
+             ORDER BY created_at ASC, id ASC`,
+          );
+          const candidateVideos: Array<{
+            userId: string;
+            videoId: string;
+            adEarnings: number;
+          }> = Array.isArray(videoRows)
+            ? videoRows.map((v: any) => ({
+                userId: String(v.user_id || "")
+                  .trim()
+                  .toUpperCase(),
+                videoId: String(v.video_id || "").trim(),
+                adEarnings: Math.max(0, Number(v.ad_earnings) || 0),
+              }))
+            : [];
+
+          const batchId = `gps_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+          const payoutsByKey = new Map<
+            string,
+            { userId: string; videoId: string; amountPaise: number }
+          >();
+          const settledReserveRows: any[] = [];
+          const rewardedVideoKeys = new Set<string>();
+          let totalReservePaiseProcessed = 0;
+          let totalDistributedPaise = 0;
+          let totalCarryForwardPaise = 0;
+
+          for (const r of pendingReserves) {
+            const sourceNorm = String(r.source_user_id || "")
+              .trim()
+              .toUpperCase();
+            const eligibleForReserve = candidateVideos.filter((v) => {
+              if (!v.userId) return false;
+              if (
+                sourceNorm &&
+                sourceNorm !== "GLOBAL_POOL_SETTLEMENT" &&
+                v.userId === sourceNorm
+              ) {
+                return false;
+              }
+              return true;
+            });
+
+            if (eligibleForReserve.length === 0) {
+              continue;
+            }
+
+            const reservePaise =
+              Number(r.reserve_paise) > 0
+                ? Number(r.reserve_paise)
+                : Math.round(Number(r.reserve_amount || 0) * 100);
+            if (reservePaise <= 0) {
+              continue;
+            }
+
+            const weighted = calculateWeightedPoolPayouts(reservePaise, eligibleForReserve);
+            totalReservePaiseProcessed += reservePaise;
+            totalDistributedPaise += weighted.distributedPaise;
+            totalCarryForwardPaise += weighted.residualPaise;
+            settledReserveRows.push(r);
+
+            for (const p of weighted.payouts) {
+              const vId = p.videoId || "";
+              const key = `${p.userId.toUpperCase()}:${vId}`;
+              rewardedVideoKeys.add(key);
+              const existing = payoutsByKey.get(key);
+              if (existing) {
+                existing.amountPaise += p.amountPaise;
+              } else {
+                payoutsByKey.set(key, {
+                  userId: p.userId.toUpperCase(),
+                  videoId: vId,
+                  amountPaise: p.amountPaise,
+                });
+              }
+            }
+
+            await conn.query(
+              `UPDATE global_pool_reserves
+               SET status = 'settled', settled_batch_id = ?, settled_at = NOW(), settled_by = ?,
+                   notes = COALESCE(?, notes), updated_at = NOW()
+               WHERE id = ? AND status = 'pending'`,
+              [batchId, adminUserId, notes, r.id],
+            );
+
+            await conn.query(
+              `UPDATE income_ledger
+               SET status = 'settled',
+                   description = CONCAT(description, ' [Settled in batch ', ?, ']')
+               WHERE transaction_id = ? AND user_id = 'GLOBAL_POOL_RESERVE' AND status = 'pending'`,
+              [batchId, `TX_GLB_RESERVE_${r.payment_id}`],
+            );
+          }
+
+          if (settledReserveRows.length === 0) {
+            await conn.rollback();
+            return jsonResponse({
+              success: true,
+              duplicate: false,
+              settledCount: 0,
+              remainingPendingCount: pendingReserves.length,
+              totalSettledAmount: 0,
+              settlement: null,
+              message:
+                "Pending reserves remain in reserve because no eligible third-party creator videos exist yet.",
+            });
+          }
+
+          let carryForwardReserveId: string | null = null;
+          if (totalCarryForwardPaise > 0) {
+            carryForwardReserveId = `gpr_carry_${batchId}`;
+            const carryAmt = totalCarryForwardPaise / 100;
+            const carryPayId = `SETTLE_CARRY_${batchId}`;
+            const carryDesc = `Carry-forward Global Pool rounding residual (₹${carryAmt.toFixed(2)}) from settlement batch ${batchId}`;
+
+            await conn.query(
+              `INSERT INTO global_pool_reserves (
+                id, payment_id, order_id, tx_number, source_user_id, source_video_id,
+                reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
+              ) VALUES (?, ?, NULL, 0, 'GLOBAL_POOL_SETTLEMENT', NULL, ?, ?, 'rounding_residual', 'pending', ?, NOW(), NOW())`,
+              [carryForwardReserveId, carryPayId, carryAmt, totalCarryForwardPaise, carryDesc],
+            );
+
+            await conn.query(
+              `INSERT INTO income_ledger (
+                id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+                income_type, amount, status, special_tag, description, created_at
+              ) VALUES (?, ?, 'GLOBAL_POOL_RESERVE', 'GLOBAL_POOL_SETTLEMENT', 'Global Pool Settlement', NULL,
+                'global_income', ?, 'pending', 'GLOBAL_POOL_PENDING_RESERVE', ?, NOW())`,
+              [crypto.randomUUID(), `TX_GLB_RESERVE_${carryPayId}`, carryAmt, carryDesc],
+            );
+          }
+
+          const payouts = Array.from(payoutsByKey.values())
+            .filter((p) => p.amountPaise > 0)
+            .map((p) => ({
+              userId: p.userId,
+              videoId: p.videoId,
+              amountPaise: p.amountPaise,
+              amount: p.amountPaise / 100,
+            }));
+
+          const totalReserveAmount = totalReservePaiseProcessed / 100;
+          const distributedAmount = totalDistributedPaise / 100;
+          const carryForwardAmount = totalCarryForwardPaise / 100;
+
+          await conn.query(
+            `INSERT INTO global_pool_settlements (
+              id, idempotency_key, total_reserve_amount, distributed_amount, carry_forward_amount,
+              reserve_count, eligible_video_count, payout_count, settled_by, notes, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+            [
+              batchId,
+              rawKey,
+              totalReserveAmount,
+              distributedAmount,
+              carryForwardAmount,
+              settledReserveRows.length,
+              rewardedVideoKeys.size,
+              payouts.length,
+              adminUserId,
+              notes,
+            ],
+          );
+
+          for (const payout of payouts) {
+            const txSettleId = `TX_GLB_SETTLE_${batchId}_${payout.videoId || payout.userId}`;
+            const desc = payout.videoId
+              ? `Global Pool reserve settlement batch ${batchId} for video #${payout.videoId} (₹${payout.amount.toFixed(2)})`
+              : `Global Pool reserve settlement batch ${batchId} (₹${payout.amount.toFixed(2)})`;
+
+            await conn.query(
+              `INSERT INTO income_ledger (
+                id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+                income_type, amount, status, special_tag, description, created_at
+              ) VALUES (?, ?, ?, 'GLOBAL_POOL_SETTLEMENT', 'Global Pool Reserve Settlement', ?,
+                'global_income', ?, 'settled', 'GLOBAL_POOL_SETTLEMENT', ?, NOW())`,
+              [
+                crypto.randomUUID(),
+                txSettleId,
+                payout.userId,
+                payout.videoId || null,
+                payout.amount,
+                desc,
+              ],
+            );
+
+            await conn.query(
+              `INSERT INTO wallet_balances (user_id, balance, total_earned, total_withdrawn, referral_income, global_income, adsense_income, affiliate_income, updated_at)
+               VALUES (?, ?, ?, 0.00, 0.00, ?, 0.00, 0.00, NOW())
+               ON DUPLICATE KEY UPDATE
+                 balance = balance + VALUES(balance),
+                 total_earned = total_earned + VALUES(total_earned),
+                 global_income = global_income + VALUES(global_income),
+                 updated_at = NOW()`,
+              [payout.userId, payout.amount, payout.amount, payout.amount],
+            );
+          }
+
+          await conn.commit();
+
+          return jsonResponse({
+            success: true,
+            duplicate: false,
+            settledCount: settledReserveRows.length,
+            remainingPendingCount: pendingReserves.length - settledReserveRows.length,
+            totalSettledAmount: distributedAmount,
+            settlement: {
+              id: batchId,
+              idempotencyKey: rawKey,
+              totalReserveAmount,
+              distributedAmount,
+              carryForwardAmount,
+              reserveCount: settledReserveRows.length,
+              eligibleVideoCount: rewardedVideoKeys.size,
+              payoutCount: payouts.length,
+              settledBy: adminUserId,
+              notes,
+              payouts,
+              carryForwardReserveId,
+            },
+          });
+        } catch (dbErr: unknown) {
+          await conn.rollback();
+          if (
+            (dbErr as any)?.code === "ER_DUP_ENTRY" ||
+            String(dbErr).includes("uniq_gps_idempotency")
+          ) {
+            return jsonResponse({
+              success: true,
+              duplicate: true,
+              message: "Settlement batch already processed (idempotent replay).",
+            });
+          }
+          if (isMysqlConnectionUnavailableError(dbErr)) {
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  "Database connection unavailable while settling Global Pool reserves. Transaction rolled back.",
+              },
+              503,
+            );
+          }
+          return jsonResponse(
+            {
+              success: false,
+              error: "Failed to settle Global Pool reserves. Transaction safely rolled back.",
+            },
+            500,
+          );
+        } finally {
+          conn.release();
+        }
+      }
+
+      // Non-production fallback store settlement path
+      const gpBefore = await getPersistentGlobalPoolState();
+      const eligibleVideos = (store.videos || [])
+        .filter((v) => (v.video_type === "premium" || v.payment_status === "paid") && !v.is_blocked)
+        .map((v) => ({
+          userId: String(v.user_id || "").toUpperCase(),
+          videoId: v.id,
+          adEarnings: Number(v.ad_earnings) || 0,
+        }));
+
+      const settledRes = await settlePersistentGlobalPoolReserves({
+        idempotencyKey: rawKey,
+        settledBy: adminUserId,
+        eligibleVideos,
+        ...(notes ? { notes } : {}),
+      });
+
+      if (!settledRes.duplicate && settledRes.settlement && settledRes.settledCount > 0) {
+        if (!store.wallets) store.wallets = {};
+        const nowIso = new Date().toISOString();
+        const batchId = settledRes.settlement.id;
+
+        const settledReservePaymentIds = new Set(
+          gpBefore.reserves
+            .filter((r) => settledRes.settlement!.settledReserveIds.includes(r.id))
+            .map((r) => `TX_GLB_RESERVE_${r.paymentId}`),
+        );
+        for (const tx of store.walletTransactions) {
+          const txId = String(tx["transactionId"] || tx["transaction_id"] || "");
+          if (
+            tx["userId"] === "GLOBAL_POOL_RESERVE" &&
+            tx["status"] === "pending" &&
+            settledReservePaymentIds.has(txId)
+          ) {
+            tx["status"] = "settled";
+            tx["description"] = `${String(tx["description"] || "")} [Settled in batch ${batchId}]`;
+          }
+        }
+
+        if (settledRes.carryForwardReserve) {
+          const carry = settledRes.carryForwardReserve;
+          const carryTxId = `TX_GLB_RESERVE_${carry.paymentId}`;
+          store.walletTransactions.unshift({
+            id: `tx-glb-carry-${Date.now()}`,
+            transactionId: carryTxId,
+            transaction_id: carryTxId,
+            userId: "GLOBAL_POOL_RESERVE",
+            user_id: "GLOBAL_POOL_RESERVE",
+            sourceUserId: "GLOBAL_POOL_SETTLEMENT",
+            source_user_id: "GLOBAL_POOL_SETTLEMENT",
+            sourceUserName: "Global Pool Settlement",
+            source_user_name: "Global Pool Settlement",
+            videoId: "",
+            video_id: "",
+            incomeType: "global_income",
+            income_type: "global_income",
+            amount: carry.reserveAmount,
+            status: "pending",
+            specialTag: "GLOBAL_POOL_PENDING_RESERVE",
+            description: carry.notes || `Carry-forward rounding residual from batch ${batchId}`,
+            createdAt: nowIso,
+            created_at: nowIso,
+          });
+        }
+
+        for (const payout of settledRes.settlement.payouts) {
+          let w = store.wallets[payout.userId];
+          if (!w) {
+            w = {
+              balance: 0,
+              total_earned: 0,
+              total_withdrawn: 0,
+              referral_income: 0,
+              global_income: 0,
+              adsense_income: 0,
+              affiliate_income: 0,
+              updated_at: nowIso,
+            };
+            store.wallets[payout.userId] = w;
+          }
+          w.balance += payout.amount;
+          w.total_earned += payout.amount;
+          w.global_income += payout.amount;
+          w.updated_at = nowIso;
+
+          const txSettleId = `TX_GLB_SETTLE_${batchId}_${payout.videoId || payout.userId}`;
+          store.walletTransactions.unshift({
+            id: `tx-glb-settle-${Date.now()}-${payout.videoId || payout.userId}`,
+            transactionId: txSettleId,
+            transaction_id: txSettleId,
+            userId: payout.userId,
+            user_id: payout.userId,
+            sourceUserId: "GLOBAL_POOL_SETTLEMENT",
+            source_user_id: "GLOBAL_POOL_SETTLEMENT",
+            sourceUserName: "Global Pool Reserve Settlement",
+            source_user_name: "Global Pool Reserve Settlement",
+            videoId: payout.videoId || "",
+            video_id: payout.videoId || "",
+            incomeType: "global_income",
+            income_type: "global_income",
+            amount: payout.amount,
+            status: "settled",
+            specialTag: "GLOBAL_POOL_SETTLEMENT",
+            description: payout.videoId
+              ? `Global Pool reserve settlement batch ${batchId} for video #${payout.videoId} (₹${payout.amount.toFixed(2)})`
+              : `Global Pool reserve settlement batch ${batchId} (₹${payout.amount.toFixed(2)})`,
+            createdAt: nowIso,
+            created_at: nowIso,
+          });
+        }
+
+        saveStore(store, env);
+      }
+
+      return jsonResponse({
+        success: true,
+        duplicate: settledRes.duplicate,
+        settledCount: settledRes.settledCount,
+        remainingPendingCount: settledRes.remainingPendingCount,
+        totalSettledAmount: settledRes.settlement?.distributedAmount ?? 0,
+        settlement: settledRes.settlement,
+        carryForwardReserve: settledRes.carryForwardReserve,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return jsonResponse(
+        { success: false, error: `Global Pool reserve settlement error: ${msg}` },
+        500,
+      );
+    }
   }
 
   // 20c-2. Admin Record Verified AdMob Earnings Report (Android Native Mobile Ads)

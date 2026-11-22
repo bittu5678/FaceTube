@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS `income_ledger` (
 -- ------------------------------------------------------------------------------
 -- 9. Table: premium_transactions
 -- Persistent audit sequence for Premium Video upload payments (₹6)
--- Enforces special transaction rule on #11, #21, #31, etc.
+-- Uniform ₹6 distribution across every transaction
 -- ------------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `premium_transactions` (
   `id` VARCHAR(64) NOT NULL,
@@ -213,9 +213,15 @@ CREATE TABLE IF NOT EXISTS `premium_transactions` (
   `transaction_type` VARCHAR(50) NOT NULL DEFAULT 'premium_upload',
   `is_special` TINYINT(1) NOT NULL DEFAULT 0,
   `special_tag` VARCHAR(50) NOT NULL DEFAULT 'NORMAL_PREMIUM',
-  `referral_commission` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `referral_commission` DECIMAL(10, 2) NOT NULL DEFAULT 1.00,
   `admin_allocation` DECIMAL(10, 2) NOT NULL DEFAULT 1.00,
-  `global_pool_allocation` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `global_pool_allocation` DECIMAL(10, 2) NOT NULL DEFAULT 3.00,
+  `global_pool_distributed` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `global_pool_reserve` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `global_pool_status` VARCHAR(32) NOT NULL DEFAULT 'not_applicable',
+  `gst_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `pg_fee` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `referral_status` VARCHAR(32) NOT NULL DEFAULT 'not_applicable',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uniq_premium_tx_number` (`tx_number`),
@@ -242,6 +248,12 @@ CREATE TABLE IF NOT EXISTS `payment_transactions` (
   `referral_commission` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
   `admin_allocation` DECIMAL(10, 2) NOT NULL DEFAULT 1.00,
   `global_pool_allocation` DECIMAL(10, 2) NOT NULL DEFAULT 3.00,
+  `global_pool_distributed` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `global_pool_reserve` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `global_pool_status` VARCHAR(32) NOT NULL DEFAULT 'not_applicable',
+  `gst_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `pg_fee` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `referral_status` VARCHAR(32) NOT NULL DEFAULT 'not_applicable',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uniq_pt_payment_id` (`payment_id`),
@@ -599,5 +611,56 @@ CREATE TABLE IF NOT EXISTS `affiliate_audit_log` (
   CONSTRAINT `fk_aff_audit_conversion` FOREIGN KEY (`conversion_id`) REFERENCES `affiliate_conversions` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ------------------------------------------------------------------------------
+-- 19. Table: global_pool_reserves
+-- Holds unallocated ₹3.00 Global Pool reserves (0 eligible videos) and
+-- integer-paise rounding residuals until settled across eligible videos.
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `global_pool_reserves` (
+  `id` VARCHAR(64) NOT NULL,
+  `payment_id` VARCHAR(100) NOT NULL,
+  `order_id` VARCHAR(100) DEFAULT NULL,
+  `tx_number` BIGINT NOT NULL DEFAULT 0,
+  `source_user_id` VARCHAR(50) NOT NULL,
+  `source_video_id` VARCHAR(100) DEFAULT NULL,
+  `reserve_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+  `reserve_paise` INT NOT NULL DEFAULT 0,
+  `reserve_reason` ENUM('no_eligible_videos', 'rounding_residual') NOT NULL DEFAULT 'no_eligible_videos',
+  `status` ENUM('pending', 'settled', 'cancelled') NOT NULL DEFAULT 'pending',
+  `settled_batch_id` VARCHAR(64) DEFAULT NULL,
+  `settled_at` DATETIME DEFAULT NULL,
+  `settled_by` VARCHAR(50) DEFAULT NULL,
+  `notes` TEXT DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_gpr_payment_id` (`payment_id`),
+  KEY `idx_gpr_status` (`status`),
+  KEY `idx_gpr_tx_number` (`tx_number`),
+  KEY `idx_gpr_settled_batch` (`settled_batch_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------------------------
+-- 20. Table: global_pool_settlements
+-- Immutable, idempotent settlement batch audit records for Global Pool reserves.
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `global_pool_settlements` (
+  `id` VARCHAR(64) NOT NULL,
+  `idempotency_key` VARCHAR(100) DEFAULT NULL,
+  `total_reserve_amount` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+  `distributed_amount` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+  `carry_forward_amount` DECIMAL(14, 2) NOT NULL DEFAULT 0.00,
+  `reserve_count` INT NOT NULL DEFAULT 0,
+  `eligible_video_count` INT NOT NULL DEFAULT 0,
+  `payout_count` INT NOT NULL DEFAULT 0,
+  `settled_by` VARCHAR(50) NOT NULL,
+  `notes` TEXT DEFAULT NULL,
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_gps_idempotency` (`idempotency_key`),
+  KEY `idx_gps_created_at` (`created_at` DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 SET FOREIGN_KEY_CHECKS = 1;
+
 

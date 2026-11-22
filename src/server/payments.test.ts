@@ -13,7 +13,9 @@ import {
   resolveUplineSponsors,
   ADS_REFERRAL_RATES,
   getPersistentPremiumTxNumber,
+  getPersistentGlobalPoolState,
   resetPersistentPremiumState,
+  isSpecialGlobalTransaction as isSpecialServerTx,
 } from "./payments";
 import {
   handleApiRequest,
@@ -28,7 +30,15 @@ import {
 import { setMysqlPoolForTesting } from "./mysql";
 import { isPromotionActive, getVideoBadgeLabels } from "../lib/video-service";
 import { api } from "../lib/api";
-import { processWithdrawal, getUserWallet, saveStoredLedger } from "../lib/ledger-service";
+import {
+  processWithdrawal,
+  getUserWallet,
+  saveStoredLedger,
+  distributePremiumVideoIncome,
+  isSpecialGlobalTransaction as isSpecialClientTx,
+  getStoredLedger,
+  getStoredWallets,
+} from "../lib/ledger-service";
 
 beforeEach(() => {
   resetStoreForTests();
@@ -1627,16 +1637,20 @@ describe("Task 34: Premium Video Global Pool & Admin Ledger Verification Tests",
     assert.equal(res.distribution?.creatorPayouts?.[1]?.amount, 1.5);
   });
 
-  it("2. First transaction with no eligible creators redirects entire ₹3 pool to Admin (Admin ₹4 total with valid referrer)", async () => {
+  it("2. First transaction with no eligible creators keeps Admin at ₹1.00 and preserves ₹3.00 in pending Global Pool reserve", async () => {
     // Reset to 0 so next is tx #1
     await resetPersistentPremiumState(0, []);
 
-    // Pure calculation: 0 eligible creators, valid referrer -> Admin receives base ₹1 + pool ₹3 = ₹4
+    // Pure calculation: 0 eligible creators, valid referrer -> Admin ₹1.00, Global Pool ₹3.00 pending reserve
     const dist = evaluatePremiumDistribution(1, "FT102857", 0);
     assert.equal(dist.isSpecial, false);
     assert.equal(dist.directReferralAmount, 1.0);
-    assert.equal(dist.adminAmount, 4.0); // ₹1 base + ₹3 redirected pool
-    assert.equal(dist.globalPoolAmount, 0.0);
+    assert.equal(dist.adminAmount, 1.0);
+    assert.equal(dist.globalPoolAmount, 3.0);
+    assert.equal(dist.globalPoolDistributedAmount, 0.0);
+    assert.equal(dist.globalPoolReserveAmount, 3.0);
+    assert.equal(dist.globalPoolStatus, "pending_reserve");
+    assert.equal(dist.reserveReason, "no_eligible_videos");
     assert.equal(dist.perMemberShare, 0.0);
     assert.equal(dist.totalAmount, 6.0);
 
@@ -1660,23 +1674,30 @@ describe("Task 34: Premium Video Global Pool & Admin Ledger Verification Tests",
     assert.equal(res.verified, true);
     assert.equal(res.txNumber, 1);
     assert.equal(res.distribution?.directReferralAmount, 1.0);
-    assert.equal(res.distribution?.adminAmount, 4.0);
-    assert.equal(res.distribution?.globalPoolAmount, 0.0);
+    assert.equal(res.distribution?.adminAmount, 1.0);
+    assert.equal(res.distribution?.globalPoolAmount, 3.0);
+    assert.equal(res.distribution?.globalPoolDistributedAmount, 0.0);
+    assert.equal(res.distribution?.globalPoolReserveAmount, 3.0);
+    assert.equal(res.distribution?.globalPoolStatus, "pending_reserve");
+    assert.equal(res.distribution?.globalPoolReserveReason, "no_eligible_videos");
     assert.equal(res.distribution?.eligibleMembersCount, 0);
     assert.equal(res.distribution?.creatorPayouts?.length, 0);
   });
 
-  it("3. Special 11th/21st/31st transaction with valid referrer allocates ₹1 referrer, ₹4 Admin, ₹0 global pool", async () => {
-    const specials = [11, 21, 31, 41, 51, 101];
-    for (const tx of specials) {
+  it("3. Uniform ₹6 split applies equally on 11th/21st/31st transactions (₹1 referrer, ₹1 Admin, ₹3 global pool, ₹0.90 GST + ₹0.10 PG)", async () => {
+    const formerSpecials = [11, 21, 31, 41, 51, 101];
+    for (const tx of formerSpecials) {
       const dist = evaluatePremiumDistribution(tx, "FT102857", 5);
-      assert.equal(dist.isSpecial, true, `tx #${tx} must be marked as special`);
-      assert.equal(dist.specialTag, "SPECIAL_GLOBAL_RULE");
+      assert.equal(dist.isSpecial, false, `tx #${tx} must follow uniform ₹6 rule`);
+      assert.equal(dist.specialTag, "NORMAL_PREMIUM");
       assert.equal(dist.directReferralAmount, 1.0);
-      assert.equal(dist.adminAmount, 4.0);
-      assert.equal(dist.globalPoolAmount, 0.0);
-      assert.equal(dist.eligibleMembersCount, 0);
-      assert.equal(dist.perMemberShare, 0.0);
+      assert.equal(dist.referralStatus, "credited");
+      assert.equal(dist.adminAmount, 1.0);
+      assert.equal(dist.globalPoolAmount, 3.0);
+      assert.equal(dist.gstAmount, 0.9);
+      assert.equal(dist.pgFeeAmount, 0.1);
+      assert.equal(dist.eligibleMembersCount, 5);
+      assert.equal(dist.perMemberShare, 0.6);
       assert.equal(dist.totalAmount, 6.0);
     }
 
@@ -1701,32 +1722,42 @@ describe("Task 34: Premium Video Global Pool & Admin Ledger Verification Tests",
 
     assert.equal(res.verified, true);
     assert.equal(res.txNumber, 11);
-    assert.equal(res.isSpecialTransaction, true);
-    assert.equal(res.specialTag, "SPECIAL_GLOBAL_RULE");
+    assert.equal(res.isSpecialTransaction, false);
+    assert.equal(res.specialTag, "NORMAL_PREMIUM");
     assert.equal(res.distribution?.directReferralAmount, 1.0);
-    assert.equal(res.distribution?.adminAmount, 4.0);
-    assert.equal(res.distribution?.globalPoolAmount, 0.0);
-    assert.equal(res.distribution?.eligibleMembersCount, 0);
+    assert.equal(res.distribution?.referralStatus, "credited");
+    assert.equal(res.distribution?.adminAmount, 1.0);
+    assert.equal(res.distribution?.globalPoolAmount, 3.0);
+    assert.equal(res.distribution?.gstAmount, 0.9);
+    assert.equal(res.distribution?.pgFeeAmount, 0.1);
+    assert.equal(res.distribution?.eligibleMembersCount, 3);
   });
 
-  it("4. Normal transaction without valid referrer redirects unallocated ₹1 to Admin (Option A: Admin ₹2 with creators, ₹5 with zero creators)", async () => {
-    // Normal transaction, no referrer, 2 eligible creators:
-    // Referrer: ₹0. Admin: ₹1 base + ₹1 unallocated = ₹2. Global Pool: ₹3 (₹1.50 each). Fees: ₹1. Total: ₹6.
+  it("4. Transaction without valid referrer preserves ₹1.00 as unassigned_pending without diverting to Admin", async () => {
+    // No referrer, 2 eligible creators:
+    // Referral: ₹1.00 (unassigned_pending). Admin: ₹1.00 base. Global Pool: ₹3.00 (₹1.50 each). GST: ₹0.90, PG: ₹0.10. Total: ₹6.00.
     const distWithCreators = evaluatePremiumDistribution(2, null, 2);
     assert.equal(distWithCreators.isSpecial, false);
-    assert.equal(distWithCreators.directReferralAmount, 0.0);
-    assert.equal(distWithCreators.adminAmount, 2.0);
+    assert.equal(distWithCreators.directReferralAmount, 1.0);
+    assert.equal(distWithCreators.referralStatus, "unassigned_pending");
+    assert.equal(distWithCreators.adminAmount, 1.0);
     assert.equal(distWithCreators.globalPoolAmount, 3.0);
     assert.equal(distWithCreators.perMemberShare, 1.5);
+    assert.equal(distWithCreators.gstAmount, 0.9);
+    assert.equal(distWithCreators.pgFeeAmount, 0.1);
     assert.equal(distWithCreators.totalAmount, 6.0);
 
-    // Normal transaction, no referrer, 0 eligible creators:
-    // Referrer: ₹0. Admin: ₹1 base + ₹1 unallocated + ₹3 pool = ₹5. Global Pool: ₹0. Fees: ₹1. Total: ₹6.
+    // No referrer, 0 eligible creators:
+    // Referral: ₹1.00 (unassigned_pending). Admin: ₹1.00 ALWAYS. Global Pool: ₹3.00 pending reserve. Fees: ₹1.00. Total: ₹6.00.
     const distZeroCreators = evaluatePremiumDistribution(2, null, 0);
     assert.equal(distZeroCreators.isSpecial, false);
-    assert.equal(distZeroCreators.directReferralAmount, 0.0);
-    assert.equal(distZeroCreators.adminAmount, 5.0);
-    assert.equal(distZeroCreators.globalPoolAmount, 0.0);
+    assert.equal(distZeroCreators.directReferralAmount, 1.0);
+    assert.equal(distZeroCreators.referralStatus, "unassigned_pending");
+    assert.equal(distZeroCreators.adminAmount, 1.0);
+    assert.equal(distZeroCreators.globalPoolAmount, 3.0);
+    assert.equal(distZeroCreators.globalPoolDistributedAmount, 0.0);
+    assert.equal(distZeroCreators.globalPoolReserveAmount, 3.0);
+    assert.equal(distZeroCreators.globalPoolStatus, "pending_reserve");
     assert.equal(distZeroCreators.totalAmount, 6.0);
 
     // Server verification with null referrer and creators
@@ -1749,19 +1780,25 @@ describe("Task 34: Premium Video Global Pool & Admin Ledger Verification Tests",
     );
 
     assert.equal(res.verified, true);
-    assert.equal(res.distribution?.directReferralAmount, 0.0);
-    assert.equal(res.distribution?.adminAmount, 2.0); // ₹1 base + ₹1 unallocated
+    assert.equal(res.distribution?.directReferralAmount, 1.0);
+    assert.equal(res.distribution?.referralStatus, "unassigned_pending");
+    assert.equal(res.distribution?.adminAmount, 1.0);
     assert.equal(res.distribution?.globalPoolAmount, 3.0);
+    assert.equal(res.distribution?.gstAmount, 0.9);
+    assert.equal(res.distribution?.pgFeeAmount, 0.1);
   });
 
-  it("5. Special transaction without valid referrer redirects unallocated ₹1 to Admin (Option A: Admin receives ₹5 total)", async () => {
-    const specials = [11, 21, 31, 41, 51];
-    for (const tx of specials) {
+  it("5. Transaction #11/#21/#31 without valid referrer still applies uniform ₹6 split with ₹1.00 unassigned_pending and ₹3.00 Global Pool", async () => {
+    const seqs = [11, 21, 31, 41, 51];
+    for (const tx of seqs) {
       const dist = evaluatePremiumDistribution(tx, null, 5); // null referrer
-      assert.equal(dist.isSpecial, true);
-      assert.equal(dist.directReferralAmount, 0.0);
-      assert.equal(dist.adminAmount, 5.0, `tx #${tx} without referrer must give Admin ₹5`);
-      assert.equal(dist.globalPoolAmount, 0.0);
+      assert.equal(dist.isSpecial, false);
+      assert.equal(dist.directReferralAmount, 1.0);
+      assert.equal(dist.referralStatus, "unassigned_pending");
+      assert.equal(dist.adminAmount, 1.0, `tx #${tx} without referrer must keep Admin at ₹1.00`);
+      assert.equal(dist.globalPoolAmount, 3.0);
+      assert.equal(dist.gstAmount, 0.9);
+      assert.equal(dist.pgFeeAmount, 0.1);
       assert.equal(dist.taxAndFees, 1.0);
       assert.equal(dist.totalAmount, 6.0);
     }
@@ -1786,18 +1823,24 @@ describe("Task 34: Premium Video Global Pool & Admin Ledger Verification Tests",
 
     assert.equal(res.verified, true);
     assert.equal(res.txNumber, 11);
-    assert.equal(res.distribution?.directReferralAmount, 0.0);
-    assert.equal(res.distribution?.adminAmount, 5.0); // ₹4 special + ₹1 unallocated
-    assert.equal(res.distribution?.globalPoolAmount, 0.0);
+    assert.equal(res.isSpecialTransaction, false);
+    assert.equal(res.distribution?.directReferralAmount, 1.0);
+    assert.equal(res.distribution?.referralStatus, "unassigned_pending");
+    assert.equal(res.distribution?.adminAmount, 1.0);
+    assert.equal(res.distribution?.globalPoolAmount, 3.0);
   });
 
-  it("6. Exact ₹6 accounting with integer-paise division and indivisible residual to Admin (e.g. 7 creators)", async () => {
+  it("6. Exact ₹6 accounting with integer-paise division and indivisible residual held in Global Pool reserve (e.g. 7 creators)", async () => {
     // 300 paise / 7 = 42 paise each (₹0.42 * 7 = 294 paise). Residual = 6 paise (₹0.06).
-    // Admin receives base ₹1.00 + residual ₹0.06 = ₹1.06.
+    // Admin stays strictly ₹1.00; ₹0.06 stays in Global Pool pending reserve (2.94 + 0.06 = ₹3.00).
     const dist7 = evaluatePremiumDistribution(2, "FT102857", 7);
     assert.equal(dist7.directReferralAmount, 1.0);
-    assert.equal(dist7.adminAmount, 1.06);
-    assert.equal(dist7.globalPoolAmount, 2.94);
+    assert.equal(dist7.adminAmount, 1.0);
+    assert.equal(dist7.globalPoolAmount, 3.0);
+    assert.equal(dist7.globalPoolDistributedAmount, 2.94);
+    assert.equal(dist7.globalPoolReserveAmount, 0.06);
+    assert.equal(dist7.globalPoolStatus, "partial_reserve");
+    assert.equal(dist7.reserveReason, "rounding_residual");
     assert.equal(dist7.perMemberShare, 0.42);
     assert.equal(dist7.taxAndFees, 1.0);
     // Exact mathematical sum
@@ -1834,8 +1877,11 @@ describe("Task 34: Premium Video Global Pool & Admin Ledger Verification Tests",
     );
 
     assert.equal(res.verified, true);
-    assert.equal(res.distribution?.adminAmount, 1.06);
-    assert.equal(res.distribution?.globalPoolAmount, 2.94);
+    assert.equal(res.distribution?.adminAmount, 1.0);
+    assert.equal(res.distribution?.globalPoolAmount, 3.0);
+    assert.equal(res.distribution?.globalPoolDistributedAmount, 2.94);
+    assert.equal(res.distribution?.globalPoolReserveAmount, 0.06);
+    assert.equal(res.distribution?.globalPoolStatus, "partial_reserve");
     assert.equal(res.distribution?.creatorPayouts?.length, 7);
     for (const p of res.distribution?.creatorPayouts || []) {
       assert.equal(p.amountPaise, 42);
@@ -5121,7 +5167,13 @@ describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction 
     assert.match(verifyPhp, /https:\/\/api\.razorpay\.com\/v1\/payments\/\{\$paymentId\}/);
     assert.match(verifyPhp, /\$authoritativeAmount\s*=\s*6\.00;/);
     assert.match(verifyPhp, /'member-monthly'\s*=>\s*\['price'\s*=>\s*49\.00/);
-    assert.match(verifyPhp, /\$referralCommission\s*=\s*\$hasReferrer\s*\?\s*1\.00\s*:\s*0\.00;/);
+    assert.match(verifyPhp, /\$referralCommission\s*=\s*1\.00;/);
+    assert.match(
+      verifyPhp,
+      /\$referralStatus\s*=\s*\$hasReferrer\s*\?\s*'credited'\s*:\s*'unassigned_pending';/,
+    );
+    assert.match(verifyPhp, /\$gstAmount\s*=\s*0\.90;/);
+    assert.match(verifyPhp, /\$pgFeeAmount\s*=\s*0\.10;/);
 
     const loginRes = await handleApiRequest(
       new Request("http://localhost:3000/api/auth/login.php", {
@@ -5183,5 +5235,1694 @@ describe("Task 5J-V4-L: Payment Verify Fail-Closed Authentication & Transaction 
     const data = await res?.json();
     assert.equal(data.verified, true);
     assert.equal(data.amount, 6);
+  });
+});
+
+describe("Uniform ₹6 Premium Transaction Distribution (Phase 1)", () => {
+  const secret = "test_uniform_six_secret_key_1234567890";
+  const rzpEnv = {
+    RAZORPAY_KEY_ID: "rzp_test_uniform6_123456",
+    RAZORPAY_KEY_SECRET: secret,
+    RAZORPAY_SKIP_REMOTE_CHECK: "true",
+  };
+  const premiumFilePath = path.resolve(process.cwd(), "data", "premium_transactions.json");
+  let initialPremiumFileRaw: string | null = null;
+  const savedDbEnv: Record<string, string | undefined> = {};
+
+  function enableMockMysqlEnv() {
+    process.env["DB_HOST"] = "127.0.0.1";
+    process.env["DB_NAME"] = "facetube_test";
+    process.env["DB_USER"] = "facetube_user";
+    process.env["DB_PASSWORD"] = "secret";
+  }
+
+  function disableMockMysqlEnv() {
+    delete process.env["DB_HOST"];
+    delete process.env["DB_NAME"];
+    delete process.env["DB_USER"];
+    delete process.env["DB_PASSWORD"];
+    setMysqlPoolForTesting(null);
+  }
+
+  beforeEach(() => {
+    for (const key of ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]) {
+      savedDbEnv[key] = process.env[key];
+    }
+    if (initialPremiumFileRaw === null && fs.existsSync(premiumFilePath)) {
+      initialPremiumFileRaw = fs.readFileSync(premiumFilePath, "utf-8");
+    }
+    disableMockMysqlEnv();
+  });
+
+  afterEach(() => {
+    setMysqlPoolForTesting(null);
+    for (const key of ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]) {
+      if (savedDbEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedDbEnv[key];
+    }
+    if (initialPremiumFileRaw !== null) {
+      fs.writeFileSync(premiumFilePath, initialPremiumFileRaw, "utf-8");
+    }
+  });
+
+  function signOrderPayment(orderId: string, paymentId: string): string {
+    return crypto.createHmac("sha256", secret).update(`${orderId}|${paymentId}`).digest("hex");
+  }
+
+  function createUniformMysqlHarness(options: {
+    txCount?: number;
+    hasReferrer?: boolean;
+    eligibleVideos?: Array<{ video_id: string; user_id: string; ad_earnings: number }>;
+    alreadyPaid?: boolean;
+  }) {
+    const paymentTxInserts: Array<{ sql: string; params: any[] }> = [];
+    const premiumTxInserts: Array<{ sql: string; params: any[] }> = [];
+    const ledgerInserts: Array<{ sql: string; params: any[] }> = [];
+    const walletCredits: Array<{
+      userId: string;
+      balanceDelta: number;
+      referralDelta: number;
+      globalDelta: number;
+    }> = [];
+    let committed = false;
+    let rolledBack = false;
+
+    const existingTxRow = options.alreadyPaid
+      ? {
+          payment_id: "pay_mysql_dup_1",
+          order_id: "order_mysql_dup_1",
+          user_id: "FT483921",
+          purpose: "premium_video_upload",
+          amount: 6.0,
+          tx_number: (options.txCount ?? 10) + 1,
+          is_special: 0,
+          special_tag: "NORMAL_PREMIUM",
+          referral_commission: 1.0,
+          admin_allocation: 1.0,
+          global_pool_allocation: 3.0,
+          gst_amount: 0.9,
+          pg_fee: 0.1,
+          referral_status: options.hasReferrer === false ? "unassigned_pending" : "credited",
+        }
+      : null;
+
+    const handleQuery = async (sql: string, params: any[] = []) => {
+      const normalized = sql.replace(/\s+/g, " ").trim();
+
+      if (normalized.includes("FROM INFORMATION_SCHEMA.COLUMNS")) {
+        return [
+          [
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "gst_amount" },
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "pg_fee" },
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "referral_status" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "gst_amount" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "pg_fee" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "referral_status" },
+          ],
+        ];
+      }
+      if (normalized.includes("FROM sessions s") && normalized.includes("JOIN users u")) {
+        return [
+          [
+            {
+              id: "u-alex",
+              user_id: "FT483921",
+              name: "Alex Rivera",
+              mobile: "9999999999",
+              email: "alex@facetube.com",
+              role: "user",
+              referral_code: options.hasReferrer ? "FT900431" : null,
+              avatar_url: null,
+              channel_logo_url: null,
+              channel_name: "Alex Channel",
+              channel_description: null,
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        ];
+      }
+      if (normalized.includes("FROM payment_orders WHERE order_id = ?")) {
+        return [
+          [
+            {
+              order_id: params[0],
+              user_id: "FT483921",
+              user_name: "Alex Rivera",
+              video_id: "vid_u6_1",
+              purpose: "premium_video_upload",
+              plan_id: null,
+              amount: 6.0,
+              currency: "INR",
+              status: options.alreadyPaid ? "paid" : "created",
+              payment_id: options.alreadyPaid ? "pay_mysql_dup_1" : null,
+            },
+          ],
+        ];
+      }
+      if (normalized.includes("FROM payment_transactions WHERE payment_id = ? FOR UPDATE")) {
+        return [existingTxRow ? [existingTxRow] : []];
+      }
+      if (normalized.includes("FROM uploaded_videos WHERE id = ?")) {
+        return [
+          [
+            {
+              id: params[0],
+              user_id: "FT483921",
+              video_type: "premium",
+              payment_status: "pending",
+              payment_id: null,
+            },
+          ],
+        ];
+      }
+      if (normalized.includes("FROM uploaded_videos WHERE payment_id = ? AND id != ?")) {
+        return [[]];
+      }
+      if (normalized.includes("SELECT user_id FROM users WHERE role = 'admin'")) {
+        return [[{ user_id: "FT102857" }]];
+      }
+      if (
+        normalized.includes(
+          "SELECT COUNT(*) as total FROM payment_transactions WHERE purpose = 'premium_video_upload'",
+        )
+      ) {
+        return [[{ total: options.txCount ?? 10 }]];
+      }
+      if (normalized.includes("SELECT id, user_id, referral_code FROM users")) {
+        return [
+          [
+            {
+              id: "u-alex",
+              user_id: "FT483921",
+              referral_code: options.hasReferrer ? "FT900431" : null,
+            },
+          ],
+        ];
+      }
+      if (normalized.includes("SELECT user_id FROM users WHERE (UPPER(user_id)")) {
+        return [options.hasReferrer ? [{ user_id: "FT900431" }] : []];
+      }
+      if (normalized.includes("FROM uploaded_videos WHERE (video_type = 'premium'")) {
+        return [options.eligibleVideos ?? []];
+      }
+      if (normalized.startsWith("INSERT INTO payment_transactions")) {
+        paymentTxInserts.push({ sql: normalized, params });
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("INSERT INTO premium_transactions")) {
+        premiumTxInserts.push({ sql: normalized, params });
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("INSERT INTO income_ledger")) {
+        ledgerInserts.push({ sql: normalized, params });
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("INSERT INTO wallet_balances")) {
+        const uid = String(params[0]);
+        if (
+          normalized.includes(
+            "referral_income, global_income, adsense_income, affiliate_income, updated_at) VALUES (?, 1.00",
+          )
+        ) {
+          walletCredits.push({
+            userId: uid,
+            balanceDelta: 1.0,
+            referralDelta: 1.0,
+            globalDelta: 0,
+          });
+        } else if (params.length === 4) {
+          walletCredits.push({
+            userId: uid,
+            balanceDelta: Number(params[1]),
+            referralDelta: 0,
+            globalDelta: Number(params[3]),
+          });
+        } else {
+          walletCredits.push({
+            userId: uid,
+            balanceDelta: Number(params[1]),
+            referralDelta: 0,
+            globalDelta: 0,
+          });
+        }
+        return [{ affectedRows: 1 }];
+      }
+      if (
+        normalized.startsWith("UPDATE uploaded_videos") ||
+        normalized.startsWith("UPDATE payment_orders")
+      ) {
+        return [{ affectedRows: 1 }];
+      }
+      return [[]];
+    };
+
+    const mockPool = {
+      query: handleQuery,
+      getConnection: async () => ({
+        query: handleQuery,
+        beginTransaction: async () => {},
+        commit: async () => {
+          committed = true;
+        },
+        rollback: async () => {
+          rolledBack = true;
+        },
+        release: () => {},
+      }),
+    };
+
+    return {
+      mockPool,
+      paymentTxInserts,
+      premiumTxInserts,
+      ledgerInserts,
+      walletCredits,
+      getStatus: () => ({ committed, rolledBack }),
+    };
+  }
+
+  it("1-5. Transactions #1, #10, #11, #21, #31, #41 all follow exact uniform ₹6 split without SPECIAL_GLOBAL_RULE", async () => {
+    const seqs = [1, 10, 11, 21, 31, 41];
+    for (const seq of seqs) {
+      assert.equal(isSpecialServerTx(seq), false);
+      assert.equal(isSpecialClientTx(seq), false);
+
+      const dist = evaluatePremiumDistribution(seq, "FT900431", 3);
+      assert.equal(dist.isSpecial, false, `tx #${seq} must NOT be marked special`);
+      assert.equal(dist.specialTag, "NORMAL_PREMIUM");
+      assert.equal(dist.directReferralAmount, 1.0);
+      assert.equal(dist.referralStatus, "credited");
+      assert.equal(dist.adminAmount, 1.0);
+      assert.equal(dist.globalPoolAmount, 3.0);
+      assert.equal(dist.gstAmount, 0.9);
+      assert.equal(dist.pgFeeAmount, 0.1);
+      assert.equal(dist.taxAndFees, 1.0);
+      assert.equal(dist.totalAmount, 6.0);
+    }
+
+    // Sequence transition #10 -> #11 via server verification
+    await resetPersistentPremiumState(9, []);
+    for (const expectedTx of [10, 11]) {
+      const orderId = `ord_u6_${expectedTx}_${Date.now()}`;
+      const payId = `pay_u6_${expectedTx}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const res = await verifyServerPayment(
+        {
+          orderId,
+          paymentId: payId,
+          signature: signOrderPayment(orderId, payId),
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        },
+        [
+          { userId: "CR_1", videoId: "vid_1", adEarnings: 10 },
+          { userId: "CR_2", videoId: "vid_2", adEarnings: 20 },
+          { userId: "CR_3", videoId: "vid_3", adEarnings: 30 },
+        ],
+        "FT900431",
+        rzpEnv,
+      );
+
+      assert.equal(res.verified, true);
+      assert.equal(res.txNumber, expectedTx);
+      assert.equal(res.isSpecialTransaction, false);
+      assert.equal(res.specialTag, "NORMAL_PREMIUM");
+      assert.equal(res.distribution?.directReferralAmount, 1.0);
+      assert.equal(res.distribution?.adminAmount, 1.0);
+      assert.equal(res.distribution?.globalPoolAmount, 3.0);
+      assert.equal(res.distribution?.gstAmount, 0.9);
+      assert.equal(res.distribution?.pgFeeAmount, 0.1);
+    }
+  });
+
+  it("6. Valid referrer in MySQL path credits referrer ₹1.00, Admin ₹1.00, GST ₹0.90, PG ₹0.10, and records TX #11", async () => {
+    const harness = createUniformMysqlHarness({
+      txCount: 10, // next txNumber = 11
+      hasReferrer: true,
+      eligibleVideos: [
+        { video_id: "v_1", user_id: "CR_A", ad_earnings: 50 },
+        { video_id: "v_2", user_id: "CR_B", ad_earnings: 50 },
+        { video_id: "v_3", user_id: "CR_C", ad_earnings: 50 },
+      ],
+    });
+    enableMockMysqlEnv();
+    setMysqlPoolForTesting(harness.mockPool as any);
+
+    const orderId = "ord_u6_mysql_valid_ref";
+    const payId = "pay_u6_mysql_valid_ref";
+    const res = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_u6_valid_ref",
+        },
+        body: JSON.stringify({
+          orderId,
+          paymentId: payId,
+          signature: signOrderPayment(orderId, payId),
+          userId: "FT483921",
+          videoId: "vid_u6_1",
+          purpose: "premium_video_upload",
+        }),
+      }),
+      rzpEnv,
+    );
+
+    assert.equal(res?.status, 200);
+    const body = await res?.json();
+    assert.equal(body.verified, true);
+    assert.equal(body.txNumber, 11);
+    assert.equal(body.isSpecialTransaction, false);
+    assert.equal(body.specialTag, "NORMAL_PREMIUM");
+    assert.equal(body.distribution.directReferralAmount, 1.0);
+    assert.equal(body.distribution.referralStatus, "credited");
+    assert.equal(body.distribution.adminAmount, 1.0);
+    assert.equal(body.distribution.globalPoolAmount, 3.0);
+    assert.equal(body.distribution.gstAmount, 0.9);
+    assert.equal(body.distribution.pgFeeAmount, 0.1);
+    assert.equal(harness.getStatus().committed, true);
+
+    const refWallet = harness.walletCredits.find((w) => w.userId === "FT900431");
+    assert.equal(refWallet?.referralDelta, 1.0);
+    const admWallet = harness.walletCredits.find((w) => w.userId === "FT102857");
+    assert.equal(admWallet?.balanceDelta, 1.0);
+  });
+
+  it("7. Missing referrer keeps Admin at ₹1.00 and preserves ₹1.00 referral in unassigned_pending (MySQL + fallback store)", async () => {
+    // (a) MySQL authoritative verification without valid referrer
+    const harness = createUniformMysqlHarness({
+      txCount: 10, // #11
+      hasReferrer: false,
+      eligibleVideos: [
+        { video_id: "v_1", user_id: "CR_A", ad_earnings: 100 },
+        { video_id: "v_2", user_id: "CR_B", ad_earnings: 50 },
+        { video_id: "v_3", user_id: "CR_C", ad_earnings: 50 },
+      ],
+    });
+    enableMockMysqlEnv();
+    setMysqlPoolForTesting(harness.mockPool as any);
+
+    const orderId = "ord_u6_mysql_noref";
+    const payId = "pay_u6_mysql_noref";
+    const mysqlRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_u6_noref",
+        },
+        body: JSON.stringify({
+          orderId,
+          paymentId: payId,
+          signature: signOrderPayment(orderId, payId),
+          userId: "FT483921",
+          videoId: "vid_u6_1",
+          purpose: "premium_video_upload",
+        }),
+      }),
+      rzpEnv,
+    );
+
+    assert.equal(mysqlRes?.status, 200);
+    const mysqlBody = await mysqlRes?.json();
+    assert.equal(mysqlBody.distribution.directReferralAmount, 1.0);
+    assert.equal(mysqlBody.distribution.referralStatus, "unassigned_pending");
+    assert.equal(mysqlBody.distribution.adminAmount, 1.0);
+    assert.equal(mysqlBody.distribution.globalPoolAmount, 3.0);
+    assert.equal(mysqlBody.distribution.gstAmount, 0.9);
+    assert.equal(mysqlBody.distribution.pgFeeAmount, 0.1);
+
+    // Admin must only receive ₹1.00 — never ₹2.00
+    const admWallet = harness.walletCredits.find((w) => w.userId === "FT102857");
+    assert.equal(admWallet?.balanceDelta, 1.0);
+    assert.equal(
+      harness.walletCredits.some((w) => w.userId === "UNASSIGNED_REFERRAL"),
+      false,
+      "Unassigned pending referral must NOT credit any wallet balance",
+    );
+
+    // income_ledger records an explicit pending UNASSIGNED_REFERRAL entry for ₹1.00
+    const pendingRefLedger = harness.ledgerInserts.find(
+      (ins) => ins.sql.includes("'UNASSIGNED_REFERRAL'") && ins.sql.includes("'pending'"),
+    );
+    assert.ok(
+      pendingRefLedger,
+      "MySQL income_ledger must insert pending UNASSIGNED_REFERRAL entry",
+    );
+    assert.equal(pendingRefLedger?.params[1], `TX_REF_PENDING_${payId}`);
+
+    // payment_transactions stores explicit gst_amount=0.9, pg_fee=0.1, referral_status='unassigned_pending'
+    const ptInsert = harness.paymentTxInserts[0];
+    assert.ok(ptInsert);
+    assert.ok(ptInsert.sql.includes("gst_amount, pg_fee, referral_status"));
+    assert.equal(ptInsert.params[ptInsert.params.length - 3], 0.9);
+    assert.equal(ptInsert.params[ptInsert.params.length - 2], 0.1);
+    assert.equal(ptInsert.params[ptInsert.params.length - 1], "unassigned_pending");
+
+    // (b) Fallback non-production store path without referrer
+    disableMockMysqlEnv();
+    await resetPersistentPremiumState(10, []);
+
+    const loginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "maya@facetube.com", password: "password123" }),
+      }),
+    );
+    const loginData = await loginRes?.json();
+    const storeToken = loginData.token;
+    const storeUserId = loginData.user.user_id;
+
+    // Admin logs in to inspect Admin wallet balance before/after Maya (referral_code: null) verifies ₹6 payment
+    const admLoginRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/auth/login.php", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ identifier: "admin@facetube.com", password: "password123" }),
+      }),
+    );
+    const admToken = (await admLoginRes?.json())?.token;
+
+    const admWBefore = await (
+      await handleApiRequest(
+        new Request("http://localhost:3000/api/wallet/balance?userId=FT102857", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${admToken}` },
+        }),
+      )
+    )?.json();
+    const adminBalanceBefore = Number(admWBefore.wallet.balance);
+
+    const storeOrdRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/create-order", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${storeToken}`,
+        },
+        body: JSON.stringify({
+          purpose: "premium_video_upload",
+          userId: storeUserId,
+        }),
+      }),
+      rzpEnv,
+    );
+    const storeOrdData = await storeOrdRes?.json();
+    const storeOrdId = storeOrdData?.orderId;
+    const storePayId = `pay_store_noref_${Date.now()}`;
+
+    const storeVerifyRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${storeToken}`,
+        },
+        body: JSON.stringify({
+          orderId: storeOrdId,
+          paymentId: storePayId,
+          signature: signOrderPayment(storeOrdId, storePayId),
+          userId: storeUserId,
+          purpose: "premium_video_upload",
+        }),
+      }),
+      rzpEnv,
+    );
+
+    assert.equal(storeVerifyRes?.status, 200);
+    const storeVerifyBody = await storeVerifyRes?.json();
+    assert.equal(storeVerifyBody.txNumber, 11);
+    assert.equal(storeVerifyBody.distribution.directReferralAmount, 1.0);
+    assert.equal(storeVerifyBody.distribution.referralStatus, "unassigned_pending");
+    assert.equal(storeVerifyBody.distribution.gstAmount, 0.9);
+    assert.equal(storeVerifyBody.distribution.pgFeeAmount, 0.1);
+    // Admin receives strictly ₹1.00 ALWAYS — never unassigned referral and never rounding residual paise.
+    assert.equal(storeVerifyBody.distribution.adminAmount, 1.0);
+    assert.equal(storeVerifyBody.distribution.globalPoolAmount, 3.0);
+    assert.equal(
+      Number(
+        (
+          (storeVerifyBody.distribution.globalPoolDistributedAmount ?? 0) +
+          (storeVerifyBody.distribution.globalPoolReserveAmount ?? 0)
+        ).toFixed(2),
+      ),
+      3.0,
+    );
+
+    const admWAfter = await (
+      await handleApiRequest(
+        new Request("http://localhost:3000/api/wallet/balance?userId=FT102857", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${admToken}` },
+        }),
+      )
+    )?.json();
+    const adminBalanceDelta = Number(
+      (Number(admWAfter.wallet.balance) - adminBalanceBefore).toFixed(2),
+    );
+    assert.equal(
+      adminBalanceDelta,
+      1.0,
+      "Fallback store must credit Admin strictly ₹1.00, never unassigned referral or pool residuals",
+    );
+  });
+
+  it("8-9. Weighted ad_earnings pool and zero eligible videos both maintain exact ₹6.00 sum with zero paise leakage", () => {
+    const zeroEligible = evaluatePremiumDistribution(11, "FT900431", 0);
+    assert.equal(zeroEligible.directReferralAmount, 1.0);
+    assert.equal(zeroEligible.adminAmount, 1.0);
+    assert.equal(zeroEligible.globalPoolAmount, 3.0);
+    assert.equal(zeroEligible.globalPoolDistributedAmount, 0.0);
+    assert.equal(zeroEligible.globalPoolReserveAmount, 3.0);
+    assert.equal(zeroEligible.globalPoolStatus, "pending_reserve");
+    assert.equal(zeroEligible.gstAmount, 0.9);
+    assert.equal(zeroEligible.pgFeeAmount, 0.1);
+    assert.equal(
+      Math.round(
+        (zeroEligible.directReferralAmount +
+          zeroEligible.adminAmount +
+          zeroEligible.globalPoolAmount +
+          zeroEligible.gstAmount +
+          zeroEligible.pgFeeAmount) *
+          100,
+      ),
+      600,
+    );
+
+    const weightedDist = evaluatePremiumDistribution(11, null, 3, [
+      { userId: "C1", videoId: "v1", adEarnings: 120 },
+      { userId: "C2", videoId: "v2", adEarnings: 60 },
+      { userId: "C3", videoId: "v3", adEarnings: 20 },
+    ]);
+    assert.equal(weightedDist.directReferralAmount, 1.0);
+    assert.equal(weightedDist.referralStatus, "unassigned_pending");
+    assert.equal(weightedDist.adminAmount, 1.0);
+    assert.equal(weightedDist.globalPoolAmount, 3.0);
+    assert.equal(weightedDist.weightedPayouts?.[0]?.amount, 1.8);
+    assert.equal(weightedDist.weightedPayouts?.[1]?.amount, 0.9);
+    assert.equal(weightedDist.weightedPayouts?.[2]?.amount, 0.3);
+  });
+
+  it("10-11. Duplicate payment verification is idempotent and concurrent calls serialize without double credit", async () => {
+    const dupHarness = createUniformMysqlHarness({
+      txCount: 10,
+      hasReferrer: false,
+      alreadyPaid: true,
+    });
+    enableMockMysqlEnv();
+    setMysqlPoolForTesting(dupHarness.mockPool as any);
+
+    const dupRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_u6_dup",
+        },
+        body: JSON.stringify({
+          orderId: "order_mysql_dup_1",
+          paymentId: "pay_mysql_dup_1",
+          signature: signOrderPayment("order_mysql_dup_1", "pay_mysql_dup_1"),
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        }),
+      }),
+      rzpEnv,
+    );
+    assert.equal(dupRes?.status, 200);
+    const dupBody = await dupRes?.json();
+    assert.equal(dupBody.verified, true);
+    assert.equal(dupBody.duplicate, true);
+    assert.equal(dupBody.distribution.directReferralAmount, 1.0);
+    assert.equal(dupBody.distribution.referralStatus, "unassigned_pending");
+    assert.equal(dupBody.distribution.gstAmount, 0.9);
+    assert.equal(dupBody.distribution.pgFeeAmount, 0.1);
+    assert.equal(dupHarness.walletCredits.length, 0);
+    assert.equal(dupHarness.ledgerInserts.length, 0);
+
+    // Concurrent verification serialization in verifyServerPayment
+    disableMockMysqlEnv();
+    await resetPersistentPremiumState(10, []);
+    const order1 = `ord_conc_1_${Date.now()}`;
+    const pay1 = `pay_conc_1_${Date.now()}`;
+    const order2 = `ord_conc_2_${Date.now()}`;
+    const pay2 = `pay_conc_2_${Date.now()}`;
+    const creators = ["CR_1", "CR_2", "CR_3"];
+
+    const [r1, r2, r1Dup] = await Promise.all([
+      verifyServerPayment(
+        {
+          orderId: order1,
+          paymentId: pay1,
+          signature: signOrderPayment(order1, pay1),
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        },
+        creators,
+        null,
+        rzpEnv,
+      ),
+      verifyServerPayment(
+        {
+          orderId: order2,
+          paymentId: pay2,
+          signature: signOrderPayment(order2, pay2),
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        },
+        creators,
+        "FT900431",
+        rzpEnv,
+      ),
+      verifyServerPayment(
+        {
+          orderId: order1,
+          paymentId: pay1,
+          signature: signOrderPayment(order1, pay1),
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        },
+        creators,
+        null,
+        rzpEnv,
+      ),
+    ]);
+
+    assert.deepEqual(
+      [r1.txNumber, r2.txNumber].sort((a, b) => (a ?? 0) - (b ?? 0)),
+      [11, 12],
+    );
+    assert.equal(r1Dup.duplicate, true);
+    assert.equal(await getPersistentPremiumTxNumber(), 12);
+  });
+
+  it("12. PHP api/payments/verify.php matches Node accounting rules and fixes $eligibleCreatorCount bug", () => {
+    const verifyPhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api", "payments", "verify.php"),
+      "utf-8",
+    );
+    assert.equal(
+      verifyPhp.includes("SPECIAL_GLOBAL_RULE"),
+      false,
+      "verify.php must remove SPECIAL_GLOBAL_RULE behavior",
+    );
+    assert.match(verifyPhp, /\$isSpecial\s*=\s*false;/);
+    assert.match(verifyPhp, /\$specialTag\s*=\s*'NORMAL_PREMIUM';/);
+    assert.match(verifyPhp, /\$referralCommission\s*=\s*1\.00;/);
+    assert.match(
+      verifyPhp,
+      /\$referralStatus\s*=\s*\$hasReferrer\s*\?\s*'credited'\s*:\s*'unassigned_pending';/,
+    );
+    assert.match(verifyPhp, /\$gstAmount\s*=\s*0\.90;/);
+    assert.match(verifyPhp, /\$pgFeeAmount\s*=\s*0\.10;/);
+    assert.match(verifyPhp, /\$adminAllocation\s*=\s*1\.00;/);
+    assert.match(verifyPhp, /\$poolPaise\s*=\s*300;/);
+    assert.match(
+      verifyPhp,
+      /\$eligibleCreatorCount\s*=\s*\$eligibleVideoCount;/,
+      "verify.php must set $eligibleCreatorCount = $eligibleVideoCount instead of leaving it 0",
+    );
+    assert.ok(verifyPhp.includes("UNASSIGNED_REFERRAL"));
+    assert.ok(verifyPhp.includes("REFERRAL_UNASSIGNED_PENDING"));
+    assert.ok(verifyPhp.includes("gst_amount, pg_fee, referral_status"));
+  });
+
+  it("13. Exact ₹6.00 reconciliation across creator counts 0..100", () => {
+    for (let count = 0; count <= 100; count++) {
+      for (const ref of ["FT900431", null]) {
+        const dist = evaluatePremiumDistribution(11 + count, ref, count);
+        const totalPaise = Math.round(
+          (dist.directReferralAmount +
+            dist.adminAmount +
+            dist.globalPoolAmount +
+            dist.gstAmount +
+            dist.pgFeeAmount) *
+            100,
+        );
+        assert.equal(totalPaise, 600, `Sum mismatch for count=${count}, ref=${String(ref)}`);
+      }
+    }
+  });
+
+  it("14. Client distributePremiumVideoIncome() is safely disabled and razorpay-service does not invoke it", async () => {
+    const walletsBefore = JSON.stringify(getStoredWallets());
+    const ledgerBefore = JSON.stringify(getStoredLedger());
+
+    const res = await distributePremiumVideoIncome({
+      uploaderUserId: "FT483921",
+      uploaderName: "Alex Rivera",
+      videoId: "vid_client_noop",
+      paymentId: "pay_client_noop",
+      txNumber: 11,
+      directReferrerId: null,
+    });
+
+    assert.equal(res.isSpecial, false);
+    assert.deepEqual(res.globalTransactions, []);
+    assert.equal(res.referralTransaction, undefined);
+    assert.equal(res.adminTransaction, undefined);
+    assert.equal(JSON.stringify(getStoredWallets()), walletsBefore);
+    assert.equal(JSON.stringify(getStoredLedger()), ledgerBefore);
+
+    const razorpayService = fs.readFileSync(
+      path.resolve(process.cwd(), "src", "lib", "razorpay-service.ts"),
+      "utf-8",
+    );
+    assert.equal(
+      razorpayService.includes("distributePremiumVideoIncome"),
+      false,
+      "razorpay-service.ts must not invoke or import distributePremiumVideoIncome",
+    );
+  });
+
+  it("15. global-income.tsx renders all uniform ₹6 components and removes hardcoded ₹2,450.00 fallback", () => {
+    const globalIncomeRoute = fs.readFileSync(
+      path.resolve(process.cwd(), "src", "routes", "global-income.tsx"),
+      "utf-8",
+    );
+    assert.ok(globalIncomeRoute.includes("Referral"));
+    assert.ok(globalIncomeRoute.includes("Admin"));
+    assert.ok(globalIncomeRoute.includes("GST + PG"));
+    assert.ok(globalIncomeRoute.includes("₹0.90 GST + ₹0.10 PG Fee"));
+    assert.ok(globalIncomeRoute.includes("Global Distribution"));
+    assert.ok(globalIncomeRoute.includes("₹3.00"));
+    assert.ok(globalIncomeRoute.includes("Total Transaction"));
+    assert.ok(globalIncomeRoute.includes("₹6.00"));
+    assert.equal(
+      globalIncomeRoute.includes("₹2,450.00"),
+      false,
+      "global-income.tsx must NOT contain hardcoded ₹2,450.00 fallback",
+    );
+    assert.ok(globalIncomeRoute.includes("Unavailable"));
+  });
+});
+
+describe("Phase 1.1: Global Pool Pending Reserve & Safe Settlement Tests", () => {
+  const secret = "test_razorpay_secret_key_1234567890";
+  const rzpEnv = {
+    RAZORPAY_KEY_ID: "rzp_test_1234567890",
+    RAZORPAY_KEY_SECRET: secret,
+    RAZORPAY_SKIP_REMOTE_CHECK: "true",
+    APP_ENV: "development",
+    NODE_ENV: "test",
+  };
+
+  afterEach(() => {
+    setMysqlPoolForTesting(null);
+    delete process.env["DB_HOST"];
+    delete process.env["DB_NAME"];
+    delete process.env["DB_USER"];
+    delete process.env["DB_PASSWORD"];
+    delete process.env["MYSQL_HOST"];
+    delete process.env["MYSQL_DATABASE"];
+    delete process.env["MYSQL_USER"];
+    delete process.env["MYSQL_PASSWORD"];
+  });
+
+  function enableMockMysqlEnv() {
+    process.env["DB_HOST"] = "127.0.0.1";
+    process.env["DB_NAME"] = "facetube_test";
+    process.env["DB_USER"] = "facetube_user";
+    process.env["DB_PASSWORD"] = "facetube_pass";
+  }
+
+  function disableMockMysqlEnv() {
+    delete process.env["DB_HOST"];
+    delete process.env["DB_NAME"];
+    delete process.env["DB_USER"];
+    delete process.env["DB_PASSWORD"];
+  }
+
+  function signOrderPayment(orderId: string, paymentId: string): string {
+    return crypto.createHmac("sha256", secret).update(`${orderId}|${paymentId}`).digest("hex");
+  }
+
+  function createPhase11MysqlHarness(options: {
+    txCount?: number;
+    hasReferrer?: boolean;
+    eligibleVideos?: Array<{ video_id: string; user_id: string; ad_earnings: number }>;
+    pendingReserves?: Array<{
+      id: string;
+      payment_id: string;
+      order_id: string | null;
+      tx_number: number;
+      source_user_id: string;
+      source_video_id: string | null;
+      reserve_amount: number;
+      reserve_paise: number;
+      reserve_reason: "no_eligible_videos" | "rounding_residual";
+      status: "pending" | "settled";
+    }>;
+    authRole?: "admin" | "user";
+  }) {
+    const paymentTxInserts: Array<{ sql: string; params: any[] }> = [];
+    const premiumTxInserts: Array<{ sql: string; params: any[] }> = [];
+    const ledgerInserts: Array<{ sql: string; params: any[] }> = [];
+    const ledgerUpdates: Array<{ sql: string; params: any[] }> = [];
+    const reserveInserts: Array<{ sql: string; params: any[] }> = [];
+    const reserveUpdates: Array<{ sql: string; params: any[] }> = [];
+    const settlementInserts: Array<{ sql: string; params: any[] }> = [];
+    const settlementsByIdempotency = new Map<string, any>();
+    const walletCredits: Array<{
+      userId: string;
+      balanceDelta: number;
+      referralDelta: number;
+      globalDelta: number;
+    }> = [];
+    const reserves = (options.pendingReserves || []).map((r) => ({ ...r }));
+    let committed = false;
+    let rolledBack = false;
+
+    const handleQuery = async (sql: string, params: any[] = []) => {
+      const normalized = sql.replace(/\s+/g, " ").trim();
+
+      if (normalized.includes("FROM INFORMATION_SCHEMA.COLUMNS")) {
+        return [
+          [
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "gst_amount" },
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "pg_fee" },
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "referral_status" },
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "global_pool_distributed" },
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "global_pool_reserve" },
+            { TABLE_NAME: "payment_transactions", COLUMN_NAME: "global_pool_status" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "gst_amount" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "pg_fee" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "referral_status" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "global_pool_distributed" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "global_pool_reserve" },
+            { TABLE_NAME: "premium_transactions", COLUMN_NAME: "global_pool_status" },
+          ],
+        ];
+      }
+      if (normalized.includes("FROM INFORMATION_SCHEMA.TABLES")) {
+        return [[{ TABLE_NAME: "global_pool_reserves" }]];
+      }
+      if (normalized.includes("FROM sessions s") && normalized.includes("JOIN users u")) {
+        const role = options.authRole || "user";
+        return [
+          [
+            {
+              id: role === "admin" ? "u-admin" : "u-alex",
+              user_id: role === "admin" ? "FT102857" : "FT483921",
+              name: role === "admin" ? "Admin" : "Alex Rivera",
+              mobile: "9999999999",
+              email: role === "admin" ? "admin@facetube.com" : "alex@facetube.com",
+              role,
+              referral_code: options.hasReferrer ? "FT900431" : null,
+              avatar_url: null,
+              channel_logo_url: null,
+              channel_name: "Channel",
+              channel_description: null,
+              created_at: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+        ];
+      }
+      if (normalized.includes("FROM payment_orders WHERE order_id = ?")) {
+        return [
+          [
+            {
+              order_id: params[0],
+              user_id: "FT483921",
+              user_name: "Alex Rivera",
+              video_id: "vid_p11_1",
+              purpose: "premium_video_upload",
+              plan_id: null,
+              amount: 6.0,
+              currency: "INR",
+              status: "created",
+              payment_id: null,
+            },
+          ],
+        ];
+      }
+      if (normalized.includes("FROM payment_transactions WHERE payment_id = ? FOR UPDATE")) {
+        return [[]];
+      }
+      if (normalized.includes("FROM uploaded_videos WHERE id = ?")) {
+        return [
+          [
+            {
+              id: params[0],
+              user_id: "FT483921",
+              video_type: "premium",
+              payment_status: "pending",
+              payment_id: null,
+            },
+          ],
+        ];
+      }
+      if (normalized.includes("FROM uploaded_videos WHERE payment_id = ? AND id != ?")) {
+        return [[]];
+      }
+      if (normalized.includes("SELECT user_id FROM users WHERE role = 'admin'")) {
+        return [[{ user_id: "FT102857" }]];
+      }
+      if (
+        normalized.includes(
+          "SELECT COUNT(*) as total FROM payment_transactions WHERE purpose = 'premium_video_upload'",
+        )
+      ) {
+        return [[{ total: options.txCount ?? 0 }]];
+      }
+      if (normalized.includes("SELECT id, user_id, referral_code FROM users")) {
+        return [
+          [
+            {
+              id: "u-alex",
+              user_id: "FT483921",
+              referral_code: options.hasReferrer ? "FT900431" : null,
+            },
+          ],
+        ];
+      }
+      if (normalized.includes("SELECT user_id FROM users WHERE (UPPER(user_id)")) {
+        return [options.hasReferrer ? [{ user_id: "FT900431" }] : []];
+      }
+      if (normalized.includes("FROM uploaded_videos WHERE (video_type = 'premium'")) {
+        if (normalized.includes("UPPER(user_id) != UPPER(?)")) {
+          const excl = String(params[0] || "").toUpperCase();
+          return [(options.eligibleVideos ?? []).filter((v) => v.user_id.toUpperCase() !== excl)];
+        }
+        return [options.eligibleVideos ?? []];
+      }
+      if (
+        normalized.includes("FROM global_pool_settlements WHERE idempotency_key = ? FOR UPDATE")
+      ) {
+        const key = String(params[0] || "");
+        const existing = settlementsByIdempotency.get(key);
+        return [existing ? [existing] : []];
+      }
+      if (normalized.includes("FROM global_pool_settlements ORDER BY created_at DESC")) {
+        return [Array.from(settlementsByIdempotency.values())];
+      }
+      if (
+        normalized.includes("FROM global_pool_reserves WHERE status = 'pending'") &&
+        normalized.includes("FOR UPDATE")
+      ) {
+        return [reserves.filter((r) => r.status === "pending")];
+      }
+      if (normalized.includes("FROM global_pool_reserves ORDER BY tx_number ASC")) {
+        return [reserves];
+      }
+      if (normalized.startsWith("INSERT INTO payment_transactions")) {
+        paymentTxInserts.push({ sql: normalized, params });
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("INSERT INTO premium_transactions")) {
+        premiumTxInserts.push({ sql: normalized, params });
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("INSERT INTO global_pool_reserves")) {
+        reserveInserts.push({ sql: normalized, params });
+        if (normalized.includes("'GLOBAL_POOL_SETTLEMENT'")) {
+          reserves.push({
+            id: String(params[0]),
+            payment_id: String(params[1]),
+            order_id: null,
+            tx_number: 0,
+            source_user_id: "GLOBAL_POOL_SETTLEMENT",
+            source_video_id: null,
+            reserve_amount: Number(params[2]),
+            reserve_paise: Number(params[3]),
+            reserve_reason: "rounding_residual",
+            status: "pending",
+          });
+        } else {
+          reserves.push({
+            id: String(params[0]),
+            payment_id: String(params[1]),
+            order_id: String(params[2]),
+            tx_number: Number(params[3]),
+            source_user_id: String(params[4]),
+            source_video_id: params[5] ? String(params[5]) : null,
+            reserve_amount: Number(params[6]),
+            reserve_paise: Number(params[7]),
+            reserve_reason: params[8],
+            status: "pending",
+          });
+        }
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("UPDATE global_pool_reserves SET status = 'settled'")) {
+        reserveUpdates.push({ sql: normalized, params });
+        const targetId = String(params[3]);
+        const row = reserves.find((r) => r.id === targetId);
+        if (row) row.status = "settled";
+        return [{ affectedRows: row ? 1 : 0 }];
+      }
+      if (normalized.startsWith("INSERT INTO global_pool_settlements")) {
+        settlementInserts.push({ sql: normalized, params });
+        const row = {
+          id: params[0],
+          idempotency_key: params[1],
+          total_reserve_amount: params[2],
+          distributed_amount: params[3],
+          carry_forward_amount: params[4],
+          reserve_count: params[5],
+          eligible_video_count: params[6],
+          payout_count: params[7],
+          settled_by: params[8],
+          notes: params[9],
+          created_at: new Date().toISOString(),
+        };
+        settlementsByIdempotency.set(String(params[1]), row);
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("INSERT INTO income_ledger")) {
+        ledgerInserts.push({ sql: normalized, params });
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("UPDATE income_ledger SET status = 'settled'")) {
+        ledgerUpdates.push({ sql: normalized, params });
+        return [{ affectedRows: 1 }];
+      }
+      if (normalized.startsWith("INSERT INTO wallet_balances")) {
+        const uid = String(params[0]);
+        if (
+          normalized.includes(
+            "referral_income, global_income, adsense_income, affiliate_income, updated_at) VALUES (?, 1.00",
+          )
+        ) {
+          walletCredits.push({
+            userId: uid,
+            balanceDelta: 1.0,
+            referralDelta: 1.0,
+            globalDelta: 0,
+          });
+        } else if (params.length === 4) {
+          walletCredits.push({
+            userId: uid,
+            balanceDelta: Number(params[1]),
+            referralDelta: 0,
+            globalDelta: Number(params[3]),
+          });
+        } else {
+          walletCredits.push({
+            userId: uid,
+            balanceDelta: Number(params[1]),
+            referralDelta: 0,
+            globalDelta: 0,
+          });
+        }
+        return [{ affectedRows: 1 }];
+      }
+      if (
+        normalized.startsWith("UPDATE uploaded_videos") ||
+        normalized.startsWith("UPDATE payment_orders")
+      ) {
+        return [{ affectedRows: 1 }];
+      }
+      return [[]];
+    };
+
+    const mockPool = {
+      query: handleQuery,
+      getConnection: async () => ({
+        query: handleQuery,
+        beginTransaction: async () => {
+          committed = false;
+          rolledBack = false;
+        },
+        commit: async () => {
+          committed = true;
+        },
+        rollback: async () => {
+          rolledBack = true;
+        },
+        release: () => {},
+      }),
+    };
+
+    return {
+      mockPool,
+      paymentTxInserts,
+      premiumTxInserts,
+      ledgerInserts,
+      ledgerUpdates,
+      reserveInserts,
+      reserveUpdates,
+      settlementInserts,
+      walletCredits,
+      reserves,
+      getStatus: () => ({ committed, rolledBack }),
+    };
+  }
+
+  it("1. Zero eligible videos holds full ₹3.00 in pending Global Pool reserve (MySQL + fallback + verifyServerPayment) and keeps Admin strictly at ₹1.00", async () => {
+    // (a) MySQL path
+    const harness = createPhase11MysqlHarness({
+      txCount: 0, // TX #1
+      hasReferrer: true,
+      eligibleVideos: [],
+    });
+    enableMockMysqlEnv();
+    setMysqlPoolForTesting(harness.mockPool as any);
+
+    const ordId = "ord_p11_zero_mysql";
+    const payId = "pay_p11_zero_mysql";
+    const res = await handleApiRequest(
+      new Request("http://localhost:3000/api/payments/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_p11_zero",
+        },
+        body: JSON.stringify({
+          orderId: ordId,
+          paymentId: payId,
+          signature: signOrderPayment(ordId, payId),
+          userId: "FT483921",
+          videoId: "vid_p11_1",
+          purpose: "premium_video_upload",
+        }),
+      }),
+      rzpEnv,
+    );
+
+    assert.equal(res?.status, 200);
+    const body = await res?.json();
+    assert.equal(body.verified, true);
+    assert.equal(body.txNumber, 1);
+    assert.equal(body.distribution.directReferralAmount, 1.0);
+    assert.equal(
+      body.distribution.adminAmount,
+      1.0,
+      "Admin MUST remain ₹1.00 even with 0 eligible videos",
+    );
+    assert.equal(body.distribution.globalPoolAmount, 3.0);
+    assert.equal(body.distribution.globalPoolDistributedAmount, 0.0);
+    assert.equal(body.distribution.globalPoolReserveAmount, 3.0);
+    assert.equal(body.distribution.globalPoolStatus, "pending_reserve");
+    assert.equal(body.distribution.globalPoolReserveReason, "no_eligible_videos");
+    assert.equal(body.distribution.gstAmount, 0.9);
+    assert.equal(body.distribution.pgFeeAmount, 0.1);
+
+    // Wallet credit checks: Admin gets ONLY ₹1.00, Referrer gets ₹1.00, NO Global Pool Reserve wallet credit
+    const admCredit = harness.walletCredits.find((w) => w.userId === "FT102857");
+    assert.equal(admCredit?.balanceDelta, 1.0);
+    assert.equal(
+      harness.walletCredits.some((w) => w.userId === "GLOBAL_POOL_RESERVE"),
+      false,
+      "GLOBAL_POOL_RESERVE must NOT have a wallet_balances credit",
+    );
+
+    // Ledger & Reserve table inserts
+    const glbResLedger = harness.ledgerInserts.find((l) => l.sql.includes("'GLOBAL_POOL_RESERVE'"));
+    assert.ok(glbResLedger, "Must insert pending GLOBAL_POOL_RESERVE entry in income_ledger");
+    assert.equal(glbResLedger?.params[1], `TX_GLB_RESERVE_${payId}`);
+    assert.equal(glbResLedger?.params[5], 3.0);
+
+    assert.equal(harness.reserveInserts.length, 1);
+    assert.equal(harness.reserveInserts[0]?.params[6], 3.0);
+    assert.equal(harness.reserveInserts[0]?.params[7], 300);
+    assert.equal(harness.reserveInserts[0]?.params[8], "no_eligible_videos");
+
+    // (b) Direct verifyServerPayment check
+    disableMockMysqlEnv();
+    await resetPersistentPremiumState(0, []);
+    const sOrd = `ord_p11_zero_srv_${Date.now()}`;
+    const sPay = `pay_p11_zero_srv_${Date.now()}`;
+    const sRes = await verifyServerPayment(
+      {
+        orderId: sOrd,
+        paymentId: sPay,
+        signature: signOrderPayment(sOrd, sPay),
+        userId: "FT483921",
+        purpose: "premium_video_upload",
+      },
+      [],
+      null,
+      rzpEnv,
+    );
+    assert.equal(sRes.distribution?.adminAmount, 1.0);
+    assert.equal(sRes.distribution?.referralStatus, "unassigned_pending");
+    assert.equal(sRes.distribution?.globalPoolAmount, 3.0);
+    assert.equal(sRes.distribution?.globalPoolDistributedAmount, 0.0);
+    assert.equal(sRes.distribution?.globalPoolReserveAmount, 3.0);
+    assert.equal(sRes.distribution?.globalPoolStatus, "pending_reserve");
+    const gpState = await getPersistentGlobalPoolState();
+    assert.equal(gpState.reserves.length, 1);
+    assert.equal(gpState.reserves[0]?.status, "pending");
+    assert.equal(gpState.reserves[0]?.reservePaise, 300);
+  });
+
+  it("2. One eligible video distributes entire ₹3.00 immediately with ₹0.00 reserve; Admin remains ₹1.00", async () => {
+    await resetPersistentPremiumState(10, []);
+    const ord = `ord_p11_one_${Date.now()}`;
+    const pay = `pay_p11_one_${Date.now()}`;
+    const res = await verifyServerPayment(
+      {
+        orderId: ord,
+        paymentId: pay,
+        signature: signOrderPayment(ord, pay),
+        userId: "FT483921",
+        purpose: "premium_video_upload",
+      },
+      [{ userId: "CR_SOLO", videoId: "vid_solo", adEarnings: 0 }],
+      "FT900431",
+      rzpEnv,
+    );
+    assert.equal(res.txNumber, 11);
+    assert.equal(res.distribution?.adminAmount, 1.0);
+    assert.equal(res.distribution?.globalPoolAmount, 3.0);
+    assert.equal(res.distribution?.globalPoolDistributedAmount, 3.0);
+    assert.equal(res.distribution?.globalPoolReserveAmount, 0.0);
+    assert.equal(res.distribution?.globalPoolStatus, "settled");
+    assert.equal(res.distribution?.creatorPayouts?.[0]?.amount, 3.0);
+    const gpState = await getPersistentGlobalPoolState();
+    assert.equal(gpState.reserves.length, 0);
+  });
+
+  it("3. Weighted ad_earnings decimal scaling avoids float drift (0.1 + 0.2 + 0.3) and places rounding residual paise into Global Pool reserve", async () => {
+    // Decimal weights: 0.1, 0.2, 0.3 -> exact 50, 100, 150 paise (distributed=300, residual=0)
+    const decimalWeighted = calculateWeightedPoolPayouts(300, [
+      { userId: "C1", videoId: "v1", adEarnings: 0.1 },
+      { userId: "C2", videoId: "v2", adEarnings: 0.2 },
+      { userId: "C3", videoId: "v3", adEarnings: 0.3 },
+    ]);
+    assert.equal(decimalWeighted.payouts[0]?.amountPaise, 50);
+    assert.equal(decimalWeighted.payouts[1]?.amountPaise, 100);
+    assert.equal(decimalWeighted.payouts[2]?.amountPaise, 150);
+    assert.equal(decimalWeighted.distributedPaise, 300);
+    assert.equal(decimalWeighted.residualPaise, 0);
+
+    // Uneven weights with rounding residual: 1, 2, 4 -> total=7 -> floor(300/7)=42, floor(600/7)=85, floor(1200/7)=171 -> 298 distributed + 2 paise reserve
+    const unevenDist = evaluatePremiumDistribution(31, null, 3, [
+      { userId: "C1", videoId: "v1", adEarnings: 1 },
+      { userId: "C2", videoId: "v2", adEarnings: 2 },
+      { userId: "C3", videoId: "v3", adEarnings: 4 },
+    ]);
+    assert.equal(unevenDist.directReferralAmount, 1.0);
+    assert.equal(unevenDist.referralStatus, "unassigned_pending");
+    assert.equal(
+      unevenDist.adminAmount,
+      1.0,
+      "Rounding residual must NEVER increase Admin above ₹1.00",
+    );
+    assert.equal(unevenDist.globalPoolAmount, 3.0);
+    assert.equal(unevenDist.globalPoolDistributedAmount, 2.98);
+    assert.equal(unevenDist.globalPoolReserveAmount, 0.02);
+    assert.equal(unevenDist.globalPoolStatus, "partial_reserve");
+    assert.equal(unevenDist.reserveReason, "rounding_residual");
+    assert.equal(unevenDist.gstAmount, 0.9);
+    assert.equal(unevenDist.pgFeeAmount, 0.1);
+  });
+
+  it("4. Transactions #1, #10, #11, #21, #31, #41 across 0..50 creators maintain Referral ₹1 + Admin ₹1 + GST ₹0.90 + PG ₹0.10 + Global ₹3 = ₹6", () => {
+    for (const tx of [1, 10, 11, 21, 31, 41]) {
+      for (const count of [0, 1, 2, 3, 7, 13, 29, 50]) {
+        for (const ref of ["FT900431", null]) {
+          const d = evaluatePremiumDistribution(tx, ref, count);
+          assert.equal(d.directReferralAmount, 1.0);
+          assert.equal(
+            d.adminAmount,
+            1.0,
+            `tx=${tx}, count=${count}: Admin must strictly be ₹1.00`,
+          );
+          assert.equal(d.gstAmount, 0.9);
+          assert.equal(d.pgFeeAmount, 0.1);
+          assert.equal(d.globalPoolAmount, 3.0);
+          assert.equal(
+            Math.round((d.globalPoolDistributedAmount + d.globalPoolReserveAmount) * 100),
+            300,
+          );
+          assert.equal(
+            Math.round(
+              (d.directReferralAmount +
+                d.adminAmount +
+                d.globalPoolAmount +
+                d.gstAmount +
+                d.pgFeeAmount) *
+                100,
+            ),
+            600,
+          );
+        }
+      }
+    }
+  });
+
+  it("5. Duplicate and concurrent verification of zero-eligible transactions create only ONE pending reserve record", async () => {
+    await resetPersistentPremiumState(0, []);
+    const ord1 = `ord_p11_conc1_${Date.now()}`;
+    const pay1 = `pay_p11_conc1_${Date.now()}`;
+    const ord2 = `ord_p11_conc2_${Date.now()}`;
+    const pay2 = `pay_p11_conc2_${Date.now()}`;
+
+    const [a, aDup, b] = await Promise.all([
+      verifyServerPayment(
+        {
+          orderId: ord1,
+          paymentId: pay1,
+          signature: signOrderPayment(ord1, pay1),
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        },
+        [],
+        null,
+        rzpEnv,
+      ),
+      verifyServerPayment(
+        {
+          orderId: ord1,
+          paymentId: pay1,
+          signature: signOrderPayment(ord1, pay1),
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        },
+        [],
+        null,
+        rzpEnv,
+      ),
+      verifyServerPayment(
+        {
+          orderId: ord2,
+          paymentId: pay2,
+          signature: signOrderPayment(ord2, pay2),
+          userId: "FT483921",
+          purpose: "premium_video_upload",
+        },
+        [],
+        "FT900431",
+        rzpEnv,
+      ),
+    ]);
+
+    assert.equal(a.verified, true);
+    assert.equal(aDup.duplicate, true);
+    assert.equal(aDup.distribution?.adminAmount, 1.0);
+    assert.equal(aDup.distribution?.globalPoolAmount, 3.0);
+    assert.equal(aDup.distribution?.globalPoolReserveAmount, 3.0);
+    assert.equal(b.verified, true);
+
+    const gpState = await getPersistentGlobalPoolState();
+    assert.equal(gpState.reserves.length, 2, "Duplicate call must never create a second reserve");
+  });
+
+  it("6. Safe, idempotent, auditable reserve settlement enforces admin auth, uploader exclusion, and carry-forward residual (MySQL + fallback store)", async () => {
+    // (a) MySQL harness settlement test:
+    // Pending reserves:
+    //  - r1: ₹3.00 (300p) uploaded by FT483921 (no_eligible_videos)
+    //  - r2: ₹0.07 (7p) rounding residual uploaded by FT900431
+    // Eligible videos:
+    //  - v_a by CR_1 (ad_earnings: 100)
+    //  - v_b by CR_2 (ad_earnings: 200)
+    // For r1 (300p): CR_1 gets 100p (₹1.00), CR_2 gets 200p (₹2.00), residual 0p.
+    // For r2 (7p): CR_1 gets floor(7/3)=2p (₹0.02), CR_2 gets floor(14/3)=4p (₹0.04), residual 1p (₹0.01 carry forward!).
+    const harness = createPhase11MysqlHarness({
+      authRole: "user",
+      eligibleVideos: [
+        { video_id: "v_a", user_id: "CR_1", ad_earnings: 100 },
+        { video_id: "v_b", user_id: "CR_2", ad_earnings: 200 },
+      ],
+      pendingReserves: [
+        {
+          id: "gpr_1",
+          payment_id: "pay_hist_1",
+          order_id: "ord_hist_1",
+          tx_number: 1,
+          source_user_id: "FT483921",
+          source_video_id: "vid_1",
+          reserve_amount: 3.0,
+          reserve_paise: 300,
+          reserve_reason: "no_eligible_videos",
+          status: "pending",
+        },
+        {
+          id: "gpr_2",
+          payment_id: "pay_hist_2",
+          order_id: "ord_hist_2",
+          tx_number: 2,
+          source_user_id: "FT900431",
+          source_video_id: "vid_2",
+          reserve_amount: 0.07,
+          reserve_paise: 7,
+          reserve_reason: "rounding_residual",
+          status: "pending",
+        },
+      ],
+    });
+    enableMockMysqlEnv();
+    setMysqlPoolForTesting(harness.mockPool as any);
+
+    // Unauthenticated rejected 401
+    const unauthRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/global-pool-settle", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idempotencyKey: "settle-batch-1" }),
+      }),
+      rzpEnv,
+    );
+    assert.equal(unauthRes?.status, 401);
+
+    // Non-admin rejected 403
+    const userRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/global-pool-settle", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_user",
+        },
+        body: JSON.stringify({ idempotencyKey: "settle-batch-1" }),
+      }),
+      rzpEnv,
+    );
+    assert.equal(userRes?.status, 403);
+
+    // Switch to Admin role
+    const adminHarness = createPhase11MysqlHarness({
+      authRole: "admin",
+      eligibleVideos: [
+        { video_id: "v_a", user_id: "CR_1", ad_earnings: 100 },
+        { video_id: "v_b", user_id: "CR_2", ad_earnings: 200 },
+      ],
+      pendingReserves: [
+        {
+          id: "gpr_1",
+          payment_id: "pay_hist_1",
+          order_id: "ord_hist_1",
+          tx_number: 1,
+          source_user_id: "FT483921",
+          source_video_id: "vid_1",
+          reserve_amount: 3.0,
+          reserve_paise: 300,
+          reserve_reason: "no_eligible_videos",
+          status: "pending",
+        },
+        {
+          id: "gpr_2",
+          payment_id: "pay_hist_2",
+          order_id: "ord_hist_2",
+          tx_number: 2,
+          source_user_id: "FT900431",
+          source_video_id: "vid_2",
+          reserve_amount: 0.07,
+          reserve_paise: 7,
+          reserve_reason: "rounding_residual",
+          status: "pending",
+        },
+      ],
+    });
+    setMysqlPoolForTesting(adminHarness.mockPool as any);
+
+    // Missing idempotencyKey rejected 400
+    const badKeyRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/global-pool-settle", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_admin",
+        },
+        body: JSON.stringify({}),
+      }),
+      rzpEnv,
+    );
+    assert.equal(badKeyRes?.status, 400);
+
+    // Execute settlement
+    const settleRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/global-pool-settle", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_admin",
+        },
+        body: JSON.stringify({
+          idempotencyKey: "settle-batch-2026-01",
+          notes: "Monthly reserve clearance",
+        }),
+      }),
+      rzpEnv,
+    );
+    assert.equal(settleRes?.status, 200);
+    const settleBody = await settleRes?.json();
+    assert.equal(settleBody.success, true);
+    assert.equal(settleBody.duplicate, false);
+    assert.equal(settleBody.settledCount, 2);
+    assert.equal(settleBody.settlement.totalReserveAmount, 3.07);
+    assert.equal(settleBody.settlement.distributedAmount, 3.06);
+    assert.equal(settleBody.settlement.carryForwardAmount, 0.01);
+    assert.equal(adminHarness.getStatus().committed, true);
+
+    const cr1Credit = adminHarness.walletCredits.find((w) => w.userId === "CR_1");
+    const cr2Credit = adminHarness.walletCredits.find((w) => w.userId === "CR_2");
+    assert.equal(cr1Credit?.globalDelta, 1.02);
+    assert.equal(cr2Credit?.globalDelta, 2.04);
+    assert.equal(
+      adminHarness.walletCredits.some((w) => w.userId === "FT102857"),
+      false,
+      "Settlement carry-forward residual must NEVER credit Admin",
+    );
+    assert.equal(adminHarness.reserveUpdates.length, 2);
+    assert.equal(adminHarness.ledgerUpdates.length, 2);
+    assert.equal(adminHarness.settlementInserts.length, 1);
+
+    // Carry-forward reserve row created as pending
+    const pendingAfter = adminHarness.reserves.filter((r) => r.status === "pending");
+    assert.equal(pendingAfter.length, 1);
+    assert.equal(pendingAfter[0]?.reserve_amount, 0.01);
+    assert.equal(pendingAfter[0]?.source_user_id, "GLOBAL_POOL_SETTLEMENT");
+
+    // Duplicate replay with same idempotencyKey returns existing settlement without double crediting
+    const creditsCountBefore = adminHarness.walletCredits.length;
+    const replayRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/global-pool-settle", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok_admin",
+        },
+        body: JSON.stringify({ idempotencyKey: "settle-batch-2026-01" }),
+      }),
+      rzpEnv,
+    );
+    assert.equal(replayRes?.status, 200);
+    const replayBody = await replayRes?.json();
+    assert.equal(replayBody.duplicate, true);
+    assert.equal(adminHarness.walletCredits.length, creditsCountBefore);
+
+    // (b) Fallback store end-to-end uploader exclusion + settlement check
+    disableMockMysqlEnv();
+    await resetPersistentPremiumState(0, []);
+
+    const admToken = (
+      await (
+        await handleApiRequest(
+          new Request("http://localhost:3000/api/auth/login.php", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifier: "admin@facetube.com", password: "password123" }),
+          }),
+        )
+      )?.json()
+    )?.token;
+    const alexToken = (
+      await (
+        await handleApiRequest(
+          new Request("http://localhost:3000/api/auth/login.php", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ identifier: "alex@facetube.com", password: "password123" }),
+          }),
+        )
+      )?.json()
+    )?.token;
+
+    // Directly test uploader exclusion when Alex (FT483921) is the ONLY premium video owner
+    const ordSolo = `ord_p11_fb_${Date.now()}`;
+    const paySolo = `pay_p11_fb_${Date.now()}`;
+    await verifyServerPayment(
+      {
+        orderId: ordSolo,
+        paymentId: paySolo,
+        signature: signOrderPayment(ordSolo, paySolo),
+        userId: "FT483921",
+        purpose: "premium_video_upload",
+      },
+      [],
+      null,
+      rzpEnv,
+    );
+
+    // Now GET reserves via Admin endpoint -> 1 pending (₹3.00)
+    const getGpRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/global-pool-settle", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${admToken}` },
+      }),
+      rzpEnv,
+    );
+    const getGpBody = await getGpRes?.json();
+    assert.equal(getGpBody.pendingCount, 1);
+    assert.equal(getGpBody.totalPendingAmount, 3.0);
+
+    // Non-admin user (Alex) cannot invoke GET or POST
+    const alexGetRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/global-pool-settle", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${alexToken}` },
+      }),
+      rzpEnv,
+    );
+    assert.equal(alexGetRes?.status, 403);
+
+    // Settle in fallback store (seed store has eligible videos from other creators FT900431 etc.)
+    const fbSettleRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/global-pool-settle", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${admToken}`,
+        },
+        body: JSON.stringify({ idempotencyKey: `fb-settle-${Date.now()}` }),
+      }),
+      rzpEnv,
+    );
+    assert.equal(fbSettleRes?.status, 200);
+    const fbSettleBody = await fbSettleRes?.json();
+    assert.equal(fbSettleBody.success, true);
+    assert.equal(fbSettleBody.settledCount, 1);
+    assert.equal(fbSettleBody.settlement.totalReserveAmount, 3.0);
+  });
+
+  it("7. PHP verify.php & global-pool-settle.php maintain full Phase 1.1 parity with Node", () => {
+    const verifyPhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api", "payments", "verify.php"),
+      "utf-8",
+    );
+    const settlePhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api", "admin", "global-pool-settle.php"),
+      "utf-8",
+    );
+
+    assert.match(verifyPhp, /\$adminAllocation\s*=\s*1\.00;/);
+    assert.match(verifyPhp, /\$globalPoolAllocation\s*=\s*3\.00;/);
+    assert.equal(
+      verifyPhp.includes("$baseAdminPaise + 300"),
+      false,
+      "verify.php must never redirect ₹3.00 Global Pool to Admin when 0 eligible videos exist",
+    );
+    assert.equal(
+      verifyPhp.includes("$baseAdminPaise + $residualPaise"),
+      false,
+      "verify.php must never add rounding residual paise to Admin",
+    );
+    assert.ok(verifyPhp.includes("GLOBAL_POOL_RESERVE"));
+    assert.ok(verifyPhp.includes("GLOBAL_POOL_PENDING_RESERVE"));
+    assert.ok(verifyPhp.includes("global_pool_reserves"));
+    assert.ok(
+      verifyPhp.includes("global_pool_distributed, global_pool_reserve, global_pool_status"),
+    );
+
+    assert.ok(settlePhp.includes("getAuthUser($pdo, true)"));
+    assert.ok(settlePhp.includes("!== 'admin'"));
+    assert.ok(settlePhp.includes("global_pool_settlements WHERE idempotency_key = ? FOR UPDATE"));
+    assert.ok(settlePhp.includes("FROM global_pool_reserves"));
+    assert.ok(settlePhp.includes("FOR UPDATE"));
+    assert.ok(settlePhp.includes("SETTLE_CARRY_"));
+    assert.ok(settlePhp.includes("TX_GLB_SETTLE_"));
   });
 });

@@ -9,13 +9,15 @@ export const PRICING_CONFIG = {
   PREMIUM_VIDEO: {
     BASE_PRICE: 5.0, // ₹5 base price
     GST_RATE: 0.18, // 18% GST (₹0.90)
+    GST_AMOUNT: 0.9, // ₹0.90 explicit GST allocation
     PG_CHARGE_RATE: 0.02, // 2% PG Charge (₹0.10)
+    PG_FEE: 0.1, // ₹0.10 explicit Payment Gateway fee
     TOTAL_PRICE: 6.0, // ₹6 total deduction
-    REFERRAL_SHARE: 1.0, // ₹1 to direct referrer
-    NORMAL_ADMIN_SHARE: 1.0, // ₹1 to admin / company on normal tx
-    SPECIAL_ADMIN_SHARE: 4.0, // ₹4 to admin on SPECIAL tx (11th, 21st, 31st...)
-    NORMAL_GLOBAL_POOL_SHARE: 3.0, // ₹3 to global income pool on normal tx
-    SPECIAL_GLOBAL_POOL_SHARE: 0.0, // ₹0 to global pool on SPECIAL tx
+    REFERRAL_SHARE: 1.0, // ₹1 to direct referrer (or unassigned_pending if missing)
+    ADMIN_SHARE: 1.0, // ₹1 base admin share
+    GLOBAL_POOL_SHARE: 3.0, // ₹3 to global income pool
+    NORMAL_ADMIN_SHARE: 1.0, // Backwards-compatible alias
+    NORMAL_GLOBAL_POOL_SHARE: 3.0, // Backwards-compatible alias
     TAX_AND_FEES: 1.0, // ₹0.90 GST + ₹0.10 PG fee = ₹1.00
   },
   ADS_PROMOTION: {
@@ -202,22 +204,24 @@ export function resolveUplineSponsors(
 }
 
 /**
- * Checks if a premium transaction sequence number is a Special Transaction:
- * 11th, 21st, 31st, 41st, 51st... and every 10th transaction after 11th.
- *
- * Formula:
- * transactionNumber >= 11 AND (transactionNumber - 11) % 10 === 0
+ * Legacy helper preserved for backwards compatibility.
+ * Every ₹6 premium transaction now follows the uniform ₹6 distribution.
  */
-export function isSpecialGlobalTransaction(txNumber: number): boolean {
-  if (txNumber < 11) return false;
-  return (txNumber - 11) % 10 === 0;
+export function isSpecialGlobalTransaction(_txNumber: number): boolean {
+  return false;
 }
+
+export type GlobalPoolStatus = "not_applicable" | "settled" | "partial_reserve" | "pending_reserve";
+
+export type GlobalPoolReserveReason = "no_eligible_videos" | "rounding_residual";
 
 /**
  * Calculates creator pool payouts weighted by each creator's actual video ad earnings.
- * If total ad earnings > 0, each creator receives floor(300 * (earnings_i / total_earnings)) paise.
- * Residual indivisible paise from floor division is safely redirected to Admin ledger (zero leakage).
- * If total ad earnings == 0, falls back gracefully to equal integer division floor(300 / N).
+ * Uses integer-scaled units (x 10,000 matching DECIMAL(14,4)) and BigInt division to prevent
+ * IEEE 754 floating-point drift.
+ * Residual indivisible paise from floor division remains in Global Pool pending reserve
+ * (NEVER increases Admin allocation).
+ * If total ad earnings == 0, falls back gracefully to equal integer division floor(poolPaise / N).
  */
 export function calculateWeightedPoolPayouts(
   poolPaise: number,
@@ -233,13 +237,17 @@ export function calculateWeightedPoolPayouts(
   distributedPaise: number;
   residualPaise: number;
 } {
-  if (!creators || creators.length === 0) {
-    return { payouts: [], distributedPaise: 0, residualPaise: poolPaise };
+  if (!creators || creators.length === 0 || poolPaise <= 0) {
+    return { payouts: [], distributedPaise: 0, residualPaise: Math.max(0, poolPaise) };
   }
 
-  const totalAdEarnings = creators.reduce((sum, c) => sum + Math.max(0, c.adEarnings || 0), 0);
+  // Scale DECIMAL(14,4) ad_earnings to integer micro-units so summing/dividing never hits float drift
+  const scaledUnits = creators.map((c) =>
+    Math.round(Math.max(0, Number(c.adEarnings) || 0) * 10000),
+  );
+  const totalUnits = scaledUnits.reduce((sum, u) => sum + u, 0);
 
-  if (totalAdEarnings <= 0) {
+  if (totalUnits <= 0) {
     const perCreatorPaise = Math.floor(poolPaise / creators.length);
     const distributedPaise = perCreatorPaise * creators.length;
     const residualPaise = poolPaise - distributedPaise;
@@ -257,10 +265,12 @@ export function calculateWeightedPoolPayouts(
   }
 
   let totalAllocated = 0;
-  const payouts = creators.map((c) => {
-    const earnings = Math.max(0, c.adEarnings || 0);
-    const weight = earnings / totalAdEarnings;
-    const amountPaise = Math.floor(weight * poolPaise);
+  const poolBig = BigInt(poolPaise);
+  const totalUnitsBig = BigInt(totalUnits);
+  const payouts = creators.map((c, idx) => {
+    const units = scaledUnits[idx] || 0;
+    const amountPaise = Number((BigInt(units) * poolBig) / totalUnitsBig);
+    const weight = units / totalUnits;
     totalAllocated += amountPaise;
     return {
       userId: c.userId,
@@ -282,7 +292,12 @@ export function calculateWeightedPoolPayouts(
 
 /**
  * Pure evaluation helper for test & verification of distributions across any transaction number.
- * Supports both equal division and actual ad-earnings-weighted pool distribution (Requirement 9).
+ * Phase 1.1 Rule for EVERY ₹6.00 transaction:
+ * - Referral: ₹1.00 ('credited' or 'unassigned_pending')
+ * - Admin: ₹1.00 ALWAYS (never receives 0-eligible pool fallback or rounding residuals)
+ * - GST: ₹0.90
+ * - PG Fee: ₹0.10
+ * - Global Distribution: ₹3.00 ALWAYS (distributed + pending reserve = ₹3.00)
  */
 export function evaluatePremiumDistribution(
   txNumber: number,
@@ -292,10 +307,17 @@ export function evaluatePremiumDistribution(
 ): {
   txNumber: number;
   isSpecial: boolean;
-  specialTag: "SPECIAL_GLOBAL_RULE" | "NORMAL_PREMIUM";
+  specialTag: "NORMAL_PREMIUM";
   directReferralAmount: number;
+  referralStatus: "credited" | "unassigned_pending";
   adminAmount: number;
   globalPoolAmount: number;
+  globalPoolDistributedAmount: number;
+  globalPoolReserveAmount: number;
+  globalPoolStatus: GlobalPoolStatus;
+  reserveReason: GlobalPoolReserveReason | null;
+  gstAmount: number;
+  pgFeeAmount: number;
   taxAndFees: number;
   totalAmount: number;
   eligibleMembersCount: number;
@@ -308,66 +330,80 @@ export function evaluatePremiumDistribution(
     weight: number;
   }>;
 } {
-  const isSpecial = isSpecialGlobalTransaction(txNumber);
+  const isSpecial = false;
   const hasValidReferrer = Boolean(referrerId && referrerId.trim().length > 0);
-  const directReferralAmount = hasValidReferrer ? PRICING_CONFIG.PREMIUM_VIDEO.REFERRAL_SHARE : 0.0;
-  const unallocatedReferrerPaise = hasValidReferrer ? 0 : 100; // Option A: ₹1 redirected to Admin if no valid referrer
+  const directReferralAmount = PRICING_CONFIG.PREMIUM_VIDEO.REFERRAL_SHARE; // ₹1.00
+  const referralStatus: "credited" | "unassigned_pending" = hasValidReferrer
+    ? "credited"
+    : "unassigned_pending";
+  const gstAmount = PRICING_CONFIG.PREMIUM_VIDEO.GST_AMOUNT; // ₹0.90
+  const pgFeeAmount = PRICING_CONFIG.PREMIUM_VIDEO.PG_FEE; // ₹0.10
 
-  let adminAmount = 0.0;
-  let globalPoolAmount = 0.0;
+  // Admin allocation is strictly ₹1.00 (100 paise) on EVERY ₹6.00 transaction
+  const adminAmount = PRICING_CONFIG.PREMIUM_VIDEO.ADMIN_SHARE; // ₹1.00
+  // Global Pool allocation is strictly ₹3.00 (300 paise) allocated or pending reserve on EVERY ₹6.00 transaction
+  const poolPaise = 300;
+  const globalPoolAmount = PRICING_CONFIG.PREMIUM_VIDEO.GLOBAL_POOL_SHARE; // ₹3.00
+
+  let distributedPaise = 0;
+  let reservePaise = poolPaise;
   let perMemberShare = 0.0;
   let weightedPayouts:
-    Array<{ userId: string; amountPaise: number; amount: number; weight: number }> | undefined =
-    undefined;
+    | Array<{
+        userId: string;
+        videoId?: string;
+        amountPaise: number;
+        amount: number;
+        weight: number;
+      }>
+    | undefined = undefined;
 
-  if (isSpecial) {
-    // Special: ₹4 Admin + ₹1 (if no referrer redirected to Admin) = ₹4 or ₹5
-    adminAmount = hasValidReferrer
-      ? PRICING_CONFIG.PREMIUM_VIDEO.SPECIAL_ADMIN_SHARE // ₹4.00
-      : PRICING_CONFIG.PREMIUM_VIDEO.SPECIAL_ADMIN_SHARE + 1.0; // ₹5.00
-    globalPoolAmount = 0.0;
+  if (creatorEarnings && creatorEarnings.length > 0) {
+    const weighted = calculateWeightedPoolPayouts(poolPaise, creatorEarnings);
+    distributedPaise = weighted.distributedPaise;
+    reservePaise = weighted.residualPaise;
+    perMemberShare = weighted.payouts.length > 0 ? weighted.payouts[0]?.amount || 0 : 0;
+    weightedPayouts = weighted.payouts;
+  } else if (eligibleCreatorsCount <= 0) {
+    // Zero eligible previous videos: hold entire ₹3.00 in pending Global Pool reserve
+    distributedPaise = 0;
+    reservePaise = poolPaise;
     perMemberShare = 0.0;
   } else {
-    // Normal: Base Admin = ₹1.00 (+ ₹1.00 unallocated referrer if no referrer)
-    const baseAdminPaise = 100 + unallocatedReferrerPaise;
-
-    if (creatorEarnings && creatorEarnings.length > 0) {
-      const poolPaise = 300;
-      const weighted = calculateWeightedPoolPayouts(poolPaise, creatorEarnings);
-      adminAmount = (baseAdminPaise + weighted.residualPaise) / 100;
-      globalPoolAmount = weighted.distributedPaise / 100;
-      perMemberShare = weighted.payouts.length > 0 ? weighted.payouts[0]?.amount || 0 : 0;
-      weightedPayouts = weighted.payouts;
-    } else if (eligibleCreatorsCount <= 0) {
-      // First transaction / no eligible creators: redirect entire ₹3 pool to Admin
-      adminAmount = (baseAdminPaise + 300) / 100;
-      globalPoolAmount = 0.0;
-      perMemberShare = 0.0;
-    } else {
-      const poolPaise = 300;
-      const perCreatorPaise = Math.floor(poolPaise / eligibleCreatorsCount);
-      const distributedPaise = perCreatorPaise * eligibleCreatorsCount;
-      const residualPaise = poolPaise - distributedPaise;
-
-      adminAmount = (baseAdminPaise + residualPaise) / 100;
-      globalPoolAmount = distributedPaise / 100;
-      perMemberShare = perCreatorPaise / 100;
-    }
+    const perCreatorPaise = Math.floor(poolPaise / eligibleCreatorsCount);
+    distributedPaise = perCreatorPaise * eligibleCreatorsCount;
+    reservePaise = poolPaise - distributedPaise;
+    perMemberShare = perCreatorPaise / 100;
   }
+
+  const globalPoolDistributedAmount = distributedPaise / 100;
+  const globalPoolReserveAmount = reservePaise / 100;
+  const globalPoolStatus: GlobalPoolStatus =
+    reservePaise === 0 ? "settled" : distributedPaise === 0 ? "pending_reserve" : "partial_reserve";
+  const reserveReason: GlobalPoolReserveReason | null =
+    reservePaise === 0 ? null : distributedPaise === 0 ? "no_eligible_videos" : "rounding_residual";
 
   const result: {
     txNumber: number;
     isSpecial: boolean;
-    specialTag: "SPECIAL_GLOBAL_RULE" | "NORMAL_PREMIUM";
+    specialTag: "NORMAL_PREMIUM";
     directReferralAmount: number;
+    referralStatus: "credited" | "unassigned_pending";
     adminAmount: number;
     globalPoolAmount: number;
+    globalPoolDistributedAmount: number;
+    globalPoolReserveAmount: number;
+    globalPoolStatus: GlobalPoolStatus;
+    reserveReason: GlobalPoolReserveReason | null;
+    gstAmount: number;
+    pgFeeAmount: number;
     taxAndFees: number;
     totalAmount: number;
     eligibleMembersCount: number;
     perMemberShare: number;
     weightedPayouts?: Array<{
       userId: string;
+      videoId?: string;
       amountPaise: number;
       amount: number;
       weight: number;
@@ -375,17 +411,20 @@ export function evaluatePremiumDistribution(
   } = {
     txNumber,
     isSpecial,
-    specialTag: isSpecial ? "SPECIAL_GLOBAL_RULE" : "NORMAL_PREMIUM",
+    specialTag: "NORMAL_PREMIUM",
     directReferralAmount,
+    referralStatus,
     adminAmount,
     globalPoolAmount,
+    globalPoolDistributedAmount,
+    globalPoolReserveAmount,
+    globalPoolStatus,
+    reserveReason,
+    gstAmount,
+    pgFeeAmount,
     taxAndFees: PRICING_CONFIG.PREMIUM_VIDEO.TAX_AND_FEES, // ₹1.00
     totalAmount: PRICING_CONFIG.PREMIUM_VIDEO.TOTAL_PRICE, // ₹6.00
-    eligibleMembersCount: isSpecial
-      ? 0
-      : creatorEarnings
-        ? creatorEarnings.length
-        : eligibleCreatorsCount,
+    eligibleMembersCount: creatorEarnings ? creatorEarnings.length : eligibleCreatorsCount,
     perMemberShare,
   };
 
@@ -411,6 +450,53 @@ export interface PersistentPremiumTxRecord {
   referralCommission: number;
   adminAllocation: number;
   globalPoolAllocation: number;
+  globalPoolDistributed?: number;
+  globalPoolReserve?: number;
+  globalPoolStatus?: GlobalPoolStatus;
+  gstAmount?: number;
+  pgFee?: number;
+  referralStatus?: "not_applicable" | "credited" | "unassigned_pending";
+  createdAt: string;
+}
+
+export interface GlobalPoolReserveRecord {
+  id: string;
+  paymentId: string;
+  orderId: string | null;
+  txNumber: number;
+  sourceUserId: string;
+  sourceVideoId?: string | null;
+  reserveAmount: number;
+  reservePaise: number;
+  reserveReason: GlobalPoolReserveReason;
+  status: "pending" | "settled" | "cancelled";
+  settledBatchId?: string | null;
+  settledAt?: string | null;
+  settledBy?: string | null;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GlobalPoolSettlementRecord {
+  id: string;
+  idempotencyKey: string;
+  totalReserveAmount: number;
+  distributedAmount: number;
+  carryForwardAmount: number;
+  reserveCount: number;
+  eligibleVideoCount: number;
+  payoutCount: number;
+  settledBy: string;
+  notes?: string | null;
+  settledReserveIds: string[];
+  payouts: Array<{
+    userId: string;
+    videoId?: string;
+    amount: number;
+    amountPaise: number;
+  }>;
+  carryForwardReserveId?: string | null;
   createdAt: string;
 }
 
@@ -459,6 +545,8 @@ export interface RefundRequestRecord {
 interface PersistentPremiumState {
   lastTxNumber: number;
   transactions: PersistentPremiumTxRecord[];
+  globalPoolReserves?: GlobalPoolReserveRecord[];
+  globalPoolSettlements?: GlobalPoolSettlementRecord[];
   userSubscriptions?: UserSubscriptionRecord[];
   refundRequests?: RefundRequestRecord[];
 }
@@ -572,6 +660,213 @@ export async function getPersistentTransactions(): Promise<PersistentPremiumTxRe
   return withLock(() => {
     const state = loadPersistentState();
     return [...state.transactions];
+  });
+}
+
+/**
+ * Returns pending/settled Global Pool reserves and settlement batches from persistent storage.
+ */
+export async function getPersistentGlobalPoolState(): Promise<{
+  reserves: GlobalPoolReserveRecord[];
+  settlements: GlobalPoolSettlementRecord[];
+}> {
+  return withLock(() => {
+    const state = loadPersistentState();
+    return {
+      reserves: [...(state.globalPoolReserves || [])],
+      settlements: [...(state.globalPoolSettlements || [])],
+    };
+  });
+}
+
+/**
+ * Atomically and idempotently settles pending Global Pool reserves in persistent storage
+ * under lock. Enforces uploader exclusion per reserve row and carries forward any indivisible
+ * paise residual into a new pending reserve row (never credits Admin).
+ */
+export async function settlePersistentGlobalPoolReserves(params: {
+  idempotencyKey: string;
+  settledBy: string;
+  eligibleVideos: Array<{ userId: string; videoId?: string; adEarnings: number }>;
+  notes?: string;
+}): Promise<{
+  duplicate: boolean;
+  settledCount: number;
+  remainingPendingCount: number;
+  settlement: GlobalPoolSettlementRecord | null;
+  carryForwardReserve: GlobalPoolReserveRecord | null;
+}> {
+  const cleanKey = params.idempotencyKey.trim();
+  const cleanAdmin = params.settledBy.trim().toUpperCase() || "FT102857";
+  const cleanNotes = params.notes?.trim() || null;
+
+  return withLock(() => {
+    const state = loadPersistentState();
+    if (!state.globalPoolReserves) state.globalPoolReserves = [];
+    if (!state.globalPoolSettlements) state.globalPoolSettlements = [];
+
+    const existingBatch = state.globalPoolSettlements.find((s) => s.idempotencyKey === cleanKey);
+    if (existingBatch) {
+      return {
+        duplicate: true,
+        settledCount: existingBatch.reserveCount,
+        remainingPendingCount: state.globalPoolReserves.filter((r) => r.status === "pending")
+          .length,
+        settlement: existingBatch,
+        carryForwardReserve: existingBatch.carryForwardReserveId
+          ? state.globalPoolReserves.find((r) => r.id === existingBatch.carryForwardReserveId) ||
+            null
+          : null,
+      };
+    }
+
+    const pendingReserves = state.globalPoolReserves.filter((r) => r.status === "pending");
+    if (pendingReserves.length === 0) {
+      return {
+        duplicate: false,
+        settledCount: 0,
+        remainingPendingCount: 0,
+        settlement: null,
+        carryForwardReserve: null,
+      };
+    }
+
+    const nowIso = new Date().toISOString();
+    const batchId = `gps_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+    const payoutsByKey = new Map<
+      string,
+      { userId: string; videoId?: string; amountPaise: number }
+    >();
+    const settledReserveIds: string[] = [];
+    const rewardedVideoKeys = new Set<string>();
+    let totalReservePaiseProcessed = 0;
+    let totalDistributedPaise = 0;
+    let totalCarryForwardPaise = 0;
+
+    for (const r of pendingReserves) {
+      const sourceNorm = (r.sourceUserId || "").trim().toUpperCase();
+      const eligibleForReserve = params.eligibleVideos.filter((v) => {
+        const vUser = (v.userId || "").trim().toUpperCase();
+        if (!vUser) return false;
+        if (sourceNorm && sourceNorm !== "GLOBAL_POOL_SETTLEMENT" && vUser === sourceNorm) {
+          return false;
+        }
+        return true;
+      });
+
+      if (eligibleForReserve.length === 0) {
+        continue;
+      }
+
+      const reservePaise =
+        Number.isFinite(r.reservePaise) && r.reservePaise > 0
+          ? r.reservePaise
+          : Math.round(Number(r.reserveAmount || 0) * 100);
+      if (reservePaise <= 0) {
+        continue;
+      }
+
+      const weighted = calculateWeightedPoolPayouts(reservePaise, eligibleForReserve);
+      totalReservePaiseProcessed += reservePaise;
+      totalDistributedPaise += weighted.distributedPaise;
+      totalCarryForwardPaise += weighted.residualPaise;
+      settledReserveIds.push(r.id);
+
+      for (const p of weighted.payouts) {
+        const key = `${p.userId.toUpperCase()}:${p.videoId || ""}`;
+        rewardedVideoKeys.add(key);
+        const existing = payoutsByKey.get(key);
+        if (existing) {
+          existing.amountPaise += p.amountPaise;
+        } else {
+          payoutsByKey.set(key, {
+            userId: p.userId.toUpperCase(),
+            ...(p.videoId ? { videoId: p.videoId } : {}),
+            amountPaise: p.amountPaise,
+          });
+        }
+      }
+
+      r.status = "settled";
+      r.settledBatchId = batchId;
+      r.settledAt = nowIso;
+      r.settledBy = cleanAdmin;
+      r.updatedAt = nowIso;
+      if (cleanNotes) {
+        r.notes = cleanNotes;
+      }
+    }
+
+    if (settledReserveIds.length === 0) {
+      return {
+        duplicate: false,
+        settledCount: 0,
+        remainingPendingCount: state.globalPoolReserves.filter((r) => r.status === "pending")
+          .length,
+        settlement: null,
+        carryForwardReserve: null,
+      };
+    }
+
+    let carryForwardReserve: GlobalPoolReserveRecord | null = null;
+    if (totalCarryForwardPaise > 0) {
+      carryForwardReserve = {
+        id: `gpr_carry_${batchId}`,
+        paymentId: `SETTLE_CARRY_${batchId}`,
+        orderId: null,
+        txNumber: 0,
+        sourceUserId: "GLOBAL_POOL_SETTLEMENT",
+        sourceVideoId: null,
+        reserveAmount: totalCarryForwardPaise / 100,
+        reservePaise: totalCarryForwardPaise,
+        reserveReason: "rounding_residual",
+        status: "pending",
+        settledBatchId: null,
+        settledAt: null,
+        settledBy: null,
+        notes: `Carry-forward rounding residual from settlement batch ${batchId}`,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      };
+      state.globalPoolReserves.push(carryForwardReserve);
+    }
+
+    const payouts = Array.from(payoutsByKey.values())
+      .filter((p) => p.amountPaise > 0)
+      .map((p) => ({
+        userId: p.userId,
+        ...(p.videoId ? { videoId: p.videoId } : {}),
+        amountPaise: p.amountPaise,
+        amount: p.amountPaise / 100,
+      }));
+
+    const settlement: GlobalPoolSettlementRecord = {
+      id: batchId,
+      idempotencyKey: cleanKey,
+      totalReserveAmount: totalReservePaiseProcessed / 100,
+      distributedAmount: totalDistributedPaise / 100,
+      carryForwardAmount: totalCarryForwardPaise / 100,
+      reserveCount: settledReserveIds.length,
+      eligibleVideoCount: rewardedVideoKeys.size,
+      payoutCount: payouts.length,
+      settledBy: cleanAdmin,
+      notes: cleanNotes,
+      settledReserveIds,
+      payouts,
+      carryForwardReserveId: carryForwardReserve?.id || null,
+      createdAt: nowIso,
+    };
+
+    state.globalPoolSettlements.unshift(settlement);
+    savePersistentState(state);
+
+    return {
+      duplicate: false,
+      settledCount: settledReserveIds.length,
+      remainingPendingCount: state.globalPoolReserves.filter((r) => r.status === "pending").length,
+      settlement,
+      carryForwardReserve,
+    };
   });
 }
 
@@ -740,11 +1035,15 @@ export async function resetPersistentPremiumState(
   transactions: PersistentPremiumTxRecord[] = [],
   userSubscriptions: UserSubscriptionRecord[] = [],
   refundRequests: RefundRequestRecord[] = [],
+  globalPoolReserves: GlobalPoolReserveRecord[] = [],
+  globalPoolSettlements: GlobalPoolSettlementRecord[] = [],
 ): Promise<void> {
   return withLock(() => {
     savePersistentState({
       lastTxNumber: txNumber,
       transactions,
+      globalPoolReserves,
+      globalPoolSettlements,
       userSubscriptions,
       refundRequests,
     });
@@ -797,9 +1096,19 @@ export interface PaymentVerifyResult {
   distribution?: {
     directReferralAmount: number;
     referrerId?: string | null;
+    referralStatus?: "not_applicable" | "credited" | "unassigned_pending";
     adminAmount: number;
     adminPercent?: number;
     globalPoolAmount: number;
+    globalPoolDistributedAmount?: number;
+    globalPoolReserveAmount?: number;
+    globalPoolStatus?: GlobalPoolStatus;
+    globalPoolReserveReason?: GlobalPoolReserveReason | null;
+    globalPoolReserveId?: string | null;
+    gstAmount?: number;
+    pgFeeAmount?: number;
+    taxAndFees?: number;
+    totalAmount?: number;
     eligibleMembersCount: number;
     perMemberShare: number;
     creatorPayouts?: Array<{
@@ -1185,8 +1494,29 @@ export async function verifyServerPayment(
         req.purpose === "ads_promotion";
       const isSpec = isAds ? false : existingTx.isSpecial;
       const eligibleCount = Math.max(1, eligiblePremiumCreatorIds.length);
+      const dupPoolDistributed = isAds
+        ? 0
+        : (existingTx.globalPoolDistributed ?? existingTx.globalPoolAllocation);
+      const dupPoolReserve = isAds
+        ? 0
+        : (existingTx.globalPoolReserve ??
+          Math.max(0, Number((existingTx.globalPoolAllocation - dupPoolDistributed).toFixed(2))));
+      const dupPoolStatus: GlobalPoolStatus = isAds
+        ? "not_applicable"
+        : (existingTx.globalPoolStatus ??
+          (dupPoolReserve <= 0
+            ? "settled"
+            : dupPoolDistributed <= 0
+              ? "pending_reserve"
+              : "partial_reserve"));
       const perMemberShare =
-        isSpec || isAds ? 0 : Number((existingTx.globalPoolAllocation / eligibleCount).toFixed(4));
+        isSpec || isAds ? 0 : Number((dupPoolDistributed / eligibleCount).toFixed(4));
+      const dupGst = isAds ? 0 : (existingTx.gstAmount ?? 0.9);
+      const dupPg = isAds ? 0 : (existingTx.pgFee ?? 0.1);
+      const dupRefStatus = isAds
+        ? "not_applicable"
+        : (existingTx.referralStatus ??
+          (existingTx.referrerId ? "credited" : "unassigned_pending"));
 
       return {
         verified: true,
@@ -1200,8 +1530,16 @@ export async function verifyServerPayment(
         distribution: {
           directReferralAmount: existingTx.referralCommission,
           referrerId: existingTx.referrerId,
+          referralStatus: dupRefStatus,
           adminAmount: existingTx.adminAllocation,
           globalPoolAmount: existingTx.globalPoolAllocation,
+          globalPoolDistributedAmount: dupPoolDistributed,
+          globalPoolReserveAmount: dupPoolReserve,
+          globalPoolStatus: dupPoolStatus,
+          gstAmount: dupGst,
+          pgFeeAmount: dupPg,
+          taxAndFees: Number((dupGst + dupPg).toFixed(2)),
+          totalAmount: existingTx.amount,
           eligibleMembersCount: isSpec || isAds ? 0 : eligibleCount,
           perMemberShare,
           totalReferralAmount: existingTx.referralCommission,
@@ -1217,20 +1555,26 @@ export async function verifyServerPayment(
       state.lastTxNumber += 1;
       const currentTxNumber = state.lastTxNumber;
 
-      // Special Transaction Formula:
-      // transactionNumber >= 11 AND (transactionNumber - 11) % 10 === 0
-      const isSpecial = isSpecialGlobalTransaction(currentTxNumber);
+      // Uniform ₹6 distribution across every transaction (including #11, #21, #31, #41...)
+      const isSpecial = false;
 
       const refId = (referrerUserId || req.referrerUserId || null)?.trim().toUpperCase() || null;
       const hasValidReferrer = Boolean(refId && refId.length > 0);
 
-      // Option A Approved Allocation:
-      // If valid referrer: ₹1.00 to referrer
-      // If NO valid referrer: unallocated ₹1.00 redirects to Admin
-      const referralCommission = hasValidReferrer
-        ? PRICING_CONFIG.PREMIUM_VIDEO.REFERRAL_SHARE
-        : 0.0;
-      const unallocatedReferrerPaise = hasValidReferrer ? 0 : 100;
+      // Uniform Phase 1.1 Allocation:
+      // Referral = ₹1.00 ('credited' if valid referrer, 'unassigned_pending' if missing/invalid)
+      // Admin = ₹1.00 ALWAYS (never receives 0-eligible fallback or rounding residual paise)
+      // GST = ₹0.90, PG = ₹0.10
+      // Global Pool = ₹3.00 ALWAYS (distributed + pending reserve = ₹3.00)
+      const referralCommission = PRICING_CONFIG.PREMIUM_VIDEO.REFERRAL_SHARE; // ₹1.00
+      const referralStatus: "credited" | "unassigned_pending" = hasValidReferrer
+        ? "credited"
+        : "unassigned_pending";
+      const adminAllocation = PRICING_CONFIG.PREMIUM_VIDEO.ADMIN_SHARE; // ₹1.00 strictly fixed
+      const globalPoolAllocation = PRICING_CONFIG.PREMIUM_VIDEO.GLOBAL_POOL_SHARE; // ₹3.00 strictly fixed
+      const gstAmount = PRICING_CONFIG.PREMIUM_VIDEO.GST_AMOUNT; // ₹0.90
+      const pgFee = PRICING_CONFIG.PREMIUM_VIDEO.PG_FEE; // ₹0.10
+      const taxAndFees = PRICING_CONFIG.PREMIUM_VIDEO.TAX_AND_FEES; // ₹1.00
 
       // Filter eligible previous videos / creators: strictly exclude current uploader and deduplicate
       const uploaderNorm = req.userId.trim().toUpperCase();
@@ -1260,8 +1604,9 @@ export async function verifyServerPayment(
       }
       const eligibleCount = eligibleItems.length;
 
-      let adminAllocation = 0.0;
-      let globalPoolAllocation = 0.0;
+      const poolPaise = 300;
+      let distributedPaise = 0;
+      let reservePaise = poolPaise;
       let perMemberShare = 0.0;
       const creatorPayouts: Array<{
         userId: string;
@@ -1270,47 +1615,88 @@ export async function verifyServerPayment(
         amountPaise: number;
       }> = [];
 
-      if (isSpecial) {
-        // Special: ₹4 Admin + ₹1 (if no referrer redirected to Admin) = ₹4 or ₹5
-        adminAllocation = hasValidReferrer ? 4.0 : 5.0;
-        globalPoolAllocation = 0.0;
+      if (eligibleCount === 0) {
+        // Zero eligible previous videos: hold entire ₹3.00 (300 paise) in pending Global Pool reserve
+        distributedPaise = 0;
+        reservePaise = poolPaise;
       } else {
-        // Normal: Base Admin = ₹1.00 (+ ₹1.00 unallocated referrer if no referrer)
-        const baseAdminPaise = 100 + unallocatedReferrerPaise;
+        // Distribute 300 paise using per-video weighted Ads Earnings Share; any residual stays in reserve
+        const weighted = calculateWeightedPoolPayouts(poolPaise, eligibleItems);
+        distributedPaise = weighted.distributedPaise;
+        reservePaise = weighted.residualPaise;
+        perMemberShare = weighted.payouts.length > 0 ? weighted.payouts[0]!.amount : 0;
 
-        if (eligibleCount === 0) {
-          // First transaction or no previous eligible creators: redirect entire ₹3 pool to Admin
-          const adminPaise = baseAdminPaise + 300;
-          adminAllocation = adminPaise / 100;
-          globalPoolAllocation = 0.0;
-        } else {
-          // Distribute 300 paise using per-video weighted Ads Earnings Share (zero leakage)
-          const poolPaise = 300;
-          const weighted = calculateWeightedPoolPayouts(poolPaise, eligibleItems);
-
-          adminAllocation = (baseAdminPaise + weighted.residualPaise) / 100;
-          globalPoolAllocation = weighted.distributedPaise / 100;
-          perMemberShare = weighted.payouts.length > 0 ? weighted.payouts[0]!.amount : 0;
-
-          for (const p of weighted.payouts) {
-            creatorPayouts.push({
-              userId: p.userId,
-              ...(p.videoId ? { videoId: p.videoId } : {}),
-              amount: p.amount,
-              amountPaise: p.amountPaise,
-            });
-          }
+        for (const p of weighted.payouts) {
+          creatorPayouts.push({
+            userId: p.userId,
+            ...(p.videoId ? { videoId: p.videoId } : {}),
+            amount: p.amount,
+            amountPaise: p.amountPaise,
+          });
         }
       }
 
-      const specialTag = isSpecial ? "SPECIAL_GLOBAL_RULE" : "NORMAL_PREMIUM";
+      const globalPoolDistributed = distributedPaise / 100;
+      const globalPoolReserve = reservePaise / 100;
+      const globalPoolStatus: GlobalPoolStatus =
+        reservePaise === 0
+          ? "settled"
+          : distributedPaise === 0
+            ? "pending_reserve"
+            : "partial_reserve";
+      const globalPoolReserveReason: GlobalPoolReserveReason | null =
+        reservePaise === 0
+          ? null
+          : distributedPaise === 0
+            ? "no_eligible_videos"
+            : "rounding_residual";
+
+      const resolvedVideoId =
+        req.videoId || req.metadata?.["videoId"]?.toString() || `vid_${Date.now()}`;
+      const nowIso = new Date().toISOString();
+      let reserveId: string | null = null;
+
+      if (reservePaise > 0 && globalPoolReserveReason) {
+        if (!state.globalPoolReserves) {
+          state.globalPoolReserves = [];
+        }
+        const alreadyReserved = state.globalPoolReserves.find((r) => r.paymentId === req.paymentId);
+        if (alreadyReserved) {
+          reserveId = alreadyReserved.id;
+        } else {
+          reserveId = `gpr_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+          state.globalPoolReserves.push({
+            id: reserveId,
+            paymentId: req.paymentId,
+            orderId: req.orderId,
+            txNumber: currentTxNumber,
+            sourceUserId: uploaderNorm,
+            sourceVideoId: resolvedVideoId,
+            reserveAmount: globalPoolReserve,
+            reservePaise,
+            reserveReason: globalPoolReserveReason,
+            status: "pending",
+            settledBatchId: null,
+            settledAt: null,
+            settledBy: null,
+            notes:
+              globalPoolReserveReason === "no_eligible_videos"
+                ? `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool reserve (0 eligible previous videos at TX #${currentTxNumber})`
+                : `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool rounding residual at TX #${currentTxNumber}`,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          });
+        }
+      }
+
+      const specialTag = "NORMAL_PREMIUM";
 
       // Create persistent transaction record
       const record: PersistentPremiumTxRecord = {
         txNumber: currentTxNumber,
         paymentId: req.paymentId,
         orderId: req.orderId,
-        videoId: req.videoId || req.metadata?.["videoId"]?.toString() || `vid_${Date.now()}`,
+        videoId: resolvedVideoId,
         userId: req.userId,
         userName: req.userName || req.metadata?.["userName"]?.toString() || "FaceTube Creator",
         referrerId: refId,
@@ -1321,7 +1707,13 @@ export async function verifyServerPayment(
         referralCommission,
         adminAllocation,
         globalPoolAllocation,
-        createdAt: new Date().toISOString(),
+        globalPoolDistributed,
+        globalPoolReserve,
+        globalPoolStatus,
+        gstAmount,
+        pgFee,
+        referralStatus,
+        createdAt: nowIso,
       };
 
       state.transactions.unshift(record);
@@ -1339,9 +1731,19 @@ export async function verifyServerPayment(
         distribution: {
           directReferralAmount: referralCommission,
           referrerId: refId,
+          referralStatus,
           adminAmount: adminAllocation,
           globalPoolAmount: globalPoolAllocation,
-          eligibleMembersCount: isSpecial ? 0 : eligibleCount,
+          globalPoolDistributedAmount: globalPoolDistributed,
+          globalPoolReserveAmount: globalPoolReserve,
+          globalPoolStatus,
+          globalPoolReserveReason,
+          globalPoolReserveId: reserveId,
+          gstAmount,
+          pgFeeAmount: pgFee,
+          taxAndFees,
+          totalAmount: PRICING_CONFIG.PREMIUM_VIDEO.TOTAL_PRICE,
+          eligibleMembersCount: eligibleCount,
           perMemberShare,
           creatorPayouts,
           totalReferralAmount: referralCommission,
