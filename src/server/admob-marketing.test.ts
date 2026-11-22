@@ -2560,4 +2560,344 @@ describe("FaceTube Google AdMob Integration & Backend Statements Test Suite", ()
       "AdMob safeRollback must log rollback failures server-side without throwing or leaking details in JSON",
     );
   });
+
+  it("17. Step 9A: Admin Earnings Report Includes AdMob in User Totals, Summary Totals, CSV Export, Prevents Double Counting & Matches PHP Parity", async () => {
+    const rawBackup = fs.existsSync(storePath) ? fs.readFileSync(storePath, "utf-8") : null;
+    const origHost = process.env["DB_HOST"];
+    const origName = process.env["DB_NAME"];
+    const origUser = process.env["DB_USER"];
+
+    const capturedSqls: string[] = [];
+
+    try {
+      // 17a. MySQL path: verify SQL queries, per-user admobIncome, summary.totalAdmobIncome, CSV column & no double counting
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
+            return [
+              [
+                {
+                  id: "a0000000-0000-0000-0000-000000000001",
+                  user_id: "FT102857",
+                  name: "FaceTube Administrator",
+                  email: "admin@facetube.com",
+                  role: "admin",
+                  referral_code: "FTVIP",
+                },
+              ],
+            ];
+          }
+          if (sql.includes("SELECT COUNT(*) AS total FROM users u")) {
+            return [[{ total: 2 }]];
+          }
+          if (sql.includes("AS total_admob_income")) {
+            capturedSqls.push(sql);
+            return [
+              [
+                {
+                  total_count: 2,
+                  total_wallet_balance: 5130.5,
+                  total_earned: 8856.5,
+                  total_withdrawn: 3150.0,
+                  total_referral_income: 1079.5,
+                  total_global_income: 2450.0,
+                  total_adsense_income: 1890.2,
+                  total_admob_income: 576.0,
+                  total_affiliate_income: 940.8,
+                },
+              ],
+            ];
+          }
+          if (sql.includes("AS admob_income")) {
+            capturedSqls.push(sql);
+            return [
+              [
+                {
+                  id: "u-1",
+                  user_id: "FT483921",
+                  name: "Alex Rivera",
+                  email: "alex@facetube.com",
+                  role: "user",
+                  referral_code: "ALEX99",
+                  created_at: "2026-01-01 00:00:00",
+                  balance: 4706.25,
+                  total_earned: 7856.25,
+                  total_withdrawn: 3150.0,
+                  referral_income: 1079.5,
+                  global_income: 2450.0,
+                  adsense_income: 1890.2,
+                  admob_income: 425.75,
+                  affiliate_income: 940.8,
+                },
+                {
+                  id: "u-2",
+                  user_id: "FT900431",
+                  name: "Sam Creator",
+                  email: "sam@facetube.com",
+                  role: "user",
+                  referral_code: "SAM01",
+                  created_at: "2026-01-02 00:00:00",
+                  balance: 424.25,
+                  total_earned: 1000.25,
+                  total_withdrawn: 0.0,
+                  referral_income: 0.0,
+                  global_income: 0.0,
+                  adsense_income: 0.0,
+                  admob_income: 150.25,
+                  affiliate_income: 0.0,
+                },
+              ],
+            ];
+          }
+          return [[]];
+        },
+      } as any);
+
+      const mysqlJsonRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/earnings-report.php", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }),
+      );
+      assert.equal(mysqlJsonRes?.status, 200);
+      const mysqlJson = (await mysqlJsonRes?.json()) as any;
+      assert.equal(mysqlJson.success, true);
+      assert.equal(mysqlJson.summary.totalAdmobIncome, 576.0);
+      assert.equal(mysqlJson.users.length, 2);
+      assert.equal(mysqlJson.users[0].admobIncome, 425.75);
+      assert.equal(mysqlJson.users[1].admobIncome, 150.25);
+
+      assert.equal(capturedSqls.length, 2);
+      for (const sql of capturedSqls) {
+        assert.match(sql, /income_type\s*=\s*'admob_income'/);
+        assert.match(sql, /WHERE\s+status\s*=\s*'settled'/);
+        assert.match(
+          sql,
+          /COALESCE\([^)]*lt\.ledger_admob_income,\s*wb\.admob_income,\s*0(?:\.00)?\)/,
+        );
+      }
+
+      const mysqlCsvRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/earnings-report.php?export=csv", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }),
+      );
+      assert.equal(mysqlCsvRes?.status, 200);
+      const mysqlCsv = (await mysqlCsvRes?.text()) || "";
+      const mysqlCsvLines = mysqlCsv.trim().split(/\r?\n/);
+      const mysqlHeaderCols = mysqlCsvLines[0]!.replace(/^\uFEFF/, "").split(",");
+      const admobColIdx = mysqlHeaderCols.indexOf("AdMob Income (INR)");
+      assert.ok(admobColIdx > 0, "MySQL CSV export must contain 'AdMob Income (INR)' header");
+      assert.equal(mysqlCsvLines[1]!.split(",")[admobColIdx], "425.75");
+      assert.equal(mysqlCsvLines[2]!.split(",")[admobColIdx], "150.25");
+
+      // 17b. Local store path: no double counting & ledger fallback projection excludes pending/failed/unknown
+      setMysqlPoolForTesting(null);
+      if (rawBackup) {
+        const store = JSON.parse(rawBackup);
+        store.users = Array.isArray(store.users) ? store.users : [];
+        store.walletTransactions = Array.isArray(store.walletTransactions)
+          ? store.walletTransactions
+          : [];
+        store.wallets = store.wallets || {};
+
+        // Custom user without store.wallets entry -> exercises derived ledger projection without double counting
+        store.users.push({
+          id: "u-step9a-proj",
+          user_id: "FT_STEP9A_PROJ",
+          name: "Step9A Ledger Projection",
+          email: "proj9a@facetube.com",
+          role: "user",
+          referral_code: "PROJ9A",
+          created_at: "2026-06-01T00:00:00.000Z",
+        });
+        delete store.wallets["FT_STEP9A_PROJ"];
+
+        // Existing wallet WITH both store.wallets and matching settled ledger entry -> must NOT double count
+        store.users.push({
+          id: "u-step9a-wallet",
+          user_id: "FT_STEP9A_WALLET",
+          name: "Step9A Existing Wallet",
+          email: "wallet9a@facetube.com",
+          role: "user",
+          referral_code: "WALLET9A",
+          created_at: "2026-06-02T00:00:00.000Z",
+        });
+        store.wallets["FT_STEP9A_WALLET"] = {
+          balance: 310.5,
+          total_earned: 310.5,
+          total_withdrawn: 0,
+          referral_income: 0,
+          global_income: 0,
+          adsense_income: 0,
+          admob_income: 310.5,
+          affiliate_income: 0,
+          updated_at: "2026-06-02T00:00:00.000Z",
+        };
+
+        store.walletTransactions.push(
+          {
+            id: "led_9a_proj_admob",
+            transaction_id: "TX_9A_PROJ_ADMOB",
+            user_id: "FT_STEP9A_PROJ",
+            income_type: "admob_income",
+            amount: 200.5,
+            status: "settled",
+            created_at: "2026-06-05T00:00:00.000Z",
+          },
+          {
+            id: "led_9a_proj_ref",
+            transaction_id: "TX_9A_PROJ_REF",
+            user_id: "FT_STEP9A_PROJ",
+            income_type: "referral_income",
+            amount: 100.0,
+            status: "settled",
+            created_at: "2026-06-05T01:00:00.000Z",
+          },
+          {
+            id: "led_9a_proj_pending",
+            transaction_id: "TX_9A_PROJ_PENDING",
+            user_id: "FT_STEP9A_PROJ",
+            income_type: "admob_income",
+            amount: 999.0,
+            status: "pending",
+            created_at: "2026-06-05T02:00:00.000Z",
+          },
+          {
+            id: "led_9a_proj_failed",
+            transaction_id: "TX_9A_PROJ_FAILED",
+            user_id: "FT_STEP9A_PROJ",
+            income_type: "adsense_income",
+            amount: 888.0,
+            status: "failed",
+            created_at: "2026-06-05T03:00:00.000Z",
+          },
+          {
+            id: "led_9a_proj_unknown",
+            transaction_id: "TX_9A_PROJ_UNKNOWN",
+            user_id: "FT_STEP9A_PROJ",
+            income_type: "unrecognized_legacy_type",
+            amount: 777.0,
+            status: "settled",
+            created_at: "2026-06-05T04:00:00.000Z",
+          },
+          {
+            id: "led_9a_wallet_admob",
+            transaction_id: "TX_9A_WALLET_ADMOB",
+            user_id: "FT_STEP9A_WALLET",
+            income_type: "admob_income",
+            amount: 310.5,
+            status: "settled",
+            created_at: "2026-06-05T05:00:00.000Z",
+          },
+        );
+        fs.writeFileSync(storePath, JSON.stringify(store, null, 2), "utf-8");
+      }
+      resetInMemoryStore();
+
+      const storeJsonRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/earnings-report.php?search=FT_STEP9A_", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }),
+      );
+      assert.equal(storeJsonRes?.status, 200);
+      const storeJson = (await storeJsonRes?.json()) as any;
+      assert.equal(storeJson.users.length, 2);
+
+      const projUser = storeJson.users.find((u: any) => u.userId === "FT_STEP9A_PROJ");
+      const walletUser = storeJson.users.find((u: any) => u.userId === "FT_STEP9A_WALLET");
+      assert.ok(projUser && walletUser);
+      assert.equal(projUser.admobIncome, 200.5);
+      assert.equal(
+        projUser.referralIncome,
+        100.0,
+        "Unknown/AdMob entries must NOT fall into referral",
+      );
+      assert.equal(projUser.adsenseIncome, 0, "Failed AdSense entry must be excluded");
+      assert.equal(projUser.totalEarned, 300.5);
+
+      assert.equal(
+        walletUser.admobIncome,
+        310.5,
+        "Must NOT double count wallet + ledger AdMob income",
+      );
+      assert.equal(walletUser.totalEarned, 310.5);
+
+      assert.equal(
+        storeJson.summary.totalAdmobIncome,
+        511.0,
+        "Admin summary totalAdmobIncome must equal exact sum across matching users (200.5 + 310.5)",
+      );
+
+      const storeCsvRes = await handleApiRequest(
+        new Request(
+          "http://localhost:3000/api/admin/earnings-report.php?search=FT_STEP9A_&export=csv",
+          {
+            method: "GET",
+            headers: { Authorization: `Bearer ${adminToken}` },
+          },
+        ),
+      );
+      assert.equal(storeCsvRes?.status, 200);
+      const storeCsv = (await storeCsvRes?.text()) || "";
+      const storeCsvLines = storeCsv.trim().split(/\r?\n/);
+      const storeHeaderCols = storeCsvLines[0]!.replace(/^\uFEFF/, "").split(",");
+      const storeAdmobIdx = storeHeaderCols.indexOf("AdMob Income (INR)");
+      assert.ok(storeAdmobIdx > 0, "Store CSV export must contain 'AdMob Income (INR)' header");
+      const projCsvRow = storeCsvLines.find((l) => l.includes("FT_STEP9A_PROJ"));
+      const walletCsvRow = storeCsvLines.find((l) => l.includes("FT_STEP9A_WALLET"));
+      assert.equal(projCsvRow?.split(",")[storeAdmobIdx], "200.50");
+      assert.equal(walletCsvRow?.split(",")[storeAdmobIdx], "310.50");
+
+      // 17c. PHP api/admin/earnings-report.php parity assertions
+      const reportPhp = fs.readFileSync(
+        path.resolve(process.cwd(), "api/admin/earnings-report.php"),
+        "utf-8",
+      );
+      assert.match(
+        reportPhp,
+        /SUM\(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END\) AS ledger_admob_income/,
+      );
+      assert.match(
+        reportPhp,
+        /COALESCE\(SUM\(COALESCE\(lt\.ledger_admob_income,\s*wb\.admob_income,\s*0\)\),\s*0\) AS total_admob_income/,
+      );
+      assert.match(
+        reportPhp,
+        /'totalAdmobIncome'\s*=>\s*round\(floatval\(\$summaryRow\['total_admob_income'\] \?\? 0\),\s*2\)/,
+      );
+      assert.match(
+        reportPhp,
+        /COALESCE\(lt\.ledger_admob_income,\s*wb\.admob_income,\s*0\.00\) AS admob_income/,
+      );
+      assert.match(
+        reportPhp,
+        /'admobIncome'\s*=>\s*round\(floatval\(\$r\['admob_income'\]\),\s*2\)/,
+      );
+      assert.match(reportPhp, /'AdMob Income \(INR\)'/);
+      assert.match(
+        reportPhp,
+        /number_format\(floatval\(\$r\['admob_income'\]\),\s*2,\s*'\.',\s*''\)/,
+      );
+      assert.match(reportPhp, /WHERE status = 'settled'/);
+    } finally {
+      setMysqlPoolForTesting(null);
+      if (origHost !== undefined) process.env["DB_HOST"] = origHost;
+      else delete process.env["DB_HOST"];
+      if (origName !== undefined) process.env["DB_NAME"] = origName;
+      else delete process.env["DB_NAME"];
+      if (origUser !== undefined) process.env["DB_USER"] = origUser;
+      else delete process.env["DB_USER"];
+      if (rawBackup !== null) {
+        fs.writeFileSync(storePath, rawBackup, "utf-8");
+      }
+      resetInMemoryStore();
+    }
+  });
 });

@@ -590,6 +590,7 @@ export const api = {
           referral: number;
           global: number;
           adsense: number;
+          admob: number;
           affiliate: number;
           ad_boost: number;
         };
@@ -600,11 +601,13 @@ export const api = {
           referral: number;
           global: number;
           adsense: number;
+          admob: number;
           affiliate: number;
           ad_boost: number;
           referral_income: number;
           global_income: number;
           adsense_income: number;
+          admob_income: number;
           affiliate_income: number;
           ad_boost_income: number;
           tx_count: number;
@@ -1065,6 +1068,7 @@ export const api = {
           referralIncome: number;
           globalIncome: number;
           adsenseIncome: number;
+          admobIncome: number;
           affiliateIncome: number;
         }>;
         pagination: {
@@ -1081,6 +1085,7 @@ export const api = {
           totalReferralIncome: number;
           totalGlobalIncome: number;
           totalAdsenseIncome: number;
+          totalAdmobIncome: number;
           totalAffiliateIncome: number;
         };
       }>(`/admin/earnings-report.php${qStr}`);

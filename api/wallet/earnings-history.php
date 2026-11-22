@@ -120,6 +120,7 @@ try {
         'referral' => 0.0,
         'global' => 0.0,
         'adsense' => 0.0,
+        'admob' => 0.0,
         'affiliate' => 0.0,
         'ad_boost' => 0.0,
     ];
@@ -133,6 +134,7 @@ try {
             FROM income_ledger
             WHERE UPPER(user_id) = UPPER(?)
               AND income_type != "withdrawal"
+              AND status = "settled"
               AND created_at >= DATE_SUB(DATE_FORMAT(CURDATE(), "%Y-%m-01"), INTERVAL 11 MONTH)
             GROUP BY DATE_FORMAT(created_at, "%Y-%m"), income_type
             ORDER BY period_key ASC
@@ -157,11 +159,13 @@ try {
                 'referral' => 0.0,
                 'global' => 0.0,
                 'adsense' => 0.0,
+                'admob' => 0.0,
                 'affiliate' => 0.0,
                 'ad_boost' => 0.0,
                 'referral_income' => 0.0,
                 'global_income' => 0.0,
                 'adsense_income' => 0.0,
+                'admob_income' => 0.0,
                 'affiliate_income' => 0.0,
                 'ad_boost_income' => 0.0,
                 'tx_count' => 0,
@@ -176,6 +180,7 @@ try {
             FROM income_ledger
             WHERE UPPER(user_id) = UPPER(?)
               AND income_type != "withdrawal"
+              AND status = "settled"
               AND created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
             GROUP BY DATE(created_at), income_type
             ORDER BY period_key ASC
@@ -200,11 +205,13 @@ try {
                 'referral' => 0.0,
                 'global' => 0.0,
                 'adsense' => 0.0,
+                'admob' => 0.0,
                 'affiliate' => 0.0,
                 'ad_boost' => 0.0,
                 'referral_income' => 0.0,
                 'global_income' => 0.0,
                 'adsense_income' => 0.0,
+                'admob_income' => 0.0,
                 'affiliate_income' => 0.0,
                 'ad_boost_income' => 0.0,
                 'tx_count' => 0,
@@ -219,17 +226,23 @@ try {
             $count = intval($r['tx_count']);
             $type = strval($r['income_type'] ?? '');
 
-            $category = 'referral';
+            $category = null;
             if ($type === 'global_income') {
                 $category = 'global';
             } elseif ($type === 'adsense_income') {
                 $category = 'adsense';
+            } elseif ($type === 'admob_income') {
+                $category = 'admob';
             } elseif ($type === 'affiliate_income' || $type === 'marketing_income') {
                 $category = 'affiliate';
             } elseif ($type === 'ad_boost_income' || $type === 'marketing_ads') {
                 $category = 'ad_boost';
             } elseif ($type === 'referral_income' || $type === 'direct_commission') {
                 $category = 'referral';
+            }
+
+            if ($category === null) {
+                continue;
             }
 
             $timeline[$k][$category] = round($timeline[$k][$category] + $amt, 2);

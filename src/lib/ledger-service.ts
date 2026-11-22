@@ -52,6 +52,42 @@ export interface UserWallet {
   isStale?: boolean | undefined;
 }
 
+export interface AdEarningsBreakdown {
+  adsenseIncome: number;
+  admobIncome: number;
+  totalAdEarnings: number;
+}
+
+function toFiniteMoney(value: unknown): number {
+  if (value === null || value === undefined || value === "") return 0;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.round(parsed * 100) / 100;
+}
+
+/**
+ * Calculates combined advertising revenue strictly from AdSense Income + AdMob Income.
+ * Excludes referral, global pool, affiliate, sponsor fees, withdrawals, and totalEarned.
+ */
+export function calculateTotalAdEarnings(
+  wallet?: {
+    adsenseIncome?: unknown;
+    adsense_income?: unknown;
+    admobIncome?: unknown;
+    admob_income?: unknown;
+  } | null,
+): AdEarningsBreakdown {
+  const adsenseIncome = toFiniteMoney(wallet?.adsenseIncome ?? wallet?.adsense_income);
+  const admobIncome = toFiniteMoney(wallet?.admobIncome ?? wallet?.admob_income);
+  const totalAdEarnings = Math.round((adsenseIncome + admobIncome) * 100) / 100;
+
+  return {
+    adsenseIncome,
+    admobIncome,
+    totalAdEarnings,
+  };
+}
+
 const LOCAL_STORAGE_LEDGER_KEY = "facetube_income_ledger_v3";
 const LOCAL_STORAGE_WALLETS_KEY = "facetube_user_wallets_v3";
 
@@ -122,7 +158,22 @@ export function saveStoredWallets(wallets: Record<string, UserWallet>): void {
  * Retrieves the wallet for a user
  */
 export async function getUserWallet(userId: string): Promise<UserWallet> {
-  const norm = userId.trim().toUpperCase();
+  const norm = typeof userId === "string" ? userId.trim().toUpperCase() : "";
+  if (!norm) {
+    return {
+      userId: "",
+      balance: 0,
+      totalEarned: 0,
+      totalWithdrawn: 0,
+      referralIncome: 0,
+      globalIncome: 0,
+      adsenseIncome: 0,
+      admobIncome: 0,
+      affiliateIncome: 0,
+      updatedAt: new Date().toISOString(),
+      isStale: true,
+    };
+  }
 
   try {
     const res = await api.wallet.getBalance(norm);
@@ -130,14 +181,14 @@ export async function getUserWallet(userId: string): Promise<UserWallet> {
       const data = res.wallet;
       const wallet: UserWallet = {
         userId: data.user_id || data.userId || norm,
-        balance: Number(data.balance) || 0,
-        totalEarned: Number(data.total_earned || data.totalEarned) || 0,
-        totalWithdrawn: Number(data.total_withdrawn || data.totalWithdrawn) || 0,
-        referralIncome: Number(data.referral_income || data.referralIncome) || 0,
-        globalIncome: Number(data.global_income || data.globalIncome) || 0,
-        adsenseIncome: Number(data.adsense_income || data.adsenseIncome) || 0,
-        admobIncome: Number(data.admob_income || data.admobIncome) || 0,
-        affiliateIncome: Number(data.affiliate_income || data.affiliateIncome) || 0,
+        balance: toFiniteMoney(data.balance),
+        totalEarned: toFiniteMoney(data.total_earned ?? data.totalEarned),
+        totalWithdrawn: toFiniteMoney(data.total_withdrawn ?? data.totalWithdrawn),
+        referralIncome: toFiniteMoney(data.referral_income ?? data.referralIncome),
+        globalIncome: toFiniteMoney(data.global_income ?? data.globalIncome),
+        adsenseIncome: toFiniteMoney(data.adsense_income ?? data.adsenseIncome),
+        admobIncome: toFiniteMoney(data.admob_income ?? data.admobIncome),
+        affiliateIncome: toFiniteMoney(data.affiliate_income ?? data.affiliateIncome),
         updatedAt: data.updated_at || data.updatedAt || new Date().toISOString(),
         isStale: false,
       };
@@ -153,8 +204,11 @@ export async function getUserWallet(userId: string): Promise<UserWallet> {
 
   const wallets = getStoredWallets();
   if (wallets[norm]) {
+    const cached = wallets[norm]!;
     return {
-      ...wallets[norm]!,
+      ...cached,
+      adsenseIncome: toFiniteMoney(cached.adsenseIncome),
+      admobIncome: toFiniteMoney(cached.admobIncome),
       isStale: true,
     };
   }
@@ -837,6 +891,18 @@ export async function processWithdrawal(
 
   let updatedWallet: UserWallet;
   if (res.updatedWallet) {
+    const rawUpdatedAdmob =
+      res.updatedWallet.admob_income !== undefined && res.updatedWallet.admob_income !== null
+        ? res.updatedWallet.admob_income
+        : res.updatedWallet.admobIncome;
+    const parsedUpdatedAdmob =
+      rawUpdatedAdmob !== undefined && rawUpdatedAdmob !== null && rawUpdatedAdmob !== ""
+        ? Number(rawUpdatedAdmob)
+        : NaN;
+    const resolvedAdmobIncome = Number.isFinite(parsedUpdatedAdmob)
+      ? parsedUpdatedAdmob
+      : (currentWallet.admobIncome ?? 0);
+
     updatedWallet = {
       userId: norm,
       balance: Number(res.updatedWallet.balance) || 0,
@@ -855,6 +921,7 @@ export async function processWithdrawal(
       adsenseIncome:
         Number(res.updatedWallet.adsense_income || res.updatedWallet.adsenseIncome) ||
         currentWallet.adsenseIncome,
+      admobIncome: resolvedAdmobIncome,
       affiliateIncome:
         Number(res.updatedWallet.affiliate_income || res.updatedWallet.affiliateIncome) ||
         currentWallet.affiliateIncome,

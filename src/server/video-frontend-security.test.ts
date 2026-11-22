@@ -64,7 +64,7 @@ function makeVideo(overrides: Partial<UploadedVideo> = {}): UploadedVideo {
   const now = "2026-11-22T00:00:00.000Z";
   return {
     id: overrides.id || `vid-test-${Math.random().toString(36).slice(2, 8)}`,
-    userId: overrides.userId || "FT483921",
+    userId: overrides.userId ?? "FT483921",
     creatorName: overrides.creatorName || "Alex Rivera",
     title: overrides.title || "Sample Video",
     description: overrides.description || "Sample description",
@@ -399,6 +399,80 @@ describe("Phase 2B Step 3C: Frontend Watch Authorization, Cache Security & Visib
       throw new Error("Offline");
     };
     assert.deepEqual(await fetchUploadedVideos(), []);
+
+    // 3. Unpaginated live empty Shorts response clears stale public Shorts while preserving public longs, owner cache, and error resilience
+    setActiveSession(storage, "FT111111", "tok_shorts_owner");
+    const ownerPrivateShort = makeVideo({
+      id: "vid-owner-priv-short",
+      userId: "FT111111",
+      contentType: "short",
+      visibility: "private",
+    });
+    saveOwnerStoredVideos("FT111111", [ownerPrivateShort]);
+    const validLong = makeVideo({
+      id: "vid-valid-long",
+      videoType: "free",
+      contentType: "long",
+      duration: "12:00",
+      visibility: "public",
+    });
+    const staleShort = makeVideo({
+      id: "vid-stale-short",
+      videoType: "free",
+      contentType: "short",
+      duration: "0:35",
+      visibility: "public",
+    });
+    saveStoredVideos([validLong, staleShort]);
+
+    // Network error / HTTP failure must NOT invalidate cached Shorts
+    api.videos.list = async () => {
+      throw Object.assign(new Error("HTTP 500"), { status: 500 });
+    };
+    const offlineShorts = await fetchUploadedVideos({ contentType: "short" });
+    assert.deepEqual(
+      offlineShorts.map((v) => v.id),
+      ["vid-stale-short"],
+    );
+    assert.deepEqual(
+      getStoredVideos().map((v) => v.id),
+      ["vid-valid-long", "vid-stale-short"],
+    );
+
+    // Unsuccessful response payload (success: false) must NOT invalidate cached Shorts
+    api.videos.list = async () => ({ success: false, videos: [], total: 0 });
+    const unsuccessfulShorts = await fetchUploadedVideos({ contentType: "short" });
+    assert.deepEqual(
+      unsuccessfulShorts.map((v) => v.id),
+      ["vid-stale-short"],
+    );
+    assert.deepEqual(
+      getStoredVideos().map((v) => v.id),
+      ["vid-valid-long", "vid-stale-short"],
+    );
+
+    // Successful empty Shorts response clears stale public Shorts while preserving public longs & owner cache
+    api.videos.list = async () => ({ success: true, videos: [], total: 0 });
+    const liveShortsEmpty = await fetchUploadedVideos({ contentType: "short" });
+    assert.deepEqual(liveShortsEmpty, []);
+    assert.deepEqual(
+      getStoredVideos().map((v) => v.id),
+      ["vid-valid-long"],
+    );
+    assert.deepEqual(
+      getOwnerStoredVideos("FT111111")?.map((v) => v.id),
+      ["vid-owner-priv-short"],
+    );
+
+    // Going offline afterward must not resurrect cleared Shorts while longs remain intact
+    api.videos.list = async () => {
+      throw new Error("Offline");
+    };
+    assert.deepEqual(await fetchUploadedVideos({ contentType: "short" }), []);
+    assert.deepEqual(
+      getStoredVideos().map((v) => v.id),
+      ["vid-valid-long"],
+    );
   });
 
   it("8. Free and Sponsor feeds do not merge stale localStorage cache when live API succeeds", async () => {
@@ -924,7 +998,12 @@ describe("Phase 2B Step 3C: Frontend Watch Authorization, Cache Security & Visib
         paymentAmount: 6,
         views: 900,
       }),
-      makeVideo({ id: "excl-priv", visibility: "private", videoType: "free", contentType: "short" }),
+      makeVideo({
+        id: "excl-priv",
+        visibility: "private",
+        videoType: "free",
+        contentType: "short",
+      }),
       makeVideo({
         id: "excl-unl",
         visibility: "unlisted",
@@ -1132,7 +1211,9 @@ describe("Phase 2B Step 3C: Frontend Watch Authorization, Cache Security & Visib
     for (const relPath of publicDiscoveryFiles) {
       const src = fs.readFileSync(path.resolve(process.cwd(), relPath), "utf8");
       assert.equal(
-        /\b(allVideos|SHORTS_LIST|recommended|trending|recent|creators)\b/.test(src),
+        /import\s+(?!type\b)[^;]*\b(allVideos|SHORTS_LIST|recommended|trending|recent|creators|seedVideos|staticShowcaseVideos)\b[^;]*from\s+["']@\/data\/(?:videos|shorts)["']/s.test(
+          src,
+        ) || /\b(allVideos|SHORTS_LIST|seedVideos|staticShowcaseVideos)\b/.test(src),
         false,
         `${relPath} must not reference static mock arrays/imports`,
       );

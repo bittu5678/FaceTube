@@ -87,7 +87,7 @@ import {
   initiateAdsPromotionPayment,
   preloadRazorpayScript,
 } from "@/lib/razorpay-service";
-import { getUserWallet, type UserWallet } from "@/lib/ledger-service";
+import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
 
 export type MainUploadMode = "free" | "premium" | "ad_promotion" | "image" | "bulk" | null;
 export type VideoFormatChoice = "short" | "long";
@@ -254,7 +254,7 @@ function UploadStudioPage() {
           </div>
         )}
         {!activeMode ? (
-          <FourOptionsSelectionView onSelect={setMode} wallet={wallet} />
+          <FourOptionsSelectionView onSelect={setMode} wallet={wallet} userId={userId} />
         ) : activeMode === "bulk" ? (
           <BulkVideoUploadView onBack={() => setMode(null)} onUploaded={refreshWallet} />
         ) : activeMode === "free" ? (
@@ -292,13 +292,17 @@ function UploadStudioPage() {
 function FourOptionsSelectionView({
   onSelect,
   wallet,
+  userId,
 }: {
   onSelect: (mode: NonNullable<MainUploadMode>, format?: VideoFormatChoice) => void;
   wallet?: UserWallet | null;
+  userId?: string;
 }) {
+  const adEarnings = calculateTotalAdEarnings(wallet);
+
   return (
     <div className="space-y-8">
-      {/* Studio Header Banner with Req 1: Total Ads Earning */}
+      {/* Studio Header Banner with Combined Total Ad Earnings (AdSense + AdMob) */}
       <div className="relative overflow-hidden rounded-3xl border border-border bg-gradient-to-br from-secondary/80 via-card to-background p-6 sm:p-10 shadow-card">
         <div
           aria-hidden
@@ -325,17 +329,19 @@ function FourOptionsSelectionView({
             </p>
           </div>
 
-          {/* Requirement 1: Total Ads Earning Metric Card */}
-          <div className="shrink-0 rounded-2xl border border-emerald-500/30 bg-gradient-to-b from-emerald-500/15 via-card to-card p-5 shadow-sm text-left md:text-right min-w-[210px]">
+          {/* Combined Total Ad Earnings (AdSense + AdMob) Metric Card */}
+          <div className="shrink-0 rounded-2xl border border-emerald-500/30 bg-gradient-to-b from-emerald-500/15 via-card to-card p-5 shadow-sm text-left md:text-right min-w-[230px]">
             <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center md:justify-end gap-1.5">
               <DollarSign className="h-3.5 w-3.5" />
-              Total Ads Earning
+              Total Ad Earnings
             </span>
             <div className="text-2xl sm:text-3xl font-black text-emerald-400 mt-1">
-              ₹{(wallet?.adsenseIncome ?? 0).toFixed(2)}
+              ₹{adEarnings.totalAdEarnings.toFixed(2)}
             </div>
             <p className="text-[10px] text-muted-foreground mt-0.5">
-              Cumulative AdSense & promotion income
+              {userId
+                ? `AdSense ₹${adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹${adEarnings.admobIncome.toFixed(2)}`
+                : "Sign in to view AdSense + AdMob earnings"}
             </p>
           </div>
         </div>

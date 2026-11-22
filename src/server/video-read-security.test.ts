@@ -890,7 +890,10 @@ describe("Phase 2B Step 3B: Secure Video Read Endpoints (list, get, counts)", ()
     assert.match(listPhp, /COALESCE\(v\.is_blocked, 0\) = 0/);
     assert.match(listPhp, /COALESCE\(NULLIF\(v\.visibility, ''\), 'public'\) = 'public'/);
     assert.match(listPhp, /'visibility'\s*=>\s*\$visibility/);
-    assert.match(listPhp, /if\s*\(\s*!\$isOwnerFilter\s*&&\s*!\(\$isAdmin\s*&&\s*\$includeBlocked\)\s*\)/);
+    assert.match(
+      listPhp,
+      /if\s*\(\s*!\$isOwnerFilter\s*&&\s*!\(\$isAdmin\s*&&\s*\$includeBlocked\)\s*\)/,
+    );
     assert.match(listPhp, /\$visibility\s*=\s*'private'/);
 
     // get.php parity: blocked + private + unpaid checks BEFORE view increment + fail-closed visibility

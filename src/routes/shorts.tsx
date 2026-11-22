@@ -554,290 +554,290 @@ function ShortsPage() {
             </p>
           </div>
         ) : (
-        <div className="relative flex flex-col md:flex-row items-center gap-4 max-w-full">
-          {/* Vertical Video Reel Card with YouTube-Style Pinch-to-Zoom */}
-          <div
-            ref={cardRef}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
-            style={{ touchAction: scale > 1.05 ? "none" : "pan-y" }}
-            className="relative w-[340px] xs:w-[380px] sm:w-[420px] aspect-[9/16] max-h-[calc(100vh-160px)] rounded-3xl overflow-hidden bg-black shadow-2xl border border-border/70 flex flex-col justify-between select-none"
-          >
-            {/* Background Video / Thumbnail with Pinch Zoom & Pan */}
-            <div className="absolute inset-0 z-0 overflow-hidden">
-              <div
-                style={{
-                  transform: `translate3d(${pan.x}px, ${pan.y}px, 0px) scale(${scale})`,
-                  transformOrigin: "center center",
-                  transition: isZoomInteracting
-                    ? "none"
-                    : "transform 260ms cubic-bezier(0.25, 1, 0.5, 1)",
-                  willChange: "transform",
-                }}
-                className="h-full w-full relative"
-              >
-                {activeShort.videoUrl ? (
-                  <video
-                    src={activeShort.videoUrl}
-                    poster={activeShort.thumb}
-                    autoPlay={isPlaying}
-                    muted={isMuted}
-                    loop
-                    playsInline
-                    className="h-full w-full object-cover pointer-events-none"
-                  />
-                ) : (
-                  <img
-                    src={activeShort.thumb}
-                    alt={activeShort.title}
-                    className="h-full w-full object-cover opacity-80 pointer-events-none"
-                  />
-                )}
-              </div>
-              <div
-                className={`absolute inset-0 bg-gradient-to-t ${activeShort.aspectColor} via-black/30 to-black/70 pointer-events-none`}
-              />
-            </div>
-
-            {/* Quick Reset Zoom Badge when zoomed */}
-            {scale > 1.05 && (
-              <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 animate-in fade-in zoom-in-90 duration-200">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    resetZoom();
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-black/80 px-3 py-1 text-xs font-semibold text-white shadow-lg backdrop-blur-md border border-white/20 hover:bg-black transition active:scale-95 cursor-pointer"
-                  title="Double-tap or click to reset zoom"
-                >
-                  <RotateCcw className="h-3 w-3 text-red-400" />
-                  <span>{scale.toFixed(1)}x · Reset</span>
-                </button>
-              </div>
-            )}
-
-            {/* Top Bar on Video: Back Button, Sound, Status, Progress Bar */}
-            <div className="relative z-10 flex items-center justify-between p-4">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleBack(e);
-                  }}
-                  className="grid h-9 w-9 place-items-center rounded-full bg-black/60 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-95 cursor-pointer"
-                  aria-label="Back to previous page"
-                  title="Back to previous page"
-                >
-                  <ArrowLeft className="h-4 w-4" />
-                </button>
-                <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-2.5 py-1 text-xs font-semibold text-white backdrop-blur-md">
-                  <Sparkles className="h-3 w-3 text-red-400" />
-                  {currentIndex + 1} of {allShorts.length}
-                </span>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsMuted((m) => !m)}
-                  className="grid h-9 w-9 place-items-center rounded-full bg-black/60 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-95"
-                  aria-label={isMuted ? "Unmute sound" : "Mute sound"}
-                >
-                  {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsPlaying((p) => !p)}
-                  className="grid h-9 w-9 place-items-center rounded-full bg-black/60 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-95"
-                  aria-label={isPlaying ? "Pause" : "Play"}
-                >
-                  {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-                </button>
-              </div>
-            </div>
-
-            {/* Middle tap area to Play/Pause (Single tap) and Zoom (Double tap) */}
+          <div className="relative flex flex-col md:flex-row items-center gap-4 max-w-full">
+            {/* Vertical Video Reel Card with YouTube-Style Pinch-to-Zoom */}
             <div
-              className="relative z-10 flex-1 cursor-pointer flex items-center justify-center"
-              onClick={handleMiddleTap}
+              ref={cardRef}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              style={{ touchAction: scale > 1.05 ? "none" : "pan-y" }}
+              className="relative w-[340px] xs:w-[380px] sm:w-[420px] aspect-[9/16] max-h-[calc(100vh-160px)] rounded-3xl overflow-hidden bg-black shadow-2xl border border-border/70 flex flex-col justify-between select-none"
             >
-              {!isPlaying && (
-                <div className="grid h-16 w-16 place-items-center rounded-full bg-black/70 text-white shadow-2xl backdrop-blur-md animate-in fade-in zoom-in pointer-events-none">
-                  <Play className="h-8 w-8 translate-x-0.5 fill-white" />
+              {/* Background Video / Thumbnail with Pinch Zoom & Pan */}
+              <div className="absolute inset-0 z-0 overflow-hidden">
+                <div
+                  style={{
+                    transform: `translate3d(${pan.x}px, ${pan.y}px, 0px) scale(${scale})`,
+                    transformOrigin: "center center",
+                    transition: isZoomInteracting
+                      ? "none"
+                      : "transform 260ms cubic-bezier(0.25, 1, 0.5, 1)",
+                    willChange: "transform",
+                  }}
+                  className="h-full w-full relative"
+                >
+                  {activeShort.videoUrl ? (
+                    <video
+                      src={activeShort.videoUrl}
+                      poster={activeShort.thumb}
+                      autoPlay={isPlaying}
+                      muted={isMuted}
+                      loop
+                      playsInline
+                      className="h-full w-full object-cover pointer-events-none"
+                    />
+                  ) : (
+                    <img
+                      src={activeShort.thumb}
+                      alt={activeShort.title}
+                      className="h-full w-full object-cover opacity-80 pointer-events-none"
+                    />
+                  )}
+                </div>
+                <div
+                  className={`absolute inset-0 bg-gradient-to-t ${activeShort.aspectColor} via-black/30 to-black/70 pointer-events-none`}
+                />
+              </div>
+
+              {/* Quick Reset Zoom Badge when zoomed */}
+              {scale > 1.05 && (
+                <div className="absolute top-16 left-1/2 -translate-x-1/2 z-30 animate-in fade-in zoom-in-90 duration-200">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      resetZoom();
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-black/80 px-3 py-1 text-xs font-semibold text-white shadow-lg backdrop-blur-md border border-white/20 hover:bg-black transition active:scale-95 cursor-pointer"
+                    title="Double-tap or click to reset zoom"
+                  >
+                    <RotateCcw className="h-3 w-3 text-red-400" />
+                    <span>{scale.toFixed(1)}x · Reset</span>
+                  </button>
                 </div>
               )}
-            </div>
 
-            {/* Bottom Meta & Creator Info */}
-            <div className="relative z-10 p-4 pb-5 space-y-3 bg-gradient-to-t from-black/95 via-black/70 to-transparent">
-              {/* Creator Row with Subscribe */}
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                  <ChannelAvatar
-                    src={activeShort.channelLogoUrl}
-                    name={activeShort.creator}
-                    initials={activeShort.initials}
-                    sizeClassName="h-10 w-10"
-                    imageRingClassName="ring-2 ring-white/50"
-                    fallbackClassName="bg-brand text-white font-bold text-xs ring-2 ring-white/50"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <p className="truncate text-sm font-bold text-white drop-shadow-sm">
-                        {activeShort.creator}
-                      </p>
-                      {activeShortLabels.showSponsorLabel && (
-                        <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/20 text-amber-300 border border-amber-400/40 backdrop-blur-xs">
-                          Sponsored
-                        </span>
-                      )}
-                    </div>
-                    <p className="truncate text-[11px] text-white/80">
-                      {activeShort.creatorHandle}
-                    </p>
-                  </div>
+              {/* Top Bar on Video: Back Button, Sound, Status, Progress Bar */}
+              <div className="relative z-10 flex items-center justify-between p-4">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleBack(e);
+                    }}
+                    className="grid h-9 w-9 place-items-center rounded-full bg-black/60 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-95 cursor-pointer"
+                    aria-label="Back to previous page"
+                    title="Back to previous page"
+                  >
+                    <ArrowLeft className="h-4 w-4" />
+                  </button>
+                  <span className="inline-flex items-center gap-1 rounded-full bg-black/60 px-2.5 py-1 text-xs font-semibold text-white backdrop-blur-md">
+                    <Sparkles className="h-3 w-3 text-red-400" />
+                    {currentIndex + 1} of {allShorts.length}
+                  </span>
                 </div>
 
-                <button
-                  type="button"
-                  disabled={isSubscribing}
-                  onClick={() => handleToggleSubscribe(activeCreatorUserId, activeShort.creator)}
-                  className={`shrink-0 rounded-full px-4 py-1.5 text-xs font-bold transition-all shadow-md active:scale-95 ${
-                    subscribedCreators[activeCreatorUserId]
-                      ? "bg-white/20 text-white backdrop-blur-md"
-                      : "bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsMuted((m) => !m)}
+                    className="grid h-9 w-9 place-items-center rounded-full bg-black/60 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-95"
+                    aria-label={isMuted ? "Unmute sound" : "Mute sound"}
+                  >
+                    {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsPlaying((p) => !p)}
+                    className="grid h-9 w-9 place-items-center rounded-full bg-black/60 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-95"
+                    aria-label={isPlaying ? "Pause" : "Play"}
+                  >
+                    {isPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Middle tap area to Play/Pause (Single tap) and Zoom (Double tap) */}
+              <div
+                className="relative z-10 flex-1 cursor-pointer flex items-center justify-center"
+                onClick={handleMiddleTap}
+              >
+                {!isPlaying && (
+                  <div className="grid h-16 w-16 place-items-center rounded-full bg-black/70 text-white shadow-2xl backdrop-blur-md animate-in fade-in zoom-in pointer-events-none">
+                    <Play className="h-8 w-8 translate-x-0.5 fill-white" />
+                  </div>
+                )}
+              </div>
+
+              {/* Bottom Meta & Creator Info */}
+              <div className="relative z-10 p-4 pb-5 space-y-3 bg-gradient-to-t from-black/95 via-black/70 to-transparent">
+                {/* Creator Row with Subscribe */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                    <ChannelAvatar
+                      src={activeShort.channelLogoUrl}
+                      name={activeShort.creator}
+                      initials={activeShort.initials}
+                      sizeClassName="h-10 w-10"
+                      imageRingClassName="ring-2 ring-white/50"
+                      fallbackClassName="bg-brand text-white font-bold text-xs ring-2 ring-white/50"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <p className="truncate text-sm font-bold text-white drop-shadow-sm">
+                          {activeShort.creator}
+                        </p>
+                        {activeShortLabels.showSponsorLabel && (
+                          <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/20 text-amber-300 border border-amber-400/40 backdrop-blur-xs">
+                            Sponsored
+                          </span>
+                        )}
+                      </div>
+                      <p className="truncate text-[11px] text-white/80">
+                        {activeShort.creatorHandle}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={isSubscribing}
+                    onClick={() => handleToggleSubscribe(activeCreatorUserId, activeShort.creator)}
+                    className={`shrink-0 rounded-full px-4 py-1.5 text-xs font-bold transition-all shadow-md active:scale-95 ${
+                      subscribedCreators[activeCreatorUserId]
+                        ? "bg-white/20 text-white backdrop-blur-md"
+                        : "bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"
+                    }`}
+                  >
+                    {subscribedCreators[activeCreatorUserId] ? "Subscribed" : "Subscribe"}
+                  </button>
+                </div>
+
+                {/* Title & Caption */}
+                <p className="text-sm font-medium text-white line-clamp-2 leading-snug drop-shadow-sm">
+                  {activeShort.title}
+                </p>
+
+                {/* Sound Track Badge */}
+                <div className="flex items-center gap-2 text-xs text-white/85">
+                  <Music2 className="h-3.5 w-3.5 shrink-0 animate-bounce text-red-400" />
+                  <span className="truncate">{activeShort.soundTrack}</span>
+                </div>
+              </div>
+
+              {/* Animated Playback Progress Bar */}
+              <div className="absolute bottom-0 inset-x-0 h-1 bg-white/25 z-20">
+                <div className="h-full bg-red-600 w-2/3 animate-pulse" />
+              </div>
+            </div>
+
+            {/* Right Action Rail (YouTube Shorts Style) */}
+            <div className="flex md:flex-col items-center justify-center gap-3 sm:gap-4 z-20">
+              {/* Like */}
+              <button
+                type="button"
+                onClick={() => toggleLike(activeShort.id)}
+                className="flex flex-col items-center gap-1 group active:scale-90 transition"
+                aria-label="Like this short"
+              >
+                <div
+                  className={`grid h-11 w-11 place-items-center rounded-full backdrop-blur-md transition ${
+                    liked[activeShort.id]
+                      ? "bg-red-600 text-white shadow-lg shadow-red-600/30"
+                      : "bg-secondary/80 text-foreground hover:bg-secondary"
                   }`}
                 >
-                  {subscribedCreators[activeCreatorUserId] ? "Subscribed" : "Subscribe"}
+                  <ThumbsUp className="h-5 w-5" />
+                </div>
+                <span className="text-[11px] font-semibold text-foreground">
+                  {liked[activeShort.id] ? "Liked" : activeShort.likes}
+                </span>
+              </button>
+
+              {/* Dislike */}
+              <button
+                type="button"
+                onClick={() => toggleDislike(activeShort.id)}
+                className="flex flex-col items-center gap-1 group active:scale-90 transition"
+                aria-label="Dislike this short"
+              >
+                <div
+                  className={`grid h-11 w-11 place-items-center rounded-full backdrop-blur-md transition ${
+                    disliked[activeShort.id]
+                      ? "bg-foreground text-background"
+                      : "bg-secondary/80 text-foreground hover:bg-secondary"
+                  }`}
+                >
+                  <ThumbsDown className="h-5 w-5" />
+                </div>
+                <span className="text-[11px] font-semibold text-foreground">Dislike</span>
+              </button>
+
+              {/* Comments */}
+              <button
+                type="button"
+                onClick={() => setCommentsOpen((c) => !c)}
+                className="flex flex-col items-center gap-1 group active:scale-90 transition"
+                aria-label="View comments"
+              >
+                <div className="grid h-11 w-11 place-items-center rounded-full bg-secondary/80 text-foreground hover:bg-secondary backdrop-blur-md transition">
+                  <MessageSquare className="h-5 w-5" />
+                </div>
+                <span className="text-[11px] font-semibold text-foreground">
+                  {(shortComments[activeShort.id]?.length || 0) +
+                    parseInt(activeShort.comments, 10) || activeShort.comments}
+                </span>
+              </button>
+
+              {/* Share */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (navigator.share) {
+                    navigator
+                      .share({ title: activeShort.title, url: window.location.href })
+                      .catch(() => {});
+                  } else {
+                    navigator.clipboard.writeText(window.location.href);
+                    toast.success("Short link copied to clipboard!");
+                  }
+                }}
+                className="flex flex-col items-center gap-1 group active:scale-90 transition"
+                aria-label="Share short"
+              >
+                <div className="grid h-11 w-11 place-items-center rounded-full bg-secondary/80 text-foreground hover:bg-secondary backdrop-blur-md transition">
+                  <Share2 className="h-5 w-5" />
+                </div>
+                <span className="text-[11px] font-semibold text-foreground">
+                  {activeShort.shares}
+                </span>
+              </button>
+
+              {/* Up / Down Navigation Controls for Desktop */}
+              <div className="hidden md:flex flex-col gap-2 pt-2 border-t border-border/60">
+                <button
+                  type="button"
+                  onClick={handlePrev}
+                  className="grid h-10 w-10 place-items-center rounded-full bg-secondary text-foreground hover:bg-brand hover:text-white transition active:scale-95 shadow-sm"
+                  aria-label="Previous short"
+                  title="Previous short (Up Arrow)"
+                >
+                  <ChevronUp className="h-5 w-5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleNext}
+                  className="grid h-10 w-10 place-items-center rounded-full bg-secondary text-foreground hover:bg-brand hover:text-white transition active:scale-95 shadow-sm"
+                  aria-label="Next short"
+                  title="Next short (Down Arrow)"
+                >
+                  <ChevronDown className="h-5 w-5" />
                 </button>
               </div>
-
-              {/* Title & Caption */}
-              <p className="text-sm font-medium text-white line-clamp-2 leading-snug drop-shadow-sm">
-                {activeShort.title}
-              </p>
-
-              {/* Sound Track Badge */}
-              <div className="flex items-center gap-2 text-xs text-white/85">
-                <Music2 className="h-3.5 w-3.5 shrink-0 animate-bounce text-red-400" />
-                <span className="truncate">{activeShort.soundTrack}</span>
-              </div>
-            </div>
-
-            {/* Animated Playback Progress Bar */}
-            <div className="absolute bottom-0 inset-x-0 h-1 bg-white/25 z-20">
-              <div className="h-full bg-red-600 w-2/3 animate-pulse" />
             </div>
           </div>
-
-          {/* Right Action Rail (YouTube Shorts Style) */}
-          <div className="flex md:flex-col items-center justify-center gap-3 sm:gap-4 z-20">
-            {/* Like */}
-            <button
-              type="button"
-              onClick={() => toggleLike(activeShort.id)}
-              className="flex flex-col items-center gap-1 group active:scale-90 transition"
-              aria-label="Like this short"
-            >
-              <div
-                className={`grid h-11 w-11 place-items-center rounded-full backdrop-blur-md transition ${
-                  liked[activeShort.id]
-                    ? "bg-red-600 text-white shadow-lg shadow-red-600/30"
-                    : "bg-secondary/80 text-foreground hover:bg-secondary"
-                }`}
-              >
-                <ThumbsUp className="h-5 w-5" />
-              </div>
-              <span className="text-[11px] font-semibold text-foreground">
-                {liked[activeShort.id] ? "Liked" : activeShort.likes}
-              </span>
-            </button>
-
-            {/* Dislike */}
-            <button
-              type="button"
-              onClick={() => toggleDislike(activeShort.id)}
-              className="flex flex-col items-center gap-1 group active:scale-90 transition"
-              aria-label="Dislike this short"
-            >
-              <div
-                className={`grid h-11 w-11 place-items-center rounded-full backdrop-blur-md transition ${
-                  disliked[activeShort.id]
-                    ? "bg-foreground text-background"
-                    : "bg-secondary/80 text-foreground hover:bg-secondary"
-                }`}
-              >
-                <ThumbsDown className="h-5 w-5" />
-              </div>
-              <span className="text-[11px] font-semibold text-foreground">Dislike</span>
-            </button>
-
-            {/* Comments */}
-            <button
-              type="button"
-              onClick={() => setCommentsOpen((c) => !c)}
-              className="flex flex-col items-center gap-1 group active:scale-90 transition"
-              aria-label="View comments"
-            >
-              <div className="grid h-11 w-11 place-items-center rounded-full bg-secondary/80 text-foreground hover:bg-secondary backdrop-blur-md transition">
-                <MessageSquare className="h-5 w-5" />
-              </div>
-              <span className="text-[11px] font-semibold text-foreground">
-                {(shortComments[activeShort.id]?.length || 0) +
-                  parseInt(activeShort.comments, 10) || activeShort.comments}
-              </span>
-            </button>
-
-            {/* Share */}
-            <button
-              type="button"
-              onClick={() => {
-                if (navigator.share) {
-                  navigator
-                    .share({ title: activeShort.title, url: window.location.href })
-                    .catch(() => {});
-                } else {
-                  navigator.clipboard.writeText(window.location.href);
-                  toast.success("Short link copied to clipboard!");
-                }
-              }}
-              className="flex flex-col items-center gap-1 group active:scale-90 transition"
-              aria-label="Share short"
-            >
-              <div className="grid h-11 w-11 place-items-center rounded-full bg-secondary/80 text-foreground hover:bg-secondary backdrop-blur-md transition">
-                <Share2 className="h-5 w-5" />
-              </div>
-              <span className="text-[11px] font-semibold text-foreground">
-                {activeShort.shares}
-              </span>
-            </button>
-
-            {/* Up / Down Navigation Controls for Desktop */}
-            <div className="hidden md:flex flex-col gap-2 pt-2 border-t border-border/60">
-              <button
-                type="button"
-                onClick={handlePrev}
-                className="grid h-10 w-10 place-items-center rounded-full bg-secondary text-foreground hover:bg-brand hover:text-white transition active:scale-95 shadow-sm"
-                aria-label="Previous short"
-                title="Previous short (Up Arrow)"
-              >
-                <ChevronUp className="h-5 w-5" />
-              </button>
-              <button
-                type="button"
-                onClick={handleNext}
-                className="grid h-10 w-10 place-items-center rounded-full bg-secondary text-foreground hover:bg-brand hover:text-white transition active:scale-95 shadow-sm"
-                aria-label="Next short"
-                title="Next short (Down Arrow)"
-              >
-                <ChevronDown className="h-5 w-5" />
-              </button>
-            </div>
-          </div>
-        </div>
         )}
 
         {/* Interactive Comments Drawer / Modal */}

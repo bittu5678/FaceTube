@@ -570,5 +570,127 @@ describe("Regression Tests: Stale Data Fallback & Withdrawal Error Resilience", 
         api.wallet.getBalance = originalGetBalance;
       }
     });
+
+    it("Step 9A: preserves existing admobIncome when res.updatedWallet omits it and updates when server supplies it", async () => {
+      const originalWithdraw = api.wallet.withdraw;
+      const originalGetBalance = api.wallet.getBalance;
+      try {
+        saveStoredWallets({
+          FT483921: {
+            userId: "FT483921",
+            balance: 5000,
+            totalEarned: 10000,
+            totalWithdrawn: 5000,
+            referralIncome: 2500,
+            globalIncome: 1000,
+            adsenseIncome: 249.25,
+            admobIncome: 1250.75,
+            affiliateIncome: 0,
+            updatedAt: new Date().toISOString(),
+            isStale: false,
+          },
+        });
+
+        api.wallet.getBalance = async () => ({
+          success: true,
+          wallet: {
+            user_id: "FT483921",
+            balance: 5000,
+            total_earned: 10000,
+            total_withdrawn: 5000,
+            referral_income: 2500,
+            global_income: 1000,
+            adsense_income: 249.25,
+            admob_income: 1250.75,
+            affiliate_income: 0,
+            updated_at: new Date().toISOString(),
+          },
+        });
+
+        // 1. Server updatedWallet omits admob_income and admobIncome
+        api.wallet.withdraw = async (data) => ({
+          success: true,
+          message: "Withdrawal submitted",
+          transaction: { id: "tx-wd-9a-1", transaction_id: "TX_WD_9A_1", amount: data.amount },
+          updatedWallet: {
+            userId: "FT483921",
+            balance: 5000 - data.amount,
+            totalWithdrawn: 5000 + data.amount,
+            totalEarned: 10000,
+            referralIncome: 2500,
+            globalIncome: 1000,
+            adsenseIncome: 249.25,
+            affiliateIncome: 0,
+          },
+        });
+
+        const omittedRes = await processWithdrawal("FT483921", 500, {
+          upiId: "alex@upi",
+          accountHolder: "Alex Rivera",
+        });
+        assert.equal(omittedRes.success, true);
+        assert.equal(
+          omittedRes.updatedWallet?.admobIncome,
+          1250.75,
+          "processWithdrawal must preserve cached admobIncome when res.updatedWallet omits it",
+        );
+        assert.equal(getStoredWallets()["FT483921"]?.admobIncome, 1250.75);
+
+        // 2. Server updatedWallet explicitly provides updated admob_income
+        api.wallet.withdraw = async (data) => ({
+          success: true,
+          message: "Withdrawal submitted",
+          transaction: { id: "tx-wd-9a-2", transaction_id: "TX_WD_9A_2", amount: data.amount },
+          updatedWallet: {
+            user_id: "FT483921",
+            balance: 4000 - data.amount,
+            total_withdrawn: 5500 + data.amount,
+            total_earned: 10250,
+            referral_income: 2500,
+            global_income: 1000,
+            adsense_income: 249.25,
+            admob_income: 1500.75,
+            affiliate_income: 0,
+          },
+        });
+
+        const providedRes = await processWithdrawal("FT483921", 500, {
+          upiId: "alex@upi",
+          accountHolder: "Alex Rivera",
+        });
+        assert.equal(providedRes.success, true);
+        assert.equal(providedRes.updatedWallet?.admobIncome, 1500.75);
+        assert.equal(getStoredWallets()["FT483921"]?.admobIncome, 1500.75);
+
+        // 3. Server updatedWallet explicitly returns 0 for admobIncome -> honors 0
+        api.wallet.withdraw = async (data) => ({
+          success: true,
+          message: "Withdrawal submitted",
+          transaction: { id: "tx-wd-9a-3", transaction_id: "TX_WD_9A_3", amount: data.amount },
+          updatedWallet: {
+            userId: "FT483921",
+            balance: 3500 - data.amount,
+            totalWithdrawn: 6000 + data.amount,
+            totalEarned: 10250,
+            referralIncome: 2500,
+            globalIncome: 1000,
+            adsenseIncome: 249.25,
+            admobIncome: 0,
+            affiliateIncome: 0,
+          },
+        });
+
+        const zeroRes = await processWithdrawal("FT483921", 500, {
+          upiId: "alex@upi",
+          accountHolder: "Alex Rivera",
+        });
+        assert.equal(zeroRes.success, true);
+        assert.equal(zeroRes.updatedWallet?.admobIncome, 0);
+        assert.equal(getStoredWallets()["FT483921"]?.admobIncome, 0);
+      } finally {
+        api.wallet.withdraw = originalWithdraw;
+        api.wallet.getBalance = originalGetBalance;
+      }
+    });
   });
 });

@@ -8,12 +8,15 @@ import {
   ArrowRight,
   Layers,
   Award,
+  TrendingUp,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
 import { isNativeAndroid } from "@/lib/admob-service";
+import { calculateTotalAdEarnings } from "@/lib/ledger-service";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 export const Route = createFileRoute("/admob-income")({
   head: () => ({
@@ -31,7 +34,7 @@ export const Route = createFileRoute("/admob-income")({
 
 function AdMobIncomePage() {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.user_id;
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const [wallet, setWallet] = useState<any>(null);
   const [admobTransactions, setAdmobTransactions] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -45,6 +48,13 @@ function AdMobIncomePage() {
 
   useEffect(() => {
     let isMounted = true;
+    if (!userId) {
+      setWallet(null);
+      setAdmobTransactions([]);
+      setIsLoading(false);
+      return;
+    }
+
     async function loadData() {
       setIsLoading(true);
       try {
@@ -81,7 +91,8 @@ function AdMobIncomePage() {
     };
   }, [userId]);
 
-  const admobRevenue = Number(wallet?.admob_income ?? wallet?.admobIncome ?? 0);
+  const adEarnings = calculateTotalAdEarnings(wallet);
+  const admobRevenue = adEarnings.admobIncome;
 
   // Group verified transactions by month
   const monthlyEarningsMap: Record<string, number> = {};
@@ -161,7 +172,7 @@ function AdMobIncomePage() {
         </div>
 
         {/* Summary Stat Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           {/* Card 1: Total Finalized Earnings */}
           <div className="rounded-2xl border border-border bg-card p-5 shadow-card">
             <div className="flex items-center justify-between mb-2">
@@ -180,7 +191,26 @@ function AdMobIncomePage() {
             </p>
           </div>
 
-          {/* Card 2: Current Month Earnings */}
+          {/* Card 2: Combined Total Ad Earnings (AdSense + AdMob) */}
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-5 shadow-card">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                Total Ad Earnings
+              </span>
+              <div className="grid h-8 w-8 place-items-center rounded-lg bg-emerald-500/10 text-emerald-400">
+                <TrendingUp className="h-4 w-4" />
+              </div>
+            </div>
+            <div className="text-2xl font-black text-emerald-400 font-mono">
+              {isLoading ? "..." : `₹${adEarnings.totalAdEarnings.toFixed(2)}`}
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              AdSense ₹{adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹
+              {adEarnings.admobIncome.toFixed(2)}
+            </p>
+          </div>
+
+          {/* Card 3: Current Month Earnings */}
           <div className="rounded-2xl border border-border bg-card p-5 shadow-card">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
@@ -198,7 +228,7 @@ function AdMobIncomePage() {
             </p>
           </div>
 
-          {/* Card 3: Ad Formats Integrated */}
+          {/* Card 4: Ad Formats Integrated */}
           <div className="rounded-2xl border border-border bg-card p-5 shadow-card">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
@@ -214,7 +244,7 @@ function AdMobIncomePage() {
             </p>
           </div>
 
-          {/* Card 4: Statements Processed */}
+          {/* Card 5: Statements Processed */}
           <div className="rounded-2xl border border-border bg-card p-5 shadow-card">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">

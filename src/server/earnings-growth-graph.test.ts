@@ -2,7 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { handleApiRequest } from "./api-handler";
+import { handleApiRequest, resetInMemoryStore } from "./api-handler.ts";
+import { setMysqlPoolForTesting } from "./mysql.ts";
 
 describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests", () => {
   const mockUserId = "FT_GROWTH_TEST_01";
@@ -585,5 +586,256 @@ describe("Task 5J-V4-O: PHP Wallet Earnings History Authentication, Ownership & 
       authBehavior: { kind: "none" },
     });
     assert.equal(res405.status, 405);
+  });
+});
+
+describe("Step 9A: Earnings History AdMob Classification, Settled-Only Filtering & PHP/Node Parity", () => {
+  const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+
+  function todayIsoDate(): string {
+    return new Date().toISOString().split("T")[0]!;
+  }
+
+  function currentYearMonth(): string {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  it("1. Classifies admob_income strictly under admob (never referral) and excludes unknown types across 7D and 12M in Node local store", async () => {
+    const rawBackup = fs.existsSync(storePath) ? fs.readFileSync(storePath, "utf-8") : null;
+    const testUser = "FT_STEP9A_HIST_01";
+    const today = todayIsoDate();
+    const ym = currentYearMonth();
+
+    try {
+      if (rawBackup) {
+        const store = JSON.parse(rawBackup);
+        store.walletTransactions = Array.isArray(store.walletTransactions)
+          ? store.walletTransactions
+          : [];
+        store.walletTransactions.push(
+          {
+            id: "led_step9a_admob_1",
+            transaction_id: "TX_STEP9A_ADMOB_1",
+            user_id: testUser,
+            income_type: "admob_income",
+            amount: 450.75,
+            status: "settled",
+            created_at: `${today}T08:00:00.000Z`,
+          },
+          {
+            id: "led_step9a_ref_1",
+            transaction_id: "TX_STEP9A_REF_1",
+            user_id: testUser,
+            income_type: "referral_income",
+            amount: 25.5,
+            status: "settled",
+            created_at: `${today}T09:00:00.000Z`,
+          },
+          {
+            id: "led_step9a_unknown_1",
+            transaction_id: "TX_STEP9A_UNKNOWN_1",
+            user_id: testUser,
+            income_type: "corrupted_unknown_type",
+            amount: 999.0,
+            status: "settled",
+            created_at: `${today}T10:00:00.000Z`,
+          },
+        );
+        fs.writeFileSync(storePath, JSON.stringify(store, null, 2), "utf-8");
+      }
+      resetInMemoryStore();
+
+      const res7d = await handleApiRequest(
+        new Request(
+          `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=7D`,
+        ),
+      );
+      assert.equal(res7d?.status, 200);
+      const body7d = (await res7d?.json()) as any;
+      assert.equal(body7d.summary.admob, 450.75);
+      assert.equal(
+        body7d.summary.referral,
+        25.5,
+        "AdMob and unknown types must NEVER count as referral",
+      );
+      assert.equal(body7d.summary.total_revenue, 476.25);
+
+      const todayPt = body7d.history.find((pt: any) => pt.date === today);
+      assert.ok(todayPt, "Today bucket must exist in 7D timeline");
+      assert.equal(todayPt.admob, 450.75);
+      assert.equal(todayPt.admob_income, 450.75);
+      assert.equal(todayPt.referral, 25.5);
+      assert.equal(todayPt.referral_income, 25.5);
+      assert.equal(todayPt.tx_count, 2, "Only known settled entries increment tx_count");
+
+      const res12m = await handleApiRequest(
+        new Request(
+          `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=12M`,
+        ),
+      );
+      assert.equal(res12m?.status, 200);
+      const body12m = (await res12m?.json()) as any;
+      assert.equal(body12m.summary.admob, 450.75);
+      assert.equal(body12m.summary.referral, 25.5);
+      assert.equal(body12m.summary.total_revenue, 476.25);
+      const monthPt = body12m.history.find((pt: any) => pt.date === ym);
+      assert.ok(monthPt, "Current month bucket must exist in 12M timeline");
+      assert.equal(monthPt.admob, 450.75);
+      assert.equal(monthPt.admob_income, 450.75);
+      assert.equal(monthPt.referral, 25.5);
+      assert.equal(monthPt.tx_count, 2);
+    } finally {
+      setMysqlPoolForTesting(null);
+      if (rawBackup !== null) {
+        fs.writeFileSync(storePath, rawBackup, "utf-8");
+      }
+      resetInMemoryStore();
+    }
+  });
+
+  it("2. Excludes pending and failed ledger entries from settled earnings history in local store and enforces status = settled in Node & PHP SQL", async () => {
+    const rawBackup = fs.existsSync(storePath) ? fs.readFileSync(storePath, "utf-8") : null;
+    const origHost = process.env["DB_HOST"];
+    const origName = process.env["DB_NAME"];
+    const origUser = process.env["DB_USER"];
+    const testUser = "FT_STEP9A_HIST_02";
+    const today = todayIsoDate();
+    const capturedSql: string[] = [];
+
+    try {
+      if (rawBackup) {
+        const store = JSON.parse(rawBackup);
+        store.walletTransactions = Array.isArray(store.walletTransactions)
+          ? store.walletTransactions
+          : [];
+        store.walletTransactions.push(
+          {
+            id: "led_step9a_settled",
+            transaction_id: "TX_STEP9A_SETTLED",
+            user_id: testUser,
+            income_type: "admob_income",
+            amount: 300.0,
+            status: "settled",
+            created_at: `${today}T08:00:00.000Z`,
+          },
+          {
+            id: "led_step9a_pending",
+            transaction_id: "TX_STEP9A_PENDING",
+            user_id: testUser,
+            income_type: "admob_income",
+            amount: 500.0,
+            status: "pending",
+            created_at: `${today}T09:00:00.000Z`,
+          },
+          {
+            id: "led_step9a_failed",
+            transaction_id: "TX_STEP9A_FAILED",
+            user_id: testUser,
+            income_type: "referral_income",
+            amount: 75.0,
+            status: "failed",
+            created_at: `${today}T10:00:00.000Z`,
+          },
+        );
+        fs.writeFileSync(storePath, JSON.stringify(store, null, 2), "utf-8");
+      }
+      resetInMemoryStore();
+
+      // 2a. Local store excludes pending & failed entries
+      const storeRes = await handleApiRequest(
+        new Request(
+          `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=30D`,
+        ),
+      );
+      assert.equal(storeRes?.status, 200);
+      const storeBody = (await storeRes?.json()) as any;
+      assert.equal(storeBody.summary.admob, 300);
+      assert.equal(storeBody.summary.referral, 0, "Failed referral entry must be excluded");
+      assert.equal(storeBody.summary.total_revenue, 300);
+      const storeToday = storeBody.history.find((pt: any) => pt.date === today);
+      assert.equal(storeToday?.tx_count, 1);
+
+      // 2b. Node MySQL path enforces status = 'settled' in both 12M and daily queries and classifies admob_income cleanly
+      process.env["DB_HOST"] = "127.0.0.1";
+      process.env["DB_NAME"] = "facetube_test";
+      process.env["DB_USER"] = "test_user";
+
+      setMysqlPoolForTesting({
+        query: async (sql: string) => {
+          if (sql.includes("FROM income_ledger")) {
+            capturedSql.push(sql);
+            const key = sql.includes("DATE_FORMAT") ? currentYearMonth() : today;
+            return [
+              [
+                { period_key: key, income_type: "admob_income", total_amount: 612.25, tx_count: 2 },
+                { period_key: key, income_type: "unknown_type", total_amount: 999.0, tx_count: 4 },
+              ],
+            ];
+          }
+          return [[]];
+        },
+      } as any);
+
+      const mysqlDailyRes = await handleApiRequest(
+        new Request(
+          `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=7D`,
+        ),
+      );
+      assert.equal(mysqlDailyRes?.status, 200);
+      const mysqlDailyBody = (await mysqlDailyRes?.json()) as any;
+      assert.equal(mysqlDailyBody.summary.admob, 612.25);
+      assert.equal(mysqlDailyBody.summary.referral, 0);
+      assert.equal(mysqlDailyBody.summary.total_revenue, 612.25);
+
+      const mysql12mRes = await handleApiRequest(
+        new Request(
+          `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=12M`,
+        ),
+      );
+      assert.equal(mysql12mRes?.status, 200);
+      const mysql12mBody = (await mysql12mRes?.json()) as any;
+      assert.equal(mysql12mBody.summary.admob, 612.25);
+      assert.equal(mysql12mBody.summary.referral, 0);
+      assert.equal(mysql12mBody.summary.total_revenue, 612.25);
+
+      assert.equal(capturedSql.length, 2);
+      for (const sql of capturedSql) {
+        assert.match(
+          sql,
+          /AND\s+status\s*=\s*'settled'/i,
+          "Node MySQL SQL must filter status = 'settled'",
+        );
+      }
+
+      // 2c. PHP earnings-history.php parity checks
+      const historyPhp = fs.readFileSync(
+        path.resolve(process.cwd(), "api/wallet/earnings-history.php"),
+        "utf-8",
+      );
+      const settledMatches = historyPhp.match(/AND\s+status\s*=\s*"settled"/g) || [];
+      assert.equal(
+        settledMatches.length,
+        2,
+        'PHP earnings-history.php must filter AND status = "settled" in both 12M and daily queries',
+      );
+      assert.match(historyPhp, /'admob'\s*=>\s*0\.0/);
+      assert.match(historyPhp, /'admob_income'\s*=>\s*0\.0/);
+      assert.match(historyPhp, /\$type\s*===\s*'admob_income'[\s\S]*?\$category\s*=\s*'admob'/);
+      assert.match(historyPhp, /\$category\s*=\s*null;/);
+      assert.match(historyPhp, /if\s*\(\$category\s*===\s*null\)\s*\{\s*continue;\s*\}/);
+    } finally {
+      setMysqlPoolForTesting(null);
+      if (origHost !== undefined) process.env["DB_HOST"] = origHost;
+      else delete process.env["DB_HOST"];
+      if (origName !== undefined) process.env["DB_NAME"] = origName;
+      else delete process.env["DB_NAME"];
+      if (origUser !== undefined) process.env["DB_USER"] = origUser;
+      else delete process.env["DB_USER"];
+      if (rawBackup !== null) {
+        fs.writeFileSync(storePath, rawBackup, "utf-8");
+      }
+      resetInMemoryStore();
+    }
   });
 });

@@ -173,9 +173,7 @@ function WatchPage() {
     }
   };
 
-  const creatorUserId = video
-    ? String((video as any).userId || (video as any).user_id || "")
-    : "";
+  const creatorUserId = video ? String((video as any).userId || (video as any).user_id || "") : "";
 
   const [subscribed, setSubscribed] = useState(false);
   const [subscriberCount, setSubscriberCount] = useState<number | null>(null);

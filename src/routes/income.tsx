@@ -16,7 +16,8 @@ import {
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { DashboardSummaryCards } from "@/components/videohub/DashboardSummaryCards";
 import { useAuth } from "@/lib/auth-context";
-import { getUserWallet, type UserWallet } from "@/lib/ledger-service";
+import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 export const Route = createFileRoute("/income")({
   head: () => ({
@@ -44,8 +45,8 @@ const incomeStreams = [
   },
   {
     title: "Global Income",
-    desc: "Worldwide platform revenue pool distribution for Diamond ranks",
-    balance: "₹2,450.00",
+    desc: "Worldwide platform revenue pool distribution",
+    balance: "₹0.00",
     badge: "Global Pool",
     icon: Globe2,
     color: "text-cyan-400 bg-cyan-500/10",
@@ -54,7 +55,7 @@ const incomeStreams = [
   {
     title: "AdSense Income",
     desc: "70% video player pre-roll, mid-roll, and display ad revenue",
-    balance: "₹1,890.20",
+    balance: "₹0.00",
     badge: "70% Split",
     icon: Tv,
     color: "text-yellow-400 bg-yellow-500/10",
@@ -70,10 +71,19 @@ const incomeStreams = [
     link: "/admob-income",
   },
   {
+    title: "Total Ad Earnings",
+    desc: "Combined advertising income from AdSense Income + AdMob Income",
+    balance: "₹0.00",
+    badge: "AdSense + AdMob",
+    icon: TrendingUp,
+    color: "text-emerald-400 bg-emerald-500/10",
+    link: "/adsense-income",
+  },
+  {
     title: "Affiliate Income",
     desc: "Product recommendations, gear commissions, and course referrals",
-    balance: "₹940.80",
-    badge: "86 Sales",
+    balance: "₹0.00",
+    badge: "Affiliate",
     icon: Share2,
     color: "text-indigo-400 bg-indigo-500/10",
     link: "/affiliate-income",
@@ -81,7 +91,7 @@ const incomeStreams = [
   {
     title: "Wallet Balance",
     desc: "Current aggregated balance ready for immediate transfer or withdrawal",
-    balance: "₹4,280.50",
+    balance: "₹0.00",
     badge: "Available",
     icon: Wallet,
     color: "text-emerald-400 bg-emerald-500/10",
@@ -90,7 +100,7 @@ const incomeStreams = [
   {
     title: "Withdrawal Balance",
     desc: "History of completed bank ACH, PayPal, and crypto disbursements",
-    balance: "₹3,150.00",
+    balance: "₹0.00",
     badge: "Processed",
     icon: ArrowDownToLine,
     color: "text-orange-400 bg-orange-500/10",
@@ -100,12 +110,18 @@ const incomeStreams = [
 
 function IncomePage() {
   const { profile, dbUser, user } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const [wallet, setWallet] = useState<UserWallet | null>(null);
 
   useEffect(() => {
+    if (!userId) {
+      setWallet(null);
+      return;
+    }
     getUserWallet(userId).then((w) => setWallet(w));
   }, [userId]);
+
+  const adEarnings = calculateTotalAdEarnings(wallet);
 
   const streamsWithRealValues = incomeStreams.map((s) => {
     if (s.title === "Referral Income") {
@@ -115,10 +131,17 @@ function IncomePage() {
       return { ...s, balance: `₹${wallet ? wallet.globalIncome.toFixed(2) : "0.00"}` };
     }
     if (s.title === "AdSense Income") {
-      return { ...s, balance: `₹${wallet ? wallet.adsenseIncome.toFixed(2) : "0.00"}` };
+      return { ...s, balance: `₹${adEarnings.adsenseIncome.toFixed(2)}` };
     }
     if (s.title === "AdMob Income") {
-      return { ...s, balance: `₹${wallet ? (wallet.admobIncome ?? 0).toFixed(2) : "0.00"}` };
+      return { ...s, balance: `₹${adEarnings.admobIncome.toFixed(2)}` };
+    }
+    if (s.title === "Total Ad Earnings") {
+      return {
+        ...s,
+        desc: `AdSense ₹${adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹${adEarnings.admobIncome.toFixed(2)}`,
+        balance: `₹${adEarnings.totalAdEarnings.toFixed(2)}`,
+      };
     }
     if (s.title === "Affiliate Income") {
       return { ...s, balance: `₹${wallet ? wallet.affiliateIncome.toFixed(2) : "0.00"}` };
@@ -167,8 +190,9 @@ function IncomePage() {
             "referral-income": `₹${wallet ? wallet.referralIncome.toFixed(2) : "0.00"}`,
             "global-income": `₹${wallet ? wallet.globalIncome.toFixed(2) : "0.00"}`,
             "wallet-balance": `₹${wallet ? wallet.balance.toFixed(2) : "0.00"}`,
-            "adsense-income": `₹${wallet ? wallet.adsenseIncome.toFixed(2) : "0.00"}`,
-            "admob-income": `₹${wallet ? (wallet.admobIncome ?? 0).toFixed(2) : "0.00"}`,
+            "adsense-income": `₹${adEarnings.adsenseIncome.toFixed(2)}`,
+            "admob-income": `₹${adEarnings.admobIncome.toFixed(2)}`,
+            "total-ad-earnings": `₹${adEarnings.totalAdEarnings.toFixed(2)}`,
             "affiliate-income": `₹${wallet ? wallet.affiliateIncome.toFixed(2) : "0.00"}`,
             "withdrawal-balance": `₹${wallet ? wallet.totalWithdrawn.toFixed(2) : "0.00"}`,
           }}

@@ -18,6 +18,7 @@ import {
   Award,
   Bell,
   ArrowUpRight,
+  BarChart3,
 } from "lucide-react";
 
 interface SummaryCardItem {
@@ -57,68 +58,61 @@ const DASHBOARD_SUMMARY_DATA: SummaryCardItem[] = [
   {
     id: "free-videos",
     title: "Free Videos",
-    value: "14",
+    value: "0",
     subtitle: "Public standard content",
     icon: Video,
     color: "text-sky-400 bg-sky-500/10",
     link: "/free-videos",
-    trend: "142.5K views",
   },
   // 4. Sponsor Videos
   {
     id: "premium-videos",
     title: "Sponsor Videos",
-    value: "6",
+    value: "0",
     subtitle: "Monetized subscriber-only",
     icon: Sparkles,
     color: "text-amber-400 bg-amber-500/10",
     link: "/premium-videos",
-    trend: "₹840 ad revenue",
-    isPositive: true,
   },
   // 5. Short Videos
   {
     id: "short-videos",
     title: "Short Videos",
-    value: "18",
+    value: "0",
     subtitle: "Under 60s viral shorts",
     icon: Clapperboard,
     color: "text-brand bg-brand/10",
     link: "/short-videos",
-    trend: "280K views",
   },
   // 6. Live Videos
   {
     id: "live-videos",
     title: "Live Videos",
-    value: "3",
+    value: "0",
     subtitle: "Scheduled & archived streams",
     icon: Radio,
     color: "text-emerald-400 bg-emerald-500/10",
     link: "/live-videos",
-    trend: "Active stream ready",
   },
   // 7. Advertisement Videos
   {
     id: "advertisement-videos",
     title: "Advertisement Videos",
-    value: "5",
+    value: "0",
     subtitle: "Sponsor & promo campaigns",
     icon: Tv,
     color: "text-purple-400 bg-purple-500/10",
     link: "/advertisement-videos",
-    trend: "3 active deals",
   },
   // 8. Images Uploaded
   {
     id: "images-uploaded",
     title: "Images Uploaded",
-    value: "32",
+    value: "0",
     subtitle: "Thumbnails & community posts",
     icon: Image,
     color: "text-teal-400 bg-teal-500/10",
     link: "/images-uploaded",
-    trend: "High-res assets",
   },
   // 9. Referral Income
   {
@@ -160,6 +154,16 @@ const DASHBOARD_SUMMARY_DATA: SummaryCardItem[] = [
     color: "text-blue-400 bg-blue-500/10",
     link: "/admob-income",
   },
+  // 11c. Total Ad Earnings (AdSense + AdMob)
+  {
+    id: "total-ad-earnings",
+    title: "Total Ad Earnings",
+    value: "₹0.00",
+    subtitle: "AdSense + AdMob combined",
+    icon: BarChart3,
+    color: "text-emerald-400 bg-emerald-500/10",
+    link: "/income",
+  },
   // 12. Affiliate Income
   {
     id: "affiliate-income",
@@ -184,23 +188,21 @@ const DASHBOARD_SUMMARY_DATA: SummaryCardItem[] = [
   {
     id: "withdrawal-balance",
     title: "Withdrawal Balance",
-    value: "₹3,150.00",
+    value: "₹0.00",
     subtitle: "Total successfully paid out",
     icon: ArrowDownToLine,
     color: "text-orange-400 bg-orange-500/10",
     link: "/withdrawal-balance",
-    trend: "Last paid Sep 18",
   },
   // 15. Current Rank
   {
     id: "current-rank",
     title: "Current Rank",
-    value: "Diamond",
-    subtitle: "Tier 5 Commission unlock",
+    value: "Creator",
+    subtitle: "Subscriber milestone tier",
     icon: Award,
     color: "text-amber-400 bg-amber-500/10",
     link: "/team-income",
-    trend: "68.9% to Ambassador",
   },
   // 16. Subscriber Count
   {
@@ -242,6 +244,7 @@ export function DashboardSummaryCards({
         "global-income",
         "adsense-income",
         "admob-income",
+        "total-ad-earnings",
         "affiliate-income",
         "wallet-balance",
         "withdrawal-balance",

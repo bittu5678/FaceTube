@@ -183,6 +183,7 @@ try {
             COALESCE(SUM(COALESCE(lt.ledger_referral_income, wb.referral_income, 0)), 0) AS total_referral_income,
             COALESCE(SUM(COALESCE(lt.ledger_global_income, wb.global_income, 0)), 0) AS total_global_income,
             COALESCE(SUM(COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0)), 0) AS total_adsense_income,
+            COALESCE(SUM(COALESCE(lt.ledger_admob_income, wb.admob_income, 0)), 0) AS total_admob_income,
             COALESCE(SUM(COALESCE(lt.ledger_affiliate_income, wb.affiliate_income, 0)), 0) AS total_affiliate_income
         FROM users u
         LEFT JOIN wallet_balances wb ON UPPER(wb.user_id) = UPPER(u.user_id)
@@ -192,6 +193,7 @@ try {
                 SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission') THEN amount ELSE 0 END) AS ledger_referral_income,
                 SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
+                SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END) AS ledger_admob_income,
                 SUM(CASE WHEN income_type IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN income_type = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN income_type != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
@@ -213,6 +215,7 @@ try {
         'totalReferralIncome' => round(floatval($summaryRow['total_referral_income'] ?? 0), 2),
         'totalGlobalIncome' => round(floatval($summaryRow['total_global_income'] ?? 0), 2),
         'totalAdsenseIncome' => round(floatval($summaryRow['total_adsense_income'] ?? 0), 2),
+        'totalAdmobIncome' => round(floatval($summaryRow['total_admob_income'] ?? 0), 2),
         'totalAffiliateIncome' => round(floatval($summaryRow['total_affiliate_income'] ?? 0), 2),
     ];
 
@@ -232,6 +235,7 @@ try {
             COALESCE(lt.ledger_referral_income, wb.referral_income, 0.00) AS referral_income,
             COALESCE(lt.ledger_global_income, wb.global_income, 0.00) AS global_income,
             COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0.00) AS adsense_income,
+            COALESCE(lt.ledger_admob_income, wb.admob_income, 0.00) AS admob_income,
             COALESCE(lt.ledger_affiliate_income, wb.affiliate_income, 0.00) AS affiliate_income
         FROM users u
         LEFT JOIN wallet_balances wb ON UPPER(wb.user_id) = UPPER(u.user_id)
@@ -241,6 +245,7 @@ try {
                 SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission') THEN amount ELSE 0 END) AS ledger_referral_income,
                 SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
+                SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END) AS ledger_admob_income,
                 SUM(CASE WHEN income_type IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN income_type = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN income_type != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
@@ -278,6 +283,7 @@ try {
             'Referral Income (INR)',
             'Global Income (INR)',
             'AdSense Income (INR)',
+            'AdMob Income (INR)',
             'Affiliate Income (INR)',
             'Total Withdrawn (INR)',
             'Joined Date'
@@ -295,6 +301,7 @@ try {
                 number_format(floatval($r['referral_income']), 2, '.', ''),
                 number_format(floatval($r['global_income']), 2, '.', ''),
                 number_format(floatval($r['adsense_income']), 2, '.', ''),
+                number_format(floatval($r['admob_income']), 2, '.', ''),
                 number_format(floatval($r['affiliate_income']), 2, '.', ''),
                 number_format(floatval($r['total_withdrawn']), 2, '.', ''),
                 $r['created_at'],
@@ -320,6 +327,7 @@ try {
             'referralIncome' => round(floatval($r['referral_income']), 2),
             'globalIncome' => round(floatval($r['global_income']), 2),
             'adsenseIncome' => round(floatval($r['adsense_income']), 2),
+            'admobIncome' => round(floatval($r['admob_income']), 2),
             'affiliateIncome' => round(floatval($r['affiliate_income']), 2),
         ];
     }, $rows);

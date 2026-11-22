@@ -13,7 +13,8 @@ import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import type { MainUploadMode } from "@/routes/upload";
 import { useAuth } from "@/lib/auth-context";
-import { getUserWallet, type UserWallet } from "@/lib/ledger-service";
+import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 interface UploadOptionItem {
   id: "free" | "premium" | "ad_promotion" | "image";
@@ -82,11 +83,11 @@ interface UploadOptionsModalProps {
 
 export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps) {
   const { user, profile, dbUser } = useAuth();
-  const userId =
-    profile?.user_id || dbUser?.user_id || (user?.email ? user.email.split("@")[0] : null);
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
   const [wallet, setWallet] = useState<UserWallet | null>(null);
   const [isLoadingWallet, setIsLoadingWallet] = useState(false);
+  const adEarnings = calculateTotalAdEarnings(wallet);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -195,7 +196,7 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
           </div>
         </div>
 
-        {/* Requirement 1: Total Ads Earning Display Card */}
+        {/* Combined Total Ad Earnings (AdSense + AdMob) Display Card */}
         <div className="mb-4 flex items-center justify-between rounded-2xl border border-emerald-500/30 bg-gradient-to-r from-emerald-500/10 via-card to-card p-3.5 shadow-sm">
           <div className="flex items-center gap-3 min-w-0">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
@@ -203,10 +204,12 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
             </div>
             <div className="min-w-0">
               <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-400 block truncate">
-                Total Ads Earning
+                Total Ad Earnings
               </span>
               <p className="text-xs text-muted-foreground truncate">
-                {user ? "Your verified AdSense & promo revenue" : "Sign in to view real earnings"}
+                {userId
+                  ? `AdSense: ₹${adEarnings.adsenseIncome.toFixed(2)} · AdMob: ₹${adEarnings.admobIncome.toFixed(2)}`
+                  : "Sign in to view AdSense & AdMob earnings"}
               </p>
             </div>
           </div>
@@ -215,11 +218,11 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
               {isLoadingWallet ? (
                 <span className="text-xs text-muted-foreground animate-pulse">Loading...</span>
               ) : (
-                `₹${(wallet?.adsenseIncome ?? 0).toFixed(2)}`
+                `₹${adEarnings.totalAdEarnings.toFixed(2)}`
               )}
             </div>
             <span className="text-[10px] text-muted-foreground block">
-              {user && userId ? `UID: ${userId}` : "₹0.00 base"}
+              {userId ? `UID: ${userId}` : "₹0.00 base"}
             </span>
           </div>
         </div>

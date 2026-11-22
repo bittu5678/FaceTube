@@ -1,11 +1,11 @@
 {
-  "lastTxNumber": 13,
+  "lastTxNumber": 15,
   "transactions": [
     {
-      "txNumber": 13,
-      "paymentId": "pay_step3a_ads_promotion_1795336371485_nd4z6",
-      "orderId": "order_1795336371482_xe829gz",
-      "videoId": "vid-promo-a-1795336371402",
+      "txNumber": 15,
+      "paymentId": "pay_step3a_ads_promotion_1795344165753_lxjm5",
+      "orderId": "order_1795344165750_yc1b951",
+      "videoId": "vid-promo-a-1795344165678",
       "userId": "FT483921",
       "userName": "Alex Rivera",
       "referrerId": null,
@@ -16,13 +16,13 @@
       "referralCommission": 0,
       "adminAllocation": 200,
       "globalPoolAllocation": 0,
-      "createdAt": "2026-11-22T08:32:51.490Z"
+      "createdAt": "2026-11-22T10:42:45.756Z"
     },
     {
-      "txNumber": 13,
-      "paymentId": "pay_step3a_ads_promotion_1795336371467_41uk5",
-      "orderId": "order_1795336371460_96r9llv",
-      "videoId": "vid-promo-a-1795336371402",
+      "txNumber": 15,
+      "paymentId": "pay_step3a_ads_promotion_1795344165737_4odmv",
+      "orderId": "order_1795344165735_b9jpsin",
+      "videoId": "vid-promo-a-1795344165678",
       "userId": "FT483921",
       "userName": "Alex Rivera",
       "referrerId": null,
@@ -33,13 +33,13 @@
       "referralCommission": 0,
       "adminAllocation": 100,
       "globalPoolAllocation": 0,
-      "createdAt": "2026-11-22T08:32:51.472Z"
+      "createdAt": "2026-11-22T10:42:45.741Z"
     },
     {
-      "txNumber": 13,
-      "paymentId": "pay_step3a_premium_video_upload_1795336371445_iqnwv",
-      "orderId": "order_1795336371441_cil1nud",
-      "videoId": "vid_1795336371451",
+      "txNumber": 15,
+      "paymentId": "pay_step3a_premium_video_upload_1795344165724_sg35e",
+      "orderId": "order_1795344165718_fmarxq9",
+      "videoId": "vid_1795344165728",
       "userId": "FT483921",
       "userName": "Alex Rivera",
       "referrerId": null,
@@ -50,13 +50,13 @@
       "referralCommission": 0,
       "adminAllocation": 2,
       "globalPoolAllocation": 3,
-      "createdAt": "2026-11-22T08:32:51.451Z"
+      "createdAt": "2026-11-22T10:42:45.728Z"
     },
     {
-      "txNumber": 12,
-      "paymentId": "pay_step3a_ads_promotion_1795336371369_btr3q",
-      "orderId": "order_1795336371366_646pxiv",
-      "videoId": "vid-sponsor-1-1795336371357",
+      "txNumber": 14,
+      "paymentId": "pay_step3a_ads_promotion_1795344165656_w1xsm",
+      "orderId": "order_1795344165654_ixn8uh2",
+      "videoId": "vid-sponsor-1-1795344165648",
       "userId": "FT483921",
       "userName": "Alex Rivera",
       "referrerId": null,
@@ -67,13 +67,13 @@
       "referralCommission": 0,
       "adminAllocation": 100,
       "globalPoolAllocation": 0,
-      "createdAt": "2026-11-22T08:32:51.374Z"
+      "createdAt": "2026-11-22T10:42:45.660Z"
     },
     {
-      "txNumber": 12,
-      "paymentId": "pay_step3a_premium_video_upload_1795336371337_7gs56",
-      "orderId": "order_1795336371334_fd92u2j",
-      "videoId": "vid_1795336371345",
+      "txNumber": 14,
+      "paymentId": "pay_step3a_premium_video_upload_1795344165638_xgsuc",
+      "orderId": "order_1795344165635_bjdxx3w",
+      "videoId": "vid_1795344165643",
       "userId": "FT483921",
       "userName": "Alex Rivera",
       "referrerId": null,
@@ -84,12 +84,46 @@
       "referralCommission": 0,
       "adminAllocation": 2,
       "globalPoolAllocation": 3,
-      "createdAt": "2026-11-22T08:32:51.345Z"
+      "createdAt": "2026-11-22T10:42:45.643Z"
+    },
+    {
+      "txNumber": 13,
+      "paymentId": "pay_3b_1795344164666_tu5kp",
+      "orderId": "order_1795344164666_vy0fs9n",
+      "videoId": "vid-short-pub-paid-sponsor",
+      "userId": "FT483921",
+      "userName": "Alex Rivera",
+      "referrerId": null,
+      "amount": 6,
+      "transactionType": "premium_upload",
+      "isSpecial": false,
+      "specialTag": "NORMAL_PREMIUM",
+      "referralCommission": 0,
+      "adminAllocation": 2,
+      "globalPoolAllocation": 3,
+      "createdAt": "2026-11-22T10:42:44.668Z"
+    },
+    {
+      "txNumber": 12,
+      "paymentId": "pay_3b_1795344164630_thuhh",
+      "orderId": "order_1795344164630_tvzi0rb",
+      "videoId": "vid-3da-pub-paid-sponsor",
+      "userId": "FT483921",
+      "userName": "Alex Rivera",
+      "referrerId": null,
+      "amount": 6,
+      "transactionType": "premium_upload",
+      "isSpecial": false,
+      "specialTag": "NORMAL_PREMIUM",
+      "referralCommission": 0,
+      "adminAllocation": 2,
+      "globalPoolAllocation": 3,
+      "createdAt": "2026-11-22T10:42:44.632Z"
     },
     {
       "txNumber": 11,
-      "paymentId": "pay_3b_1795336370461_8jhza",
-      "orderId": "order_1795336370460_f33sx1u",
+      "paymentId": "pay_3b_1795344164476_sqbxe",
+      "orderId": "order_1795344164475_0hby3ye",
       "videoId": "vid-maya-public-paid",
       "userId": "FT900431",
       "userName": "Maya Lin",
@@ -101,54 +135,54 @@
       "referralCommission": 0,
       "adminAllocation": 5,
       "globalPoolAllocation": 0,
-      "createdAt": "2026-11-22T08:32:50.464Z"
+      "createdAt": "2026-11-22T10:42:44.479Z"
     }
   ],
   "userSubscriptions": [
     {
-      "subscriptionId": "sub_user_test_refund_1795336369093",
-      "id": "sub_user_test_refund_1795336369093",
+      "subscriptionId": "sub_user_test_refund_1795344161707",
+      "id": "sub_user_test_refund_1795344161707",
       "userId": "FT483921",
       "planId": "member-monthly",
       "planName": "Creator Member",
-      "orderId": "order_refund_test_1795336369093_1",
-      "paymentId": "pay_refund_test_1795336369093_1",
+      "orderId": "order_refund_test_1795344161707_1",
+      "paymentId": "pay_refund_test_1795344161707_1",
       "amount": 499,
       "currency": "INR",
       "status": "active",
-      "startsAt": "2026-11-21T08:32:49.101Z",
-      "expiresAt": "2026-12-21T08:32:49.101Z",
+      "startsAt": "2026-11-21T10:42:41.714Z",
+      "expiresAt": "2026-12-21T10:42:41.714Z",
       "durationDays": 30,
-      "createdAt": "2026-11-21T08:32:49.101Z"
+      "createdAt": "2026-11-21T10:42:41.714Z"
     },
     {
-      "subscriptionId": "sub_other_test_refund_1795336369093",
-      "id": "sub_other_test_refund_1795336369093",
+      "subscriptionId": "sub_other_test_refund_1795344161707",
+      "id": "sub_other_test_refund_1795344161707",
       "userId": "FT900431",
       "planId": "member-vip-monthly",
       "planName": "VIP Supporter",
-      "orderId": "order_refund_test_1795336369093_2",
-      "paymentId": "pay_refund_test_1795336369093_2",
+      "orderId": "order_refund_test_1795344161707_2",
+      "paymentId": "pay_refund_test_1795344161707_2",
       "amount": 999,
       "currency": "INR",
       "status": "active",
-      "startsAt": "2026-11-21T08:32:49.101Z",
-      "expiresAt": "2026-12-21T08:32:49.101Z",
+      "startsAt": "2026-11-21T10:42:41.714Z",
+      "expiresAt": "2026-12-21T10:42:41.714Z",
       "durationDays": 30,
-      "createdAt": "2026-11-21T08:32:49.101Z"
+      "createdAt": "2026-11-21T10:42:41.714Z"
     }
   ],
   "refundRequests": [
     {
-      "id": "rfnd_1795336369249_22903440",
-      "subscriptionId": "sub_other_test_refund_1795336369093",
+      "id": "rfnd_1795344161863_5dba8c7f",
+      "subscriptionId": "sub_other_test_refund_1795344161707",
       "userId": "FT900431",
       "userName": "Maya Lin",
       "userEmail": "maya@facetube.com",
       "planId": "member-vip-monthly",
       "planName": "VIP Supporter",
-      "paymentId": "pay_refund_test_1795336369093_2",
-      "orderId": "order_refund_test_1795336369093_2",
+      "paymentId": "pay_refund_test_1795344161707_2",
+      "orderId": "order_refund_test_1795344161707_2",
       "amount": 999,
       "currency": "INR",
       "reason": "Requesting a refund for VIP supporter plan within 24h.",
@@ -157,20 +191,20 @@
       "gatewayRefundId": null,
       "adminNote": "Approved per SLA. Gateway refund skipped in test environment. [Safe Review: Live gateway refund unavailable - Live gateway refund execution is disabled in this environment (RAZORPAY_SKIP_REMOTE_CHECK). Simulated gateway refunds are strictly prevented per financial security protocol.]",
       "reviewedBy": "FT102857",
-      "reviewedAt": "2026-11-22T08:32:49.257Z",
-      "createdAt": "2026-11-22T08:32:49.249Z",
-      "updatedAt": "2026-11-22T08:32:49.258Z"
+      "reviewedAt": "2026-11-22T10:42:41.869Z",
+      "createdAt": "2026-11-22T10:42:41.863Z",
+      "updatedAt": "2026-11-22T10:42:41.870Z"
     },
     {
-      "id": "rfnd_1795336369185_532b473f",
-      "subscriptionId": "sub_user_test_refund_1795336369093",
+      "id": "rfnd_1795344161805_d5df1e3d",
+      "subscriptionId": "sub_user_test_refund_1795344161707",
       "userId": "FT483921",
       "userName": "Alex Rivera",
       "userEmail": "alex@facetube.com",
       "planId": "member-monthly",
       "planName": "Creator Member",
-      "paymentId": "pay_refund_test_1795336369093_1",
-      "orderId": "order_refund_test_1795336369093_1",
+      "paymentId": "pay_refund_test_1795344161707_1",
+      "orderId": "order_refund_test_1795344161707_1",
       "amount": 499,
       "currency": "INR",
       "reason": "Accidentally renewed my creator membership, please refund to original payment source.",
@@ -179,9 +213,9 @@
       "gatewayRefundId": null,
       "adminNote": "Rejected because member consumed subscriber perks during active billing cycle.",
       "reviewedBy": "FT102857",
-      "reviewedAt": "2026-11-22T08:32:49.237Z",
-      "createdAt": "2026-11-22T08:32:49.185Z",
-      "updatedAt": "2026-11-22T08:32:49.238Z"
+      "reviewedAt": "2026-11-22T10:42:41.854Z",
+      "createdAt": "2026-11-22T10:42:41.805Z",
+      "updatedAt": "2026-11-22T10:42:41.854Z"
     }
   ]
 }

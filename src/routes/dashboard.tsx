@@ -34,8 +34,12 @@ import { DashboardSummaryCards } from "@/components/videohub/DashboardSummaryCar
 import { DashboardCategoriesSection } from "@/components/videohub/DashboardCategoriesSection";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
-import { calculateUserVideoCounts, type VideoCategoryCounts } from "@/lib/video-service";
-import { getUserWallet, type UserWallet } from "@/lib/ledger-service";
+import {
+  calculateUserVideoCounts,
+  resolveAuthenticatedUserId,
+  type VideoCategoryCounts,
+} from "@/lib/video-service";
+import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
 import { getReferralDashboardData, type ReferralDashboardData } from "@/lib/referral-service";
 import { calculateRankFromSubscribers } from "@/lib/certificate-service";
 
@@ -98,13 +102,13 @@ function DashboardPage() {
   };
 
   const [videoCounts, setVideoCounts] = useState<VideoCategoryCounts>({
-    freeShort: 1,
-    freeLong: 1,
-    premiumShort: 2,
-    premiumLong: 1,
-    totalFree: 2,
-    totalPremium: 3,
-    totalUploaded: 5,
+    freeShort: 0,
+    freeLong: 0,
+    premiumShort: 0,
+    premiumLong: 0,
+    totalFree: 0,
+    totalPremium: 0,
+    totalUploaded: 0,
   });
 
   const [wallet, setWallet] = useState<UserWallet | null>(null);
@@ -118,6 +122,7 @@ function DashboardPage() {
       referral: number;
       global: number;
       adsense: number;
+      admob: number;
       affiliate: number;
       ad_boost: number;
       tx_count?: number;
@@ -128,19 +133,38 @@ function DashboardPage() {
     referral: number;
     global: number;
     adsense: number;
+    admob: number;
     affiliate: number;
     ad_boost: number;
   } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isEarningsLoading, setIsEarningsLoading] = useState(false);
 
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
   const [subscriberCount, setSubscriberCount] = useState<number>(0);
   const [isSubscriberLoading, setIsSubscriberLoading] = useState(true);
 
   useEffect(() => {
     let mounted = true;
+    if (!userId) {
+      setVideoCounts({
+        freeShort: 0,
+        freeLong: 0,
+        premiumShort: 0,
+        premiumLong: 0,
+        totalFree: 0,
+        totalPremium: 0,
+        totalUploaded: 0,
+      });
+      setWallet(null);
+      setReferralData(null);
+      setSubscriberCount(0);
+      setIsLoading(false);
+      setIsSubscriberLoading(false);
+      return;
+    }
+
     async function loadRealData() {
       try {
         const [counts, userWallet, refData, subRes] = await Promise.all([
@@ -176,6 +200,13 @@ function DashboardPage() {
 
   useEffect(() => {
     let mounted = true;
+    if (!userId) {
+      setEarningsHistory([]);
+      setEarningsSummary(null);
+      setIsEarningsLoading(false);
+      return;
+    }
+
     async function loadEarnings() {
       setIsEarningsLoading(true);
       try {
@@ -192,6 +223,7 @@ function DashboardPage() {
                 referral: Number(h.referral ?? h.referral_income) || 0,
                 global: Number(h.global ?? h.global_income) || 0,
                 adsense: Number(h.adsense ?? h.adsense_income) || 0,
+                admob: Number(h.admob ?? h.admob_income) || 0,
                 affiliate: Number(h.affiliate ?? h.affiliate_income) || 0,
                 ad_boost: Number(h.ad_boost ?? h.ad_boost_income) || 0,
                 tx_count: h.tx_count,
@@ -201,7 +233,15 @@ function DashboardPage() {
             setEarningsHistory([]);
           }
           if (res.summary) {
-            setEarningsSummary(res.summary);
+            setEarningsSummary({
+              total_revenue: Number(res.summary.total_revenue) || 0,
+              referral: Number(res.summary.referral) || 0,
+              global: Number(res.summary.global) || 0,
+              adsense: Number(res.summary.adsense) || 0,
+              admob: Number(res.summary.admob) || 0,
+              affiliate: Number(res.summary.affiliate) || 0,
+              ad_boost: Number(res.summary.ad_boost) || 0,
+            });
           }
         }
       } catch (err) {
@@ -218,8 +258,9 @@ function DashboardPage() {
   }, [userId, earningsPeriod]);
 
   const currentCreatorRank = calculateRankFromSubscribers(subscriberCount);
+  const adEarnings = calculateTotalAdEarnings(wallet);
 
-  // Dynamic overrides mapped directly to the 16 summary cards
+  // Dynamic overrides mapped directly to the summary cards
   const dynamicCardOverrides: Record<string, string> = {
     "free-videos": String(videoCounts.totalFree),
     "premium-videos": String(videoCounts.totalPremium),
@@ -233,6 +274,11 @@ function DashboardPage() {
         ? `₹${wallet.referralIncome.toFixed(2)}`
         : "₹0.00",
     "global-income": wallet ? `₹${wallet.globalIncome.toFixed(2)}` : "₹0.00",
+    "adsense-income": `₹${adEarnings.adsenseIncome.toFixed(2)}`,
+    "admob-income": `₹${adEarnings.admobIncome.toFixed(2)}`,
+    "total-ad-earnings": `₹${adEarnings.totalAdEarnings.toFixed(2)}`,
+    "affiliate-income": wallet ? `₹${wallet.affiliateIncome.toFixed(2)}` : "₹0.00",
+    "withdrawal-balance": wallet ? `₹${wallet.totalWithdrawn.toFixed(2)}` : "₹0.00",
     "current-rank": currentCreatorRank.awardName,
     "subscriber-count": isSubscriberLoading ? "..." : subscriberCount.toLocaleString(),
   };
@@ -262,8 +308,8 @@ function DashboardPage() {
                 )}
               </div>
               <p className="text-sm text-muted-foreground">
-                All 16 performance metrics, dynamic video classifications, and income streams for{" "}
-                <strong>{userId}</strong>
+                Performance metrics, dynamic video classifications, and income streams for{" "}
+                <strong>{userId || "signed-in account"}</strong>
               </p>
             </div>
           </div>
@@ -303,7 +349,8 @@ function DashboardPage() {
                 Uploaded Video Counts
               </h2>
               <p className="text-xs text-muted-foreground">
-                Dynamically calculated from real uploaded video records for User {userId}.
+                Dynamically calculated from real uploaded video records for{" "}
+                {userId ? `User ${userId}` : "signed-in account"}.
               </p>
             </div>
 
@@ -508,6 +555,14 @@ function DashboardPage() {
                     "₹0.00"
                   )}
                 </div>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  Total Ad Earnings (AdSense + AdMob):{" "}
+                  <strong className="text-foreground">
+                    ₹{adEarnings.totalAdEarnings.toFixed(2)}
+                  </strong>{" "}
+                  (AdSense ₹{adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹
+                  {adEarnings.admobIncome.toFixed(2)})
+                </p>
               </div>
 
               <div className="flex items-center gap-2">
@@ -535,8 +590,8 @@ function DashboardPage() {
               </div>
             </div>
 
-            {/* Income Streams Breakdown (5 real streams) */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1 pb-1">
+            {/* Income Streams Breakdown (6 real streams) */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 pt-1 pb-1">
               <div className="rounded-xl bg-secondary/30 p-2.5 border border-border/40">
                 <div className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider">
                   Referral
@@ -563,13 +618,21 @@ function DashboardPage() {
               </div>
               <div className="rounded-xl bg-secondary/30 p-2.5 border border-border/40">
                 <div className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider">
+                  AdMob
+                </div>
+                <div className="text-sm font-bold text-foreground">
+                  ₹{(earningsSummary?.admob ?? 0).toFixed(2)}
+                </div>
+              </div>
+              <div className="rounded-xl bg-secondary/30 p-2.5 border border-border/40">
+                <div className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider">
                   Affiliate
                 </div>
                 <div className="text-sm font-bold text-foreground">
                   ₹{(earningsSummary?.affiliate ?? 0).toFixed(2)}
                 </div>
               </div>
-              <div className="rounded-xl bg-secondary/30 p-2.5 border border-border/40 col-span-2 sm:col-span-1">
+              <div className="rounded-xl bg-secondary/30 p-2.5 border border-border/40">
                 <div className="text-[10px] uppercase font-bold text-muted-foreground tracking-wider">
                   Ad Boost
                 </div>
@@ -651,6 +714,12 @@ function DashboardPage() {
                                     </span>
                                   </div>
                                   <div className="flex justify-between">
+                                    <span>AdMob:</span>
+                                    <span className="font-semibold text-foreground">
+                                      ₹{Number(data.admob || 0).toFixed(2)}
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between">
                                     <span>Affiliate:</span>
                                     <span className="font-semibold text-foreground">
                                       ₹{Number(data.affiliate || 0).toFixed(2)}
@@ -696,7 +765,8 @@ function DashboardPage() {
               </div>
             )}
             <p className="text-[11px] text-muted-foreground text-center">
-              Real-time ledger breakdown: Referral, Global Pool, AdSense, Affiliate &amp; Ad Boost
+              Real-time ledger breakdown: Referral, Global Pool, AdSense, AdMob, Affiliate &amp; Ad
+              Boost
             </p>
           </div>
         </div>
@@ -712,7 +782,7 @@ function DashboardPage() {
                 : "bg-secondary text-muted-foreground hover:text-foreground"
             }`}
           >
-            All 16 Summary Cards
+            All Summary Cards
           </button>
           <button
             type="button"
@@ -723,7 +793,7 @@ function DashboardPage() {
                 : "bg-secondary text-muted-foreground hover:text-foreground"
             }`}
           >
-            Income Streams (6)
+            Income Streams (8)
           </button>
           <button
             type="button"

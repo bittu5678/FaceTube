@@ -13,11 +13,14 @@ import {
   Users,
   RefreshCw,
   Lock,
+  Smartphone,
+  BarChart3,
 } from "lucide-react";
 import { toast } from "sonner";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { useAuth } from "@/lib/auth-context";
 import {
+  calculateTotalAdEarnings,
   getUserWallet,
   getUserLedger,
   getDailyWithdrawnAmount,
@@ -28,6 +31,7 @@ import {
   type LedgerTransaction,
 } from "@/lib/ledger-service";
 import { getPersonalKyc, getBankKyc } from "@/lib/kyc-service";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 export const Route = createFileRoute("/wallet-balance")({
   head: () => ({
@@ -46,7 +50,7 @@ export const Route = createFileRoute("/wallet-balance")({
 
 function WalletBalancePage() {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
   const [wallet, setWallet] = useState<UserWallet | null>(null);
   const [ledger, setLedger] = useState<LedgerTransaction[]>([]);
@@ -63,6 +67,15 @@ function WalletBalancePage() {
   const [isKycVerified, setIsKycVerified] = useState(true);
 
   const loadWalletData = useCallback(async () => {
+    if (!userId) {
+      setWallet(null);
+      setLedger([]);
+      setAlreadyWithdrawnToday(0);
+      setIsKycVerified(false);
+      setIsRefreshing(false);
+      return;
+    }
+
     setIsRefreshing(true);
     try {
       const [w, txs, dailyWithdrawn, personalKyc, bankKyc] = await Promise.all([
@@ -91,6 +104,7 @@ function WalletBalancePage() {
   }, [loadWalletData]);
 
   const balance = wallet ? wallet.balance : 0;
+  const adEarnings = calculateTotalAdEarnings(wallet);
   const remainingDailyLimit = Math.max(0, WITHDRAWAL_RULES.MAX_DAILY_LIMIT - alreadyWithdrawnToday);
   const currentNumAmount = Number(withdrawAmount) || 0;
 
@@ -124,6 +138,13 @@ function WalletBalancePage() {
     e.preventDefault();
     setValidationError("");
     setSuccessMsg("");
+
+    if (!userId) {
+      const msg = "Please sign in to your FaceTube account before requesting a withdrawal.";
+      setValidationError(msg);
+      toast.error(msg);
+      return;
+    }
 
     const amount = Number(withdrawAmount);
 
@@ -201,8 +222,8 @@ function WalletBalancePage() {
                 </button>
               </div>
               <p className="text-sm text-muted-foreground">
-                Unified income ledger for User {userId} aggregating Referral Income, Global Pool,
-                and Ad Revenue
+                Unified income ledger for {userId ? `User ${userId}` : "your signed-in account"}{" "}
+                aggregating Referral Income, Global Pool, and Ad Revenue
               </p>
             </div>
           </div>
@@ -346,8 +367,8 @@ function WalletBalancePage() {
           </div>
         </div>
 
-        {/* 4 Streams Breakdown */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {/* Income Streams Breakdown (AdSense, AdMob & Combined Total Ad Earnings) */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
           {/* 1. Referral Income */}
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium flex items-center gap-1">
@@ -364,15 +385,37 @@ function WalletBalancePage() {
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium flex items-center gap-1">
               <TrendingUp className="h-3 w-3 text-yellow-400" />
-              Video AdSense
+              AdSense Income
             </span>
             <p className="text-xl font-bold text-yellow-400">
-              ₹{wallet ? wallet.adsenseIncome.toFixed(2) : "0.00"}
+              ₹{adEarnings.adsenseIncome.toFixed(2)}
             </p>
-            <p className="text-[11px] text-muted-foreground">Ad revenue monetization</p>
+            <p className="text-[11px] text-muted-foreground">Web &amp; video ad revenue</p>
           </div>
 
-          {/* 3. Global Income */}
+          {/* 3. Mobile AdMob */}
+          <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
+            <span className="text-xs text-muted-foreground font-medium flex items-center gap-1">
+              <Smartphone className="h-3 w-3 text-blue-400" />
+              AdMob Income
+            </span>
+            <p className="text-xl font-bold text-blue-400">₹{adEarnings.admobIncome.toFixed(2)}</p>
+            <p className="text-[11px] text-muted-foreground">Android app ad revenue</p>
+          </div>
+
+          {/* 4. Total Ad Earnings (AdSense + AdMob) */}
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-1 shadow-card">
+            <span className="text-xs text-emerald-400 font-semibold flex items-center gap-1">
+              <BarChart3 className="h-3 w-3 text-emerald-400" />
+              Total Ad Earnings
+            </span>
+            <p className="text-xl font-black text-emerald-400">
+              ₹{adEarnings.totalAdEarnings.toFixed(2)}
+            </p>
+            <p className="text-[11px] text-muted-foreground">AdSense + AdMob combined</p>
+          </div>
+
+          {/* 5. Global Income */}
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium flex items-center gap-1">
               <Globe2 className="h-3 w-3 text-cyan-400" />
@@ -384,7 +427,7 @@ function WalletBalancePage() {
             <p className="text-[11px] text-muted-foreground">Global pool distributions</p>
           </div>
 
-          {/* 4. Affiliate Income */}
+          {/* 6. Affiliate Income */}
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium flex items-center gap-1">
               <CreditCard className="h-3 w-3 text-indigo-400" />

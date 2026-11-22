@@ -91,10 +91,7 @@ function ExplorePage() {
     };
   }, []);
 
-  const eligibleVideos = useMemo(
-    () => buildPublicFeedVideos(uploadedVideos),
-    [uploadedVideos],
-  );
+  const eligibleVideos = useMemo(() => buildPublicFeedVideos(uploadedVideos), [uploadedVideos]);
 
   const trendingExploreVideos = useMemo(
     () =>

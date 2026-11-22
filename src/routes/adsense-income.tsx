@@ -19,16 +19,25 @@ export const Route = createFileRoute("/adsense-income")({
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
+import { calculateTotalAdEarnings } from "@/lib/ledger-service";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 function AdSenseIncomePage() {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.user_id;
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const [wallet, setWallet] = useState<any>(null);
   const [adsenseTransactions, setAdsenseTransactions] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     let isMounted = true;
+    if (!userId) {
+      setWallet(null);
+      setAdsenseTransactions([]);
+      setIsLoading(false);
+      return;
+    }
+
     async function loadData() {
       setIsLoading(true);
       try {
@@ -68,9 +77,10 @@ function AdSenseIncomePage() {
     };
   }, [userId]);
 
-  const adsenseRevenue = Number(wallet?.adsense_income ?? 0);
-  const totalEarned = Number(wallet?.total_earned ?? 0);
-  const walletBalance = Number(wallet?.balance ?? 0);
+  const adEarnings = calculateTotalAdEarnings(wallet);
+  const adsenseRevenue = adEarnings.adsenseIncome;
+  const totalEarned = Number(wallet?.total_earned ?? wallet?.totalEarned ?? 0) || 0;
+  const walletBalance = Number(wallet?.balance ?? 0) || 0;
 
   return (
     <VideoHubLayout>
@@ -101,12 +111,22 @@ function AdSenseIncomePage() {
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium">Total AdSense Revenue</span>
             <p className="text-2xl font-black text-yellow-400">₹{adsenseRevenue.toFixed(2)}</p>
             <p className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1">
               <TrendingUp className="h-3 w-3" /> Authoritative ledger total
+            </p>
+          </div>
+          <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-1 shadow-card">
+            <span className="text-xs text-emerald-400 font-semibold">Total Ad Earnings</span>
+            <p className="text-2xl font-black text-emerald-400">
+              ₹{adEarnings.totalAdEarnings.toFixed(2)}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              AdSense ₹{adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹
+              {adEarnings.admobIncome.toFixed(2)}
             </p>
           </div>
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">

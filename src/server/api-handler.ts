@@ -11725,6 +11725,7 @@ async function dispatchApiRequest(
                FROM income_ledger
                WHERE UPPER(user_id) = UPPER(?)
                  AND income_type != 'withdrawal'
+                 AND status = 'settled'
                  AND created_at >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 11 MONTH)
                GROUP BY DATE_FORMAT(created_at, '%Y-%m'), income_type
                ORDER BY period_key ASC`,
@@ -11740,6 +11741,7 @@ async function dispatchApiRequest(
                FROM income_ledger
                WHERE UPPER(user_id) = UPPER(?)
                  AND income_type != 'withdrawal'
+                 AND status = 'settled'
                  AND created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
                GROUP BY DATE(created_at), income_type
                ORDER BY period_key ASC`,
@@ -11763,11 +11765,13 @@ async function dispatchApiRequest(
                 referral: 0,
                 global: 0,
                 adsense: 0,
+                admob: 0,
                 affiliate: 0,
                 ad_boost: 0,
                 referral_income: 0,
                 global_income: 0,
                 adsense_income: 0,
+                admob_income: 0,
                 affiliate_income: 0,
                 ad_boost_income: 0,
                 tx_count: 0,
@@ -11785,11 +11789,13 @@ async function dispatchApiRequest(
                 referral: 0,
                 global: 0,
                 adsense: 0,
+                admob: 0,
                 affiliate: 0,
                 ad_boost: 0,
                 referral_income: 0,
                 global_income: 0,
                 adsense_income: 0,
+                admob_income: 0,
                 affiliate_income: 0,
                 ad_boost_income: 0,
                 tx_count: 0,
@@ -11802,6 +11808,7 @@ async function dispatchApiRequest(
             referral: 0,
             global: 0,
             adsense: 0,
+            admob: 0,
             affiliate: 0,
             ad_boost: 0,
           };
@@ -11814,16 +11821,20 @@ async function dispatchApiRequest(
               const count = Number(r.tx_count) || 0;
               const type = String(r.income_type || "");
 
-              let category: "referral" | "global" | "adsense" | "affiliate" | "ad_boost" =
-                "referral";
+              let category:
+                "referral" | "global" | "adsense" | "admob" | "affiliate" | "ad_boost" | null =
+                null;
               if (type === "global_income") category = "global";
               else if (type === "adsense_income") category = "adsense";
+              else if (type === "admob_income") category = "admob";
               else if (type === "affiliate_income" || type === "marketing_income")
                 category = "affiliate";
               else if (type === "ad_boost_income" || type === "marketing_ads")
                 category = "ad_boost";
               else if (type === "referral_income" || type === "direct_commission")
                 category = "referral";
+
+              if (!category) continue;
 
               timelineMap[k][category] = Number((timelineMap[k][category] + amt).toFixed(2));
               timelineMap[k][`${category}_income`] = timelineMap[k][category];
@@ -11853,7 +11864,11 @@ async function dispatchApiRequest(
         (t: any) =>
           (t.user_id || t.userId)?.toUpperCase() === requestedUserId.toUpperCase() &&
           t.income_type !== "withdrawal" &&
-          t.type !== "withdrawal",
+          t.type !== "withdrawal" &&
+          (t.status === undefined ||
+            t.status === null ||
+            String(t.status).trim() === "" ||
+            String(t.status).trim().toLowerCase() === "settled"),
       );
 
       const history: any[] = [];
@@ -11862,6 +11877,7 @@ async function dispatchApiRequest(
         referral: 0,
         global: 0,
         adsense: 0,
+        admob: 0,
         affiliate: 0,
         ad_boost: 0,
       };
@@ -11880,30 +11896,47 @@ async function dispatchApiRequest(
           let ref = 0;
           let glb = 0;
           let ads = 0;
+          let adm = 0;
           let aff = 0;
           let boost = 0;
+          let matchedCount = 0;
 
           for (const tx of matchingTxs) {
             const amt = Number(tx["amount"]) || 0;
             const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "");
-            if (tType === "global_income") glb += amt;
-            else if (tType === "adsense_income") ads += amt;
-            else if (tType === "affiliate_income" || tType === "marketing_income") aff += amt;
-            else if (tType === "ad_boost_income" || tType === "marketing_ads") boost += amt;
-            else if (tType === "referral_income" || tType === "direct_commission") ref += amt;
-            else ref += amt;
+            if (tType === "global_income") {
+              glb += amt;
+              matchedCount++;
+            } else if (tType === "adsense_income") {
+              ads += amt;
+              matchedCount++;
+            } else if (tType === "admob_income") {
+              adm += amt;
+              matchedCount++;
+            } else if (tType === "affiliate_income" || tType === "marketing_income") {
+              aff += amt;
+              matchedCount++;
+            } else if (tType === "ad_boost_income" || tType === "marketing_ads") {
+              boost += amt;
+              matchedCount++;
+            } else if (tType === "referral_income" || tType === "direct_commission") {
+              ref += amt;
+              matchedCount++;
+            }
           }
 
           ref = Number(ref.toFixed(2));
           glb = Number(glb.toFixed(2));
           ads = Number(ads.toFixed(2));
+          adm = Number(adm.toFixed(2));
           aff = Number(aff.toFixed(2));
           boost = Number(boost.toFixed(2));
-          const totalRev = Number((ref + glb + ads + aff + boost).toFixed(2));
+          const totalRev = Number((ref + glb + ads + adm + aff + boost).toFixed(2));
 
           summary.referral = Number((summary.referral + ref).toFixed(2));
           summary.global = Number((summary.global + glb).toFixed(2));
           summary.adsense = Number((summary.adsense + ads).toFixed(2));
+          summary.admob = Number((summary.admob + adm).toFixed(2));
           summary.affiliate = Number((summary.affiliate + aff).toFixed(2));
           summary.ad_boost = Number((summary.ad_boost + boost).toFixed(2));
           summary.total_revenue = Number((summary.total_revenue + totalRev).toFixed(2));
@@ -11915,14 +11948,16 @@ async function dispatchApiRequest(
             referral: ref,
             global: glb,
             adsense: ads,
+            admob: adm,
             affiliate: aff,
             ad_boost: boost,
             referral_income: ref,
             global_income: glb,
             adsense_income: ads,
+            admob_income: adm,
             affiliate_income: aff,
             ad_boost_income: boost,
-            tx_count: matchingTxs.length,
+            tx_count: matchedCount,
           });
         }
       } else {
@@ -11939,30 +11974,47 @@ async function dispatchApiRequest(
           let ref = 0;
           let glb = 0;
           let ads = 0;
+          let adm = 0;
           let aff = 0;
           let boost = 0;
+          let matchedCount = 0;
 
           for (const tx of matchingTxs) {
             const amt = Number(tx["amount"]) || 0;
             const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "");
-            if (tType === "global_income") glb += amt;
-            else if (tType === "adsense_income") ads += amt;
-            else if (tType === "affiliate_income" || tType === "marketing_income") aff += amt;
-            else if (tType === "ad_boost_income" || tType === "marketing_ads") boost += amt;
-            else if (tType === "referral_income" || tType === "direct_commission") ref += amt;
-            else ref += amt;
+            if (tType === "global_income") {
+              glb += amt;
+              matchedCount++;
+            } else if (tType === "adsense_income") {
+              ads += amt;
+              matchedCount++;
+            } else if (tType === "admob_income") {
+              adm += amt;
+              matchedCount++;
+            } else if (tType === "affiliate_income" || tType === "marketing_income") {
+              aff += amt;
+              matchedCount++;
+            } else if (tType === "ad_boost_income" || tType === "marketing_ads") {
+              boost += amt;
+              matchedCount++;
+            } else if (tType === "referral_income" || tType === "direct_commission") {
+              ref += amt;
+              matchedCount++;
+            }
           }
 
           ref = Number(ref.toFixed(2));
           glb = Number(glb.toFixed(2));
           ads = Number(ads.toFixed(2));
+          adm = Number(adm.toFixed(2));
           aff = Number(aff.toFixed(2));
           boost = Number(boost.toFixed(2));
-          const totalRev = Number((ref + glb + ads + aff + boost).toFixed(2));
+          const totalRev = Number((ref + glb + ads + adm + aff + boost).toFixed(2));
 
           summary.referral = Number((summary.referral + ref).toFixed(2));
           summary.global = Number((summary.global + glb).toFixed(2));
           summary.adsense = Number((summary.adsense + ads).toFixed(2));
+          summary.admob = Number((summary.admob + adm).toFixed(2));
           summary.affiliate = Number((summary.affiliate + aff).toFixed(2));
           summary.ad_boost = Number((summary.ad_boost + boost).toFixed(2));
           summary.total_revenue = Number((summary.total_revenue + totalRev).toFixed(2));
@@ -11974,14 +12026,16 @@ async function dispatchApiRequest(
             referral: ref,
             global: glb,
             adsense: ads,
+            admob: adm,
             affiliate: aff,
             ad_boost: boost,
             referral_income: ref,
             global_income: glb,
             adsense_income: ads,
+            admob_income: adm,
             affiliate_income: aff,
             ad_boost_income: boost,
-            tx_count: matchingTxs.length,
+            tx_count: matchedCount,
           });
         }
       }
@@ -18777,6 +18831,7 @@ async function dispatchApiRequest(
               COALESCE(SUM(COALESCE(lt.ledger_referral_income, wb.referral_income, 0)), 0) AS total_referral_income,
               COALESCE(SUM(COALESCE(lt.ledger_global_income, wb.global_income, 0)), 0) AS total_global_income,
               COALESCE(SUM(COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0)), 0) AS total_adsense_income,
+              COALESCE(SUM(COALESCE(lt.ledger_admob_income, wb.admob_income, 0)), 0) AS total_admob_income,
               COALESCE(SUM(COALESCE(lt.ledger_affiliate_income, wb.affiliate_income, 0)), 0) AS total_affiliate_income
             FROM users u
             LEFT JOIN wallet_balances wb ON UPPER(wb.user_id) = UPPER(u.user_id)
@@ -18786,6 +18841,7 @@ async function dispatchApiRequest(
                 SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission') THEN amount ELSE 0 END) AS ledger_referral_income,
                 SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
+                SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END) AS ledger_admob_income,
                 SUM(CASE WHEN income_type IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN income_type = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN income_type != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
@@ -18805,6 +18861,7 @@ async function dispatchApiRequest(
             totalReferralIncome: Math.round((Number(sRow.total_referral_income) || 0) * 100) / 100,
             totalGlobalIncome: Math.round((Number(sRow.total_global_income) || 0) * 100) / 100,
             totalAdsenseIncome: Math.round((Number(sRow.total_adsense_income) || 0) * 100) / 100,
+            totalAdmobIncome: Math.round((Number(sRow.total_admob_income) || 0) * 100) / 100,
             totalAffiliateIncome:
               Math.round((Number(sRow.total_affiliate_income) || 0) * 100) / 100,
           };
@@ -18825,6 +18882,7 @@ async function dispatchApiRequest(
               COALESCE(lt.ledger_referral_income, wb.referral_income, 0.00) AS referral_income,
               COALESCE(lt.ledger_global_income, wb.global_income, 0.00) AS global_income,
               COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0.00) AS adsense_income,
+              COALESCE(lt.ledger_admob_income, wb.admob_income, 0.00) AS admob_income,
               COALESCE(lt.ledger_affiliate_income, wb.affiliate_income, 0.00) AS affiliate_income
             FROM users u
             LEFT JOIN wallet_balances wb ON UPPER(wb.user_id) = UPPER(u.user_id)
@@ -18834,6 +18892,7 @@ async function dispatchApiRequest(
                 SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission') THEN amount ELSE 0 END) AS ledger_referral_income,
                 SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
+                SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END) AS ledger_admob_income,
                 SUM(CASE WHEN income_type IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN income_type = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN income_type != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
@@ -18849,7 +18908,7 @@ async function dispatchApiRequest(
 
           if (exportType === "csv") {
             const csvRows: string[] = [
-              "\uFEFFUser ID,Full Name,Email Address,Role,Referral Code,Available Balance (INR),Total Earned (INR),Referral Income (INR),Global Income (INR),AdSense Income (INR),Affiliate Income (INR),Total Withdrawn (INR),Joined Date",
+              "\uFEFFUser ID,Full Name,Email Address,Role,Referral Code,Available Balance (INR),Total Earned (INR),Referral Income (INR),Global Income (INR),AdSense Income (INR),AdMob Income (INR),Affiliate Income (INR),Total Withdrawn (INR),Joined Date",
             ];
             for (const r of dataRows || []) {
               const line = [
@@ -18863,6 +18922,7 @@ async function dispatchApiRequest(
                 Number(r.referral_income || 0).toFixed(2),
                 Number(r.global_income || 0).toFixed(2),
                 Number(r.adsense_income || 0).toFixed(2),
+                Number(r.admob_income || 0).toFixed(2),
                 Number(r.affiliate_income || 0).toFixed(2),
                 Number(r.total_withdrawn || 0).toFixed(2),
                 `"${r.created_at || ""}"`,
@@ -18892,6 +18952,7 @@ async function dispatchApiRequest(
             referralIncome: Math.round((Number(r.referral_income) || 0) * 100) / 100,
             globalIncome: Math.round((Number(r.global_income) || 0) * 100) / 100,
             adsenseIncome: Math.round((Number(r.adsense_income) || 0) * 100) / 100,
+            admobIncome: Math.round((Number(r.admob_income) || 0) * 100) / 100,
             affiliateIncome: Math.round((Number(r.affiliate_income) || 0) * 100) / 100,
           }));
 
@@ -18916,22 +18977,28 @@ async function dispatchApiRequest(
       if (!store.wallets) store.wallets = {};
       const getOrInitWallet = (uId: string) => {
         const norm = uId.toUpperCase();
-        if (!store.wallets[norm]) {
-          const defaultBalances: Record<string, number> = {
-            FT102857: 15400,
-            FT483921: 4280.5,
-            FT900431: 850,
-          };
-          const defaultEarned: Record<string, number> = {
-            FT102857: 22000,
-            FT483921: 7430.5,
-            FT900431: 850,
-          };
-          const defaultWithdrawn: Record<string, number> = {
-            FT102857: 6600,
-            FT483921: 3150,
-            FT900431: 0,
-          };
+        const existingWallet = store.wallets[norm];
+        if (existingWallet) {
+          return existingWallet;
+        }
+
+        const defaultBalances: Record<string, number> = {
+          FT102857: 15400,
+          FT483921: 4280.5,
+          FT900431: 850,
+        };
+        const defaultEarned: Record<string, number> = {
+          FT102857: 22000,
+          FT483921: 7430.5,
+          FT900431: 850,
+        };
+        const defaultWithdrawn: Record<string, number> = {
+          FT102857: 6600,
+          FT483921: 3150,
+          FT900431: 0,
+        };
+
+        if (norm in defaultEarned) {
           store.wallets[norm] = {
             balance: defaultBalances[norm] ?? 0,
             total_earned: defaultEarned[norm] ?? 0,
@@ -18939,11 +19006,73 @@ async function dispatchApiRequest(
             referral_income: defaultEarned[norm] ? defaultEarned[norm] * 0.4 : 0,
             global_income: defaultEarned[norm] ? defaultEarned[norm] * 0.3 : 0,
             adsense_income: defaultEarned[norm] ? defaultEarned[norm] * 0.2 : 0,
+            admob_income: 0,
             affiliate_income: defaultEarned[norm] ? defaultEarned[norm] * 0.1 : 0,
             updated_at: new Date().toISOString(),
           };
+          return store.wallets[norm]!;
         }
-        return store.wallets[norm]!;
+
+        // Derive wallet projection from settled ledger transactions only when no wallet record exists (avoids double counting)
+        const settledTxs = (store.walletTransactions || []).filter(
+          (tx: any) =>
+            String(tx["user_id"] || tx["userId"] || "")
+              .trim()
+              .toUpperCase() === norm &&
+            (tx["status"] === undefined ||
+              tx["status"] === null ||
+              String(tx["status"]).trim() === "" ||
+              String(tx["status"]).trim().toLowerCase() === "settled"),
+        );
+
+        let referralIncome = 0;
+        let globalIncome = 0;
+        let adsenseIncome = 0;
+        let admobIncome = 0;
+        let affiliateIncome = 0;
+        let totalWithdrawn = 0;
+        let totalEarned = 0;
+
+        for (const tx of settledTxs) {
+          const amt = Number(tx["amount"]) || 0;
+          const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "");
+          if (tType === "withdrawal") {
+            totalWithdrawn += Math.abs(amt);
+          } else if (tType === "referral_income" || tType === "direct_commission") {
+            referralIncome += amt;
+            totalEarned += amt;
+          } else if (tType === "global_income") {
+            globalIncome += amt;
+            totalEarned += amt;
+          } else if (tType === "adsense_income") {
+            adsenseIncome += amt;
+            totalEarned += amt;
+          } else if (tType === "admob_income") {
+            admobIncome += amt;
+            totalEarned += amt;
+          } else if (tType === "affiliate_income" || tType === "marketing_income") {
+            affiliateIncome += amt;
+            totalEarned += amt;
+          } else if (
+            tType === "ad_boost_income" ||
+            tType === "marketing_ads" ||
+            tType === "admin_allocation"
+          ) {
+            totalEarned += amt;
+          }
+        }
+
+        return {
+          balance: Math.max(0, Math.round((totalEarned - totalWithdrawn) * 100) / 100),
+          total_earned: Math.round(totalEarned * 100) / 100,
+          total_withdrawn: Math.round(totalWithdrawn * 100) / 100,
+          referral_income: Math.round(referralIncome * 100) / 100,
+          global_income: Math.round(globalIncome * 100) / 100,
+          adsense_income: Math.round(adsenseIncome * 100) / 100,
+          admob_income: Math.round(admobIncome * 100) / 100,
+          affiliate_income: Math.round(affiliateIncome * 100) / 100,
+          updated_at: new Date().toISOString(),
+        };
       };
 
       let filteredUsers = [...(store.users || [])];
@@ -18986,6 +19115,7 @@ async function dispatchApiRequest(
           acc.totalReferralIncome += w.referral_income || 0;
           acc.totalGlobalIncome += w.global_income || 0;
           acc.totalAdsenseIncome += w.adsense_income || 0;
+          acc.totalAdmobIncome += w.admob_income || 0;
           acc.totalAffiliateIncome += w.affiliate_income || 0;
           return acc;
         },
@@ -18997,6 +19127,7 @@ async function dispatchApiRequest(
           totalReferralIncome: 0,
           totalGlobalIncome: 0,
           totalAdsenseIncome: 0,
+          totalAdmobIncome: 0,
           totalAffiliateIncome: 0,
         },
       );
@@ -19008,6 +19139,7 @@ async function dispatchApiRequest(
       summary.totalReferralIncome = Math.round(summary.totalReferralIncome * 100) / 100;
       summary.totalGlobalIncome = Math.round(summary.totalGlobalIncome * 100) / 100;
       summary.totalAdsenseIncome = Math.round(summary.totalAdsenseIncome * 100) / 100;
+      summary.totalAdmobIncome = Math.round(summary.totalAdmobIncome * 100) / 100;
       summary.totalAffiliateIncome = Math.round(summary.totalAffiliateIncome * 100) / 100;
 
       // Slicing for pagination
@@ -19015,7 +19147,7 @@ async function dispatchApiRequest(
 
       if (exportType === "csv") {
         const csvRows: string[] = [
-          "\uFEFFUser ID,Full Name,Email Address,Role,Referral Code,Available Balance (INR),Total Earned (INR),Referral Income (INR),Global Income (INR),AdSense Income (INR),Affiliate Income (INR),Total Withdrawn (INR),Joined Date",
+          "\uFEFFUser ID,Full Name,Email Address,Role,Referral Code,Available Balance (INR),Total Earned (INR),Referral Income (INR),Global Income (INR),AdSense Income (INR),AdMob Income (INR),Affiliate Income (INR),Total Withdrawn (INR),Joined Date",
         ];
         for (const u of filteredUsers) {
           const w = getOrInitWallet(u.user_id);
@@ -19030,6 +19162,7 @@ async function dispatchApiRequest(
             (w.referral_income || 0).toFixed(2),
             (w.global_income || 0).toFixed(2),
             (w.adsense_income || 0).toFixed(2),
+            (w.admob_income || 0).toFixed(2),
             (w.affiliate_income || 0).toFixed(2),
             (w.total_withdrawn || 0).toFixed(2),
             `"${u.created_at || ""}"`,
@@ -19061,6 +19194,7 @@ async function dispatchApiRequest(
           referralIncome: Math.round((w.referral_income || 0) * 100) / 100,
           globalIncome: Math.round((w.global_income || 0) * 100) / 100,
           adsenseIncome: Math.round((w.adsense_income || 0) * 100) / 100,
+          admobIncome: Math.round((w.admob_income || 0) * 100) / 100,
           affiliateIncome: Math.round((w.affiliate_income || 0) * 100) / 100,
         };
       });

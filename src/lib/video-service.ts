@@ -648,6 +648,20 @@ function reconcilePublicCacheByVideoType(videoType: VideoType, liveVideos: Uploa
   }
 }
 
+function reconcileEmptyPublicShortsCache(videoType?: VideoType): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") return;
+  try {
+    const remaining = getStoredVideos().filter((v) => {
+      const isShort = isShortVideo({ contentType: v.contentType, duration: v.duration });
+      if (!isShort) return true;
+      return Boolean(videoType && v.videoType !== videoType);
+    });
+    saveStoredVideos(remaining);
+  } catch {
+    // ignore storage errors
+  }
+}
+
 export interface FetchVideosOptions {
   userId?: string;
   videoType?: VideoType;
@@ -703,7 +717,7 @@ export async function fetchUploadedVideos(
 
     const res = await api.videos.list(listParams);
 
-    if (res && res.videos && Array.isArray(res.videos)) {
+    if (res && res.success !== false && res.videos && Array.isArray(res.videos)) {
       const mapped = res.videos.map((d: any) => {
         const active = isPromotionActive({
           isPromoted: d.is_promoted ?? d.isPromoted,
@@ -768,6 +782,15 @@ export async function fetchUploadedVideos(
             reconcilePublicCacheByVideoType(opts.videoType, visibleResults);
           }
         }
+      } else if (
+        !opts.userId &&
+        opts.contentType === "short" &&
+        !opts.category &&
+        !opts.search &&
+        isUnpaginated &&
+        visibleResults.length === 0
+      ) {
+        reconcileEmptyPublicShortsCache(opts.videoType);
       }
 
       return visibleResults;
@@ -1378,7 +1401,9 @@ export function convertUploadedToCatalogVideo(v: UploadedVideo): Video {
       (isShortVideo({ contentType: v.contentType, duration: v.duration }) ? "short" : "long"),
     isPromoted: isPromotionActive(v),
     userId: String(v.userId || (v as any).user_id || ""),
-    ...(v.visibility !== undefined ? { visibility: resolveStoredVideoVisibility(v.visibility) } : {}),
+    ...(v.visibility !== undefined
+      ? { visibility: resolveStoredVideoVisibility(v.visibility) }
+      : {}),
   };
 }
 
