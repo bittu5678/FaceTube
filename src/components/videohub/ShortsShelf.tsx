@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, Play } from "lucide-react";
 import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
+import { getVideoBadgeLabels } from "@/lib/video-service";
 import { ChannelAvatar } from "./ChannelAvatar";
 import { ShortsIcon } from "./ShortsIcon";
 
@@ -182,6 +183,7 @@ export function ShortsShelf({
         {items.map((short) => {
           const creatorName =
             (short as any).channelName || (short as any).channel_name || short.creator;
+          const labels = getVideoBadgeLabels(short);
           return (
             <article
               key={short.id}
@@ -220,8 +222,8 @@ export function ShortsShelf({
                   {short.title}
                 </h3>
 
-                <div className="mt-2 flex items-center justify-between gap-2 text-[11px] sm:text-xs text-white/80 font-medium">
-                  <div className="flex items-center gap-1.5 min-w-0">
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-x-1.5 gap-y-1 text-[11px] sm:text-xs text-white/80 font-medium">
+                  <div className="flex items-center gap-1.5 min-w-0 max-w-full">
                     <ChannelAvatar
                       src={short.channelLogoUrl || (short as any).channel_logo_url}
                       name={creatorName}
@@ -233,6 +235,11 @@ export function ShortsShelf({
                     <span className="truncate text-[10px] sm:text-[11px] text-white/85 drop-shadow-sm">
                       {creatorName}
                     </span>
+                    {labels.showSponsorLabel && (
+                      <span className="inline-flex shrink-0 items-center rounded px-1 py-0.5 text-[9px] font-semibold tracking-wide bg-amber-500/20 text-amber-300 border border-amber-400/40">
+                        Sponsored
+                      </span>
+                    )}
                   </div>
                   <span className="shrink-0 drop-shadow-sm font-semibold text-white/90">
                     {short.views}

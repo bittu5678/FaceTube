@@ -4,6 +4,7 @@ import { History, Trash2, Pause, Play, Search, X, ShieldAlert } from "lucide-rea
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { allVideos, type Video } from "@/data/videos";
+import { getVideoBadgeLabels } from "@/lib/video-service";
 
 export const Route = createFileRoute("/history")({
   head: () => ({
@@ -85,6 +86,7 @@ export function HistoryPage() {
               <div className="space-y-4">
                 {filtered.map((video, idx) => {
                   const progressPct = [85, 45, 100, 20, 60, 90, 30, 75][idx % 8];
+                  const labels = getVideoBadgeLabels(video);
                   return (
                     <div
                       key={`hist-${video.id}`}
@@ -129,19 +131,25 @@ export function HistoryPage() {
                             </button>
                           </div>
 
-                          <div className="flex items-center gap-1.5 text-xs text-muted-foreground mt-1.5 min-w-0">
-                            <ChannelAvatar
-                              src={video.channelLogoUrl || video.channel_logo_url}
-                              name={video.channelName || video.channel}
-                              initials={video.initials}
-                              tint={video.tint}
-                              sizeClassName="h-5 w-5"
-                              imageRingClassName="ring-1 ring-border"
-                              fallbackClassName="text-[9px] font-bold text-white"
-                            />
-                            <span className="truncate">
-                              {video.channelName || video.channel} · {video.views}
-                            </span>
+                          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground mt-1.5 min-w-0">
+                            <div className="flex items-center gap-1.5 min-w-0 max-w-full">
+                              <ChannelAvatar
+                                src={video.channelLogoUrl || video.channel_logo_url}
+                                name={video.channelName || video.channel}
+                                initials={video.initials}
+                                tint={video.tint}
+                                sizeClassName="h-5 w-5"
+                                imageRingClassName="ring-1 ring-border"
+                                fallbackClassName="text-[9px] font-bold text-white"
+                              />
+                              <span className="truncate">{video.channelName || video.channel}</span>
+                              {labels.showSponsorLabel && (
+                                <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                                  Sponsored
+                                </span>
+                              )}
+                            </div>
+                            <span className="shrink-0">· {video.views}</span>
                           </div>
                           <p className="text-xs text-muted-foreground/80 line-clamp-2 mt-2">
                             {video.description}

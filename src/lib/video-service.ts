@@ -949,11 +949,11 @@ export function isLongVideo(video: { contentType?: string; duration?: string }):
 
 export interface VideoBadgeLabels {
   /**
-   * Free videos: must appear normally; no Premium, Sponsor, or price labels.
+   * Free videos: must appear normally; no Premium, Sponsored, or price labels.
    */
   isFree: boolean;
   /**
-   * For videos uploaded under paid/premium upload option, show small "Sponsor" label immediately below title.
+   * For videos uploaded under paid/premium upload option, show small "Sponsored" label beside channel name.
    * Never show "Premium" or upload fees like "₹6" as public video-card label.
    */
   showSponsorLabel: boolean;
@@ -968,7 +968,7 @@ export interface VideoBadgeLabels {
    */
   showThumbnailAdsOverlay: false;
   /**
-   * Strictly public badge texts to display immediately below video title.
+   * Strictly public badge texts.
    */
   badges: Array<{
     type: "sponsor" | "ads";
@@ -978,8 +978,8 @@ export interface VideoBadgeLabels {
 
 /**
  * Centrally determines the public badge labels for a video according to FaceTube guidelines:
- * 1. Free videos: must appear normally. No Premium, Sponsor, or price labels.
- * 2. Paid/premium uploads: show small "Sponsor" label immediately below title. No "Premium" or "₹6".
+ * 1. Free videos: must appear normally. No Premium, Sponsored, or price labels.
+ * 2. Paid/premium uploads: show small "Sponsored" label beside channel name. No "Premium" or "₹6".
  * 3. Ads videos: show small "Ads" label only for genuine advertising/promotional content.
  * 4. Thumbnail overlays: zero Ads badge overlay on thumbnails across all cards and feeds.
  * 5. Duration is never used to determine sponsor or ad status.
@@ -1017,7 +1017,7 @@ export function getVideoBadgeLabels(video: {
 
   const badges: Array<{ type: "sponsor" | "ads"; label: string }> = [];
   if (showSponsor) {
-    badges.push({ type: "sponsor", label: "Sponsor" });
+    badges.push({ type: "sponsor", label: "Sponsored" });
   }
   if (showAds) {
     badges.push({ type: "ads", label: "Ads" });
@@ -1057,6 +1057,16 @@ export function convertVideoToShortItem(v: Video | UploadedVideo): ShortItem {
       ? `${(v as any).views.toLocaleString()} views`
       : String((v as any).views || "0 views");
 
+  const rawVideoType = (v as any).videoType ?? (v as any).video_type;
+  const normalizedVideoType: "free" | "premium" | undefined =
+    typeof rawVideoType === "string" && rawVideoType.trim().toLowerCase() === "premium"
+      ? "premium"
+      : typeof rawVideoType === "string" && rawVideoType.trim().toLowerCase() === "free"
+        ? "free"
+        : undefined;
+  const isPromotedRaw = (v as any).isPromoted ?? (v as any).is_promoted;
+  const promotionExpiresAt = (v as any).promotionExpiresAt ?? (v as any).promotion_expires_at;
+
   return {
     id: String(v.id),
     title: v.title || "FaceTube Short",
@@ -1074,6 +1084,10 @@ export function convertVideoToShortItem(v: Video | UploadedVideo): ShortItem {
     videoUrl: (v as any).videoUrl,
     userId: (v as any).userId || (v as any).user_id,
     channelLogoUrl,
+    ...(normalizedVideoType ? { videoType: normalizedVideoType } : {}),
+    ...(typeof rawVideoType === "string" ? { video_type: rawVideoType } : {}),
+    ...(isPromotedRaw !== undefined ? { isPromoted: Boolean(isPromotedRaw) } : {}),
+    ...(promotionExpiresAt ? { promotionExpiresAt: String(promotionExpiresAt) } : {}),
   };
 }
 

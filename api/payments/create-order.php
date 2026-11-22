@@ -19,6 +19,18 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 $pdo = getDatabaseConnection();
+
+$rzpConfig = getRazorpayConfig();
+$keyId = $rzpConfig['keyId'];
+$keySecret = $rzpConfig['keySecret'];
+
+if (empty($keyId) || empty($keySecret)) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Payment gateway credentials are not configured on the server. Please verify RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in server environment.'
+    ], 503);
+}
+
 $input = getRequestPayload();
 
 $purpose = trim($input['purpose'] ?? 'premium_video_upload');
@@ -44,6 +56,10 @@ if (!empty($requestedUserId) && strcasecmp($requestedUserId, $authUser['user_id'
 } else {
     $effectiveUserId = $authUser['user_id'];
     $effectiveUserName = $authUser['name'] ?? $requestedUserName;
+}
+
+if ($purpose === 'ads_promotion' && empty($videoId)) {
+    jsonResponse(['success' => false, 'error' => 'Video ID is required for promotion.'], 400);
 }
 
 // 2. Video Ownership & Authorization Check
@@ -79,7 +95,12 @@ if ($purpose === 'ads_promotion') {
         'plan-monthly' => 300.00,
         'plan-yearly' => 3000.00,
     ];
-    $amount = $pricing[$planId] ?? 300.00;
+    if (empty($planId)) {
+        $planId = 'plan-monthly';
+    } elseif (!isset($pricing[$planId])) {
+        jsonResponse(['success' => false, 'error' => 'Invalid ads promotion plan specified.'], 400);
+    }
+    $amount = $pricing[$planId];
 } elseif ($purpose === 'paid_subscription') {
     if (empty($planId)) {
         jsonResponse(['success' => false, 'error' => 'Plan ID is required for paid subscription.'], 400);
@@ -112,17 +133,6 @@ if ($purpose === 'ads_promotion') {
     }
 } elseif ($purpose !== 'premium_video_upload') {
     jsonResponse(['success' => false, 'error' => 'Unsupported payment purpose.'], 400);
-}
-
-$rzpConfig = getRazorpayConfig();
-$keyId = $rzpConfig['keyId'];
-$keySecret = $rzpConfig['keySecret'];
-
-if (empty($keyId) || empty($keySecret)) {
-    jsonResponse([
-        'success' => false,
-        'error' => 'Payment gateway credentials are not configured on the server. Please verify RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in server environment.'
-    ], 503);
 }
 
 $amountInSubunits = (int)round($amount * 100);

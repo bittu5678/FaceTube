@@ -22,6 +22,12 @@ export interface ShortItem {
   videoUrl?: string;
   userId?: string;
   channelLogoUrl?: string | undefined;
+  videoType?: "free" | "premium" | undefined;
+  video_type?: string | undefined;
+  isPromoted?: boolean | undefined;
+  is_promoted?: boolean | number | undefined;
+  promotionExpiresAt?: string | undefined;
+  promotion_expires_at?: string | undefined;
 }
 
 export const SHORTS_LIST: ShortItem[] = [

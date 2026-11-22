@@ -26,9 +26,12 @@ import {
   IMAGE_FEED_INTERVAL,
   type UploadedImage,
 } from "@/lib/image-service";
+import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
 import {
   fetchUploadedVideos,
   convertUploadedToCatalogVideo,
+  convertVideoToShortItem,
+  isShortVideo,
   getAvailableCategories,
   deriveCreatorsFromVideos,
   type UploadedVideo,
@@ -220,6 +223,27 @@ function Index() {
     return [...fromDb, ...recommended];
   }, [uploadedVideos]);
 
+  const homeShorts: ShortItem[] = useMemo(() => {
+    const uploadedShortItems = uploadedVideos
+      .filter((v) => isShortVideo({ contentType: v.contentType, duration: v.duration }))
+      .map(convertVideoToShortItem);
+    const seen = new Set<string>();
+    const list: ShortItem[] = [];
+    for (const s of uploadedShortItems) {
+      if (!seen.has(s.id)) {
+        seen.add(s.id);
+        list.push(s);
+      }
+    }
+    for (const s of SHORTS_LIST) {
+      if (!seen.has(s.id)) {
+        seen.add(s.id);
+        list.push(s);
+      }
+    }
+    return list;
+  }, [uploadedVideos]);
+
   // Requirement 2: Interleave feed with images after every 5 videos
   const interleavedRecommended = useMemo(() => {
     return interleaveFeedWithImages(recommendedCombined, uploadedImages, IMAGE_FEED_INTERVAL);
@@ -339,7 +363,7 @@ function Index() {
                         )}
                     </div>
 
-                    <ShortsShelf />
+                    <ShortsShelf items={homeShorts} />
 
                     {interleavedFiltered.length > 6 && (
                       <div className="grid grid-cols-1 gap-x-5 gap-y-8 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 mt-8">
@@ -401,7 +425,7 @@ function Index() {
                 </section>
 
                 {/* YouTube-style Horizontal Shorts Carousel Section */}
-                <ShortsShelf />
+                <ShortsShelf items={homeShorts} />
 
                 {/* Section 2: Trending now (with 1 image after 5 videos) */}
                 <section className="mt-14">

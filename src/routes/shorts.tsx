@@ -26,7 +26,7 @@ import { BottomNav } from "@/components/videohub/BottomNav";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
 import { useAuth } from "@/lib/auth-context";
-import { fetchUploadedVideos, isShortVideo } from "@/lib/video-service";
+import { fetchUploadedVideos, getVideoBadgeLabels, isShortVideo } from "@/lib/video-service";
 import { api } from "@/lib/api";
 
 export interface ShortsSearch {
@@ -101,6 +101,9 @@ function ShortsPage() {
             videoUrl: v.videoUrl,
             userId: v.userId || (v as any).user_id || "FT483921",
             channelLogoUrl: v.channelLogoUrl || (v as any).channel_logo_url,
+            videoType: v.videoType,
+            isPromoted: v.isPromoted,
+            promotionExpiresAt: v.promotionExpiresAt,
           }));
         if (mapped.length > 0) {
           setUploadedShorts(mapped);
@@ -164,6 +167,7 @@ function ShortsPage() {
   const touchStartY = useRef<number | null>(null);
   const fallbackShort: ShortItem = SHORTS_LIST[0] as ShortItem;
   const activeShort: ShortItem = allShorts[currentIndex] ?? allShorts[0] ?? fallbackShort;
+  const activeShortLabels = getVideoBadgeLabels(activeShort);
 
   // YouTube-style Pinch-to-Zoom & Pan state
   const [scale, setScale] = useState(1);
@@ -634,8 +638,8 @@ function ShortsPage() {
             {/* Bottom Meta & Creator Info */}
             <div className="relative z-10 p-4 pb-5 space-y-3 bg-gradient-to-t from-black/95 via-black/70 to-transparent">
               {/* Creator Row with Subscribe */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
                   <ChannelAvatar
                     src={activeShort.channelLogoUrl}
                     name={activeShort.creator}
@@ -644,11 +648,20 @@ function ShortsPage() {
                     imageRingClassName="ring-2 ring-white/50"
                     fallbackClassName="bg-brand text-white font-bold text-xs ring-2 ring-white/50"
                   />
-                  <div>
-                    <p className="text-sm font-bold text-white drop-shadow-sm">
-                      {activeShort.creator}
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <p className="truncate text-sm font-bold text-white drop-shadow-sm">
+                        {activeShort.creator}
+                      </p>
+                      {activeShortLabels.showSponsorLabel && (
+                        <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/20 text-amber-300 border border-amber-400/40 backdrop-blur-xs">
+                          Sponsored
+                        </span>
+                      )}
+                    </div>
+                    <p className="truncate text-[11px] text-white/80">
+                      {activeShort.creatorHandle}
                     </p>
-                    <p className="text-[11px] text-white/80">{activeShort.creatorHandle}</p>
                   </div>
                 </div>
 
@@ -656,7 +669,7 @@ function ShortsPage() {
                   type="button"
                   disabled={isSubscribing}
                   onClick={() => handleToggleSubscribe(activeCreatorUserId, activeShort.creator)}
-                  className={`rounded-full px-4 py-1.5 text-xs font-bold transition-all shadow-md active:scale-95 ${
+                  className={`shrink-0 rounded-full px-4 py-1.5 text-xs font-bold transition-all shadow-md active:scale-95 ${
                     subscribedCreators[activeCreatorUserId]
                       ? "bg-white/20 text-white backdrop-blur-md"
                       : "bg-red-600 text-white hover:bg-red-700 disabled:opacity-60"

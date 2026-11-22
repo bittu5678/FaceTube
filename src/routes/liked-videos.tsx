@@ -5,6 +5,7 @@ import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { allVideos, type Video } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
+import { getVideoBadgeLabels } from "@/lib/video-service";
 
 export const Route = createFileRoute("/liked-videos")({
   head: () => ({
@@ -109,62 +110,71 @@ function LikedVideosPage() {
                 </Link>
               </div>
             ) : (
-              likedList.map((video, idx) => (
-                <div
-                  key={`liked-${video.id}`}
-                  className="group flex items-center gap-3.5 p-2.5 rounded-2xl border border-transparent hover:border-border hover:bg-card transition"
-                >
-                  <span className="w-5 text-center text-xs font-bold text-muted-foreground">
-                    {idx + 1}
-                  </span>
-
-                  <Link
-                    to="/watch/$videoId"
-                    params={{ videoId: video.id }}
-                    className="relative shrink-0 w-36 sm:w-44 aspect-video rounded-xl overflow-hidden bg-black"
+              likedList.map((video, idx) => {
+                const labels = getVideoBadgeLabels(video);
+                return (
+                  <div
+                    key={`liked-${video.id}`}
+                    className="group flex items-center gap-3.5 p-2.5 rounded-2xl border border-transparent hover:border-border hover:bg-card transition"
                   >
-                    <img
-                      src={video.thumb}
-                      alt={video.title}
-                      className="h-full w-full object-cover transition group-hover:scale-105"
-                    />
-                    <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 py-0.5 text-[9px] font-bold text-white">
-                      {video.duration}
+                    <span className="w-5 text-center text-xs font-bold text-muted-foreground">
+                      {idx + 1}
                     </span>
-                  </Link>
 
-                  <div className="flex-1 min-w-0">
-                    <Link to="/watch/$videoId" params={{ videoId: video.id }}>
-                      <h3 className="text-xs sm:text-sm font-bold text-foreground line-clamp-2 group-hover:text-brand transition-colors">
-                        {video.title}
-                      </h3>
-                    </Link>
-                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mt-1.5 min-w-0">
-                      <ChannelAvatar
-                        src={video.channelLogoUrl || video.channel_logo_url}
-                        name={video.channelName || video.channel}
-                        initials={video.initials}
-                        tint={video.tint}
-                        sizeClassName="h-5 w-5"
-                        imageRingClassName="ring-1 ring-border"
-                        fallbackClassName="text-[9px] font-bold text-white"
+                    <Link
+                      to="/watch/$videoId"
+                      params={{ videoId: video.id }}
+                      className="relative shrink-0 w-36 sm:w-44 aspect-video rounded-xl overflow-hidden bg-black"
+                    >
+                      <img
+                        src={video.thumb}
+                        alt={video.title}
+                        className="h-full w-full object-cover transition group-hover:scale-105"
                       />
-                      <span className="truncate">
-                        {video.channelName || video.channel} · {video.views}
+                      <span className="absolute bottom-1 right-1 rounded bg-black/80 px-1 py-0.5 text-[9px] font-bold text-white">
+                        {video.duration}
                       </span>
-                    </div>
-                  </div>
+                    </Link>
 
-                  <button
-                    type="button"
-                    onClick={() => handleUnlike(video.id)}
-                    title="Remove from liked videos"
-                    className="shrink-0 p-2 rounded-full text-muted-foreground opacity-70 group-hover:opacity-100 hover:bg-secondary hover:text-red-500 transition"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              ))
+                    <div className="flex-1 min-w-0">
+                      <Link to="/watch/$videoId" params={{ videoId: video.id }}>
+                        <h3 className="text-xs sm:text-sm font-bold text-foreground line-clamp-2 group-hover:text-brand transition-colors">
+                          {video.title}
+                        </h3>
+                      </Link>
+                      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-muted-foreground mt-1.5 min-w-0">
+                        <div className="flex items-center gap-1.5 min-w-0 max-w-full">
+                          <ChannelAvatar
+                            src={video.channelLogoUrl || video.channel_logo_url}
+                            name={video.channelName || video.channel}
+                            initials={video.initials}
+                            tint={video.tint}
+                            sizeClassName="h-5 w-5"
+                            imageRingClassName="ring-1 ring-border"
+                            fallbackClassName="text-[9px] font-bold text-white"
+                          />
+                          <span className="truncate">{video.channelName || video.channel}</span>
+                          {labels.showSponsorLabel && (
+                            <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                              Sponsored
+                            </span>
+                          )}
+                        </div>
+                        <span className="shrink-0">· {video.views}</span>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleUnlike(video.id)}
+                      title="Remove from liked videos"
+                      className="shrink-0 p-2 rounded-full text-muted-foreground opacity-70 group-hover:opacity-100 hover:bg-secondary hover:text-red-500 transition"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>

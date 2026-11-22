@@ -2004,7 +2004,7 @@ describe("Task 35: Free, Paid/Premium Sponsor, and Ads UI Label Validation Tests
     assert.equal(longLabels.badges.length, 0);
   });
 
-  it("2. Paid/premium uploads display a small 'Sponsor' label immediately below title and remove 'Premium' and '₹6' labels", () => {
+  it("2. Paid/premium uploads display a small 'Sponsored' label beside channel name and remove 'Premium' and '₹6' labels", () => {
     const paidUpload = {
       id: "vid-paid-001",
       title: "Exclusive Creator Course",
@@ -2021,7 +2021,7 @@ describe("Task 35: Free, Paid/Premium Sponsor, and Ads UI Label Validation Tests
     // Validate badge text
     assert.equal(labels.badges.length, 1);
     assert.equal(labels.badges[0]?.type, "sponsor");
-    assert.equal(labels.badges[0]?.label, "Sponsor");
+    assert.equal(labels.badges[0]?.label, "Sponsored");
 
     // Strictly ensure "Premium" and "₹6" do not appear in public badge text
     const badgeText = labels.badges.map((b) => b.label).join(" ");
@@ -2091,7 +2091,7 @@ describe("Task 35: Free, Paid/Premium Sponsor, and Ads UI Label Validation Tests
     assert.equal(longLabels.showAdsLabel, false);
   });
 
-  it("5. Supports combined Paid Sponsor + Active Ads promotion cleanly without label conflicts", () => {
+  it("5. Supports combined Paid Sponsored + Active Ads promotion cleanly without label conflicts", () => {
     const combinedVideo = {
       id: "vid-combined-001",
       title: "Partner Brand Showcase",
@@ -2106,7 +2106,7 @@ describe("Task 35: Free, Paid/Premium Sponsor, and Ads UI Label Validation Tests
     assert.equal(labels.showAdsLabel, true);
     assert.equal(labels.badges.length, 2);
     assert.deepEqual(labels.badges, [
-      { type: "sponsor", label: "Sponsor" },
+      { type: "sponsor", label: "Sponsored" },
       { type: "ads", label: "Ads" },
     ]);
   });

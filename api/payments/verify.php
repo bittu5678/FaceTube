@@ -35,8 +35,20 @@ if (empty($orderId) || empty($paymentId)) {
     ], 400);
 }
 
+$isConnectionUnavailable = static function (Throwable $e): bool {
+    if (function_exists('isDatabaseConnectionUnavailableError')) {
+        return isDatabaseConnectionUnavailableError($e);
+    }
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    $msg = $e->getMessage();
+    return str_starts_with($sqlState, '08')
+        || in_array($driverCode, [1040, 1042, 1053, 1129, 1203, 1927, 2002, 2003, 2005, 2006, 2013, 2026], true)
+        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
+};
+
 // -----------------------------------------------------------------------------
-// 1. CRYPTOGRAPHIC SIGNATURE VERIFICATION (Fail-Closed)
+// 1. CRYPTOGRAPHIC SIGNATURE & AUTHENTICATION CHECKS (Fail-Closed)
 // -----------------------------------------------------------------------------
 $rzpConfig = getRazorpayConfig();
 $keyId = $rzpConfig['keyId'];
@@ -50,6 +62,35 @@ if (empty($secret)) {
         'orderId' => $orderId,
         'error' => 'Payment gateway verification is unavailable on server. Please configure RAZORPAY_KEY_SECRET.'
     ], 500);
+}
+
+try {
+    $authUser = getAuthUser($pdo, true);
+} catch (Throwable $authErr) {
+    error_log('[verify.php] Auth Database Exception: ' . $authErr->getMessage());
+    if ($isConnectionUnavailable($authErr)) {
+        jsonResponse([
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'error' => 'Database connection unavailable during authentication. Please try again.'
+        ], 503);
+    }
+    jsonResponse([
+        'verified' => false,
+        'paymentId' => $paymentId,
+        'orderId' => $orderId,
+        'error' => 'Authentication service error during payment verification.'
+    ], 500);
+}
+
+if (!$authUser) {
+    jsonResponse([
+        'verified' => false,
+        'paymentId' => $paymentId,
+        'orderId' => $orderId,
+        'error' => 'Authentication required. Please log in to verify payment.'
+    ], 401);
 }
 
 // Strictly reject synthetic bypasses or empty signatures
@@ -71,6 +112,38 @@ if (!hash_equals($expectedSignature, $signature)) {
         'orderId' => $orderId,
         'error' => 'Invalid Razorpay payment signature verification failed.'
     ], 400);
+}
+
+// Pre-gateway order ownership check (authoritative lock happens inside transaction below)
+try {
+    $stmtPreOrder = $pdo->prepare('SELECT order_id, user_id, video_id, purpose, plan_id, amount, currency FROM payment_orders WHERE order_id = ? LIMIT 1');
+    $stmtPreOrder->execute([$orderId]);
+    $preOrder = $stmtPreOrder->fetch();
+} catch (Throwable $preOrderErr) {
+    error_log('[verify.php] Order pre-lookup error: ' . $preOrderErr->getMessage());
+    if ($isConnectionUnavailable($preOrderErr)) {
+        jsonResponse(['verified' => false, 'paymentId' => $paymentId, 'orderId' => $orderId, 'error' => 'Database connection unavailable during order lookup.'], 503);
+    }
+    jsonResponse(['verified' => false, 'paymentId' => $paymentId, 'orderId' => $orderId, 'error' => 'Database error verifying payment order.'], 500);
+}
+
+if (!$preOrder) {
+    jsonResponse([
+        'verified' => false,
+        'paymentId' => $paymentId,
+        'orderId' => $orderId,
+        'error' => 'Payment order not found. Please initiate checkout through a valid server order.'
+    ], 404);
+}
+
+$isAuthAdmin = isset($authUser['role']) && strtolower((string)$authUser['role']) === 'admin';
+if (strcasecmp((string)$preOrder['user_id'], (string)$authUser['user_id']) !== 0 && !$isAuthAdmin) {
+    jsonResponse([
+        'verified' => false,
+        'paymentId' => $paymentId,
+        'orderId' => $orderId,
+        'error' => 'Unauthorized: Payment order does not belong to the authenticated user.'
+    ], 403);
 }
 
 // -----------------------------------------------------------------------------
@@ -156,42 +229,41 @@ if ($pData['status'] === 'authorized') {
 // -----------------------------------------------------------------------------
 // 3. ATOMIC DATABASE TRANSACTION & ZERO-TRUST FEATURE UNLOCK
 // -----------------------------------------------------------------------------
-// Detect optional uploaded_videos columns via INFORMATION_SCHEMA before starting transaction
+// Detect optional uploaded_videos / payment_orders columns via INFORMATION_SCHEMA before starting transaction
 $hasAdEarningsCol = false;
 $hasIsBlockedCol = false;
+$hasPromoPaymentIdCol = false;
+$hasPromoAppliedAtCol = false;
 try {
     $colStmt = $pdo->query("
-        SELECT COLUMN_NAME
+        SELECT TABLE_NAME, COLUMN_NAME
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE()
-          AND TABLE_NAME = 'uploaded_videos'
-          AND COLUMN_NAME IN ('ad_earnings', 'is_blocked')
+          AND (
+            (TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME IN ('ad_earnings', 'is_blocked', 'promotion_payment_id'))
+            OR (TABLE_NAME = 'payment_orders' AND COLUMN_NAME = 'promotion_applied_at')
+          )
     ");
     if ($colStmt) {
-        foreach ($colStmt->fetchAll(PDO::FETCH_COLUMN) as $colName) {
-            $normalizedCol = strtolower((string)$colName);
-            if ($normalizedCol === 'ad_earnings') {
-                $hasAdEarningsCol = true;
-            } elseif ($normalizedCol === 'is_blocked') {
-                $hasIsBlockedCol = true;
+        foreach ($colStmt->fetchAll(PDO::FETCH_ASSOC) as $colRow) {
+            $tbl = strtolower((string)($colRow['TABLE_NAME'] ?? ''));
+            $normalizedCol = strtolower((string)($colRow['COLUMN_NAME'] ?? ''));
+            if ($tbl === 'uploaded_videos') {
+                if ($normalizedCol === 'ad_earnings') {
+                    $hasAdEarningsCol = true;
+                } elseif ($normalizedCol === 'is_blocked') {
+                    $hasIsBlockedCol = true;
+                } elseif ($normalizedCol === 'promotion_payment_id') {
+                    $hasPromoPaymentIdCol = true;
+                }
+            } elseif ($tbl === 'payment_orders' && $normalizedCol === 'promotion_applied_at') {
+                $hasPromoAppliedAtCol = true;
             }
         }
     }
 } catch (Exception $eColCheck) {
     // Keep safe false defaults if metadata query fails
 }
-
-$isConnectionUnavailable = static function (Throwable $e): bool {
-    if (function_exists('isDatabaseConnectionUnavailableError')) {
-        return isDatabaseConnectionUnavailableError($e);
-    }
-    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
-    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
-    $msg = $e->getMessage();
-    return str_starts_with($sqlState, '08')
-        || in_array($driverCode, [1040, 1042, 1053, 1129, 1203, 1927, 2002, 2003, 2005, 2006, 2013, 2026], true)
-        || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
-};
 
 $safeRollback = static function (PDO $conn): void {
     try {
@@ -212,124 +284,164 @@ try {
     $stmtOrder->execute([$orderId]);
     $orderRecord = $stmtOrder->fetch();
 
-    // Resolve optional Bearer authentication fail-closed before order ownership checks
-    $suppliedBearerToken = function_exists('getBearerToken') ? getBearerToken() : null;
-    $authUser = getAuthUser($pdo, true);
-    if ($suppliedBearerToken !== null && !$authUser) {
+    if (!$orderRecord) {
         $safeRollback($pdo);
         jsonResponse([
             'verified' => false,
             'paymentId' => $paymentId,
             'orderId' => $orderId,
-            'error' => 'Invalid or expired authentication session. Please log in again.'
-        ], 401);
+            'error' => 'Payment order not found. Please initiate checkout through a valid server order.'
+        ], 404);
     }
 
-    if ($orderRecord) {
-        // Authenticated user ownership verification
-        if ($authUser) {
-            $isOrderOwner = strcasecmp($orderRecord['user_id'], $authUser['user_id']) === 0;
-            $isAdmin = isset($authUser['role']) && strtolower($authUser['role']) === 'admin';
-            if (!$isOrderOwner && !$isAdmin) {
-                $safeRollback($pdo);
-                jsonResponse(['verified' => false, 'error' => 'Unauthorized: Payment order does not belong to the authenticated user.'], 403);
-            }
-        }
+    // Authenticated user ownership verification
+    $isOrderOwner = strcasecmp((string)$orderRecord['user_id'], (string)$authUser['user_id']) === 0;
+    $isAdmin = isset($authUser['role']) && strtolower((string)$authUser['role']) === 'admin';
+    if (!$isOrderOwner && !$isAdmin) {
+        $safeRollback($pdo);
+        jsonResponse(['verified' => false, 'error' => 'Unauthorized: Payment order does not belong to the authenticated user.'], 403);
+    }
 
-        $requestedUserId = trim($input['userId'] ?? ($input['user_id'] ?? ''));
-        if (!empty($requestedUserId) && strcasecmp($orderRecord['user_id'], $requestedUserId) !== 0) {
-            $isAdmin = $authUser && isset($authUser['role']) && strtolower($authUser['role']) === 'admin';
-            if (!$isAdmin) {
-                $safeRollback($pdo);
-                jsonResponse(['verified' => false, 'error' => 'Unauthorized: Payment order does not belong to the requested user.'], 403);
-            }
-        }
-
-        // Fast-path duplicate check: Order is already marked paid
-        if ($orderRecord['status'] === 'paid') {
-            $existingSub = null;
-            if ($orderRecord['purpose'] === 'paid_subscription') {
-                try {
-                    $stmtSub = $pdo->prepare('SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1');
-                    $stmtSub->execute([$paymentId, $orderId]);
-                    $subRow = $stmtSub->fetch();
-                    if ($subRow) {
-                        $existingSub = [
-                            'subscriptionId' => $subRow['subscription_id'],
-                            'userId' => $subRow['user_id'],
-                            'planId' => $subRow['plan_id'],
-                            'orderId' => $subRow['order_id'],
-                            'paymentId' => $subRow['payment_id'],
-                            'amount' => floatval($subRow['amount']),
-                            'currency' => $subRow['currency'],
-                            'status' => $subRow['status'],
-                            'startsAt' => $subRow['starts_at'],
-                            'expiresAt' => $subRow['expires_at'],
-                        ];
-                    }
-                } catch (Exception $eSub) {
-                    // ignore
-                }
-            }
+    $requestedUserId = trim($input['userId'] ?? ($input['user_id'] ?? ''));
+    if (!empty($requestedUserId) && strcasecmp((string)$orderRecord['user_id'], $requestedUserId) !== 0) {
+        if (!$isAdmin) {
             $safeRollback($pdo);
-            $duplicateResp = [
-                'verified' => true,
+            jsonResponse(['verified' => false, 'error' => 'Unauthorized: Payment order does not belong to the requested user.'], 403);
+        }
+    }
+
+    if (strtoupper((string)($orderRecord['currency'] ?? 'INR')) !== 'INR') {
+        $safeRollback($pdo);
+        jsonResponse(['verified' => false, 'error' => 'Payment order currency mismatch: expected INR.'], 400);
+    }
+
+    $requestedPurpose = trim($input['purpose'] ?? '');
+    if (!empty($requestedPurpose) && $requestedPurpose !== (string)$orderRecord['purpose']) {
+        $safeRollback($pdo);
+        jsonResponse(['verified' => false, 'error' => 'Payment purpose does not match the server order record.'], 400);
+    }
+
+    $requestedVideoId = trim($input['videoId'] ?? ($input['video_id'] ?? ''));
+    $orderVideoId = trim((string)($orderRecord['video_id'] ?? ''));
+    if (!empty($orderVideoId) && !empty($requestedVideoId) && $orderVideoId !== $requestedVideoId) {
+        $safeRollback($pdo);
+        jsonResponse(['verified' => false, 'error' => 'Video ID does not match the server payment order record.'], 400);
+    }
+
+    // Fast-path duplicate check: Order is already marked paid
+    if ($orderRecord['status'] === 'paid') {
+        if (!empty($orderRecord['payment_id']) && (string)$orderRecord['payment_id'] !== $paymentId) {
+            $safeRollback($pdo);
+            jsonResponse([
+                'verified' => false,
                 'paymentId' => $paymentId,
                 'orderId' => $orderId,
-                'amount' => floatval($orderRecord['amount']),
-                'purpose' => $orderRecord['purpose'],
-                'duplicate' => true,
-                'message' => 'Payment already verified and credited previously (idempotent duplicate).'
-            ];
-            if ($existingSub) {
-                $duplicateResp['subscription'] = $existingSub;
-            }
-            jsonResponse($duplicateResp);
-            exit;
+                'error' => 'Conflict: Payment order was already settled with a different payment ID.'
+            ], 409);
         }
 
-        // Authoritative parameters locked from server-stored order
-        $userId = $orderRecord['user_id'];
-        $userName = $orderRecord['user_name'] ?? 'Creator';
-        $videoId = $orderRecord['video_id'];
-        $purpose = $orderRecord['purpose'];
-        $planId = $orderRecord['plan_id'];
-        $amount = floatval($orderRecord['amount']);
-    } else {
-        // Fallback if payment_orders table was bypassed: derive server-side authoritative values
-        $purpose = trim($input['purpose'] ?? 'premium_video_upload');
-        $userId = trim($input['userId'] ?? ($input['user_id'] ?? ''));
-        $userName = trim($input['userName'] ?? ($input['user_name'] ?? 'Creator'));
-        $videoId = trim($input['videoId'] ?? ($input['video_id'] ?? ''));
-        $planId = trim($input['planId'] ?? ($input['plan_id'] ?? ($input['metadata']['planId'] ?? '')));
-
-        if ($purpose === 'ads_promotion') {
-            $pricing = ['plan-7-days' => 100.0, 'plan-15-days' => 200.0, 'plan-monthly' => 300.0, 'plan-yearly' => 3000.0];
-            $amount = $pricing[$planId] ?? 300.0;
-        } elseif ($purpose === 'paid_subscription') {
-            $baselinePlanPricing = [
-                'member-monthly' => ['price' => 49.00, 'duration' => 30],
-                'member-vip-monthly' => ['price' => 149.00, 'duration' => 30],
-                'member-annual' => ['price' => 999.00, 'duration' => 365],
-            ];
-            $planFound = false;
+        $existingSub = null;
+        if ($orderRecord['purpose'] === 'paid_subscription') {
             try {
-                $stmtPlan = $pdo->prepare('SELECT price, duration_days FROM subscriber_plans WHERE plan_id = ? LIMIT 1');
-                $stmtPlan->execute([$planId]);
-                $planRow = $stmtPlan->fetch();
-                if ($planRow) {
-                    $amount = floatval($planRow['price']);
-                    $planFound = true;
+                $stmtSub = $pdo->prepare('SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1');
+                $stmtSub->execute([$paymentId, $orderId]);
+                $subRow = $stmtSub->fetch();
+                if ($subRow) {
+                    $existingSub = [
+                        'subscriptionId' => $subRow['subscription_id'],
+                        'userId' => $subRow['user_id'],
+                        'planId' => $subRow['plan_id'],
+                        'orderId' => $subRow['order_id'],
+                        'paymentId' => $subRow['payment_id'],
+                        'amount' => floatval($subRow['amount']),
+                        'currency' => $subRow['currency'],
+                        'status' => $subRow['status'],
+                        'startsAt' => $subRow['starts_at'],
+                        'expiresAt' => $subRow['expires_at'],
+                    ];
                 }
-            } catch (Exception $ePlan) {
-                // fallback
+            } catch (Exception $eSub) {
+                // ignore
             }
-            if (!$planFound) {
-                $amount = $baselinePlanPricing[$planId]['price'] ?? 49.00;
-            }
-        } else {
-            $amount = 6.00;
         }
+        $safeRollback($pdo);
+        $duplicateResp = [
+            'verified' => true,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'amount' => floatval($orderRecord['amount']),
+            'purpose' => $orderRecord['purpose'],
+            'duplicate' => true,
+            'message' => 'Payment already verified and credited previously (idempotent duplicate).'
+        ];
+        if ($existingSub) {
+            $duplicateResp['subscription'] = $existingSub;
+        }
+        jsonResponse($duplicateResp);
+        exit;
+    }
+
+    // Authoritative parameters locked from server-stored order
+    $userId = (string)$orderRecord['user_id'];
+    $userName = (string)($orderRecord['user_name'] ?? 'Creator');
+    $videoId = !empty($orderVideoId) ? $orderVideoId : $requestedVideoId;
+    $purpose = (string)$orderRecord['purpose'];
+    $planId = trim((string)($orderRecord['plan_id'] ?? ''));
+    $amount = floatval($orderRecord['amount']);
+
+    // Verify authoritative pricing against order purpose/plan
+    $authoritativeAmount = 6.00;
+    if ($purpose === 'ads_promotion') {
+        $pricing = ['plan-7-days' => 100.0, 'plan-15-days' => 200.0, 'plan-monthly' => 300.0, 'plan-yearly' => 3000.0];
+        if (empty($planId)) {
+            $planId = 'plan-monthly';
+        }
+        if (!isset($pricing[$planId])) {
+            $safeRollback($pdo);
+            jsonResponse(['verified' => false, 'error' => 'Invalid ads promotion plan in order record.'], 400);
+        }
+        $authoritativeAmount = $pricing[$planId];
+    } elseif ($purpose === 'paid_subscription') {
+        $baselinePlanPricing = [
+            'member-monthly' => ['price' => 49.00, 'duration' => 30],
+            'member-vip-monthly' => ['price' => 149.00, 'duration' => 30],
+            'member-annual' => ['price' => 999.00, 'duration' => 365],
+        ];
+        $planFound = false;
+        try {
+            $stmtPlan = $pdo->prepare('SELECT price, duration_days FROM subscriber_plans WHERE plan_id = ? LIMIT 1');
+            $stmtPlan->execute([$planId]);
+            $planRow = $stmtPlan->fetch();
+            if ($planRow) {
+                $authoritativeAmount = floatval($planRow['price']);
+                $planFound = true;
+            }
+        } catch (Exception $ePlan) {
+            // fallback
+        }
+        if (!$planFound) {
+            if (!isset($baselinePlanPricing[$planId])) {
+                $safeRollback($pdo);
+                jsonResponse(['verified' => false, 'error' => 'Invalid subscriber plan in order record.'], 400);
+            }
+            $authoritativeAmount = $baselinePlanPricing[$planId]['price'];
+        }
+    } elseif ($purpose !== 'premium_video_upload') {
+        $safeRollback($pdo);
+        jsonResponse(['verified' => false, 'error' => 'Unsupported payment purpose in order record.'], 400);
+    }
+
+    if (abs($amount - $authoritativeAmount) > 0.01) {
+        $safeRollback($pdo);
+        jsonResponse(['verified' => false, 'error' => 'Payment order amount does not match authoritative pricing.'], 400);
+    }
+
+    if (isset($input['amount']) && is_numeric($input['amount']) && abs(floatval($input['amount']) - $amount) > 0.01) {
+        $safeRollback($pdo);
+        jsonResponse([
+            'verified' => false,
+            'error' => "Payment amount ₹{$input['amount']} does not match expected fee of ₹" . number_format($amount, 2, '.', '') . "."
+        ], 400);
     }
 
     // Verify gateway amount matches server authoritative amount (in paise)
@@ -342,11 +454,24 @@ try {
         ], 400);
     }
 
-    // 3.2 Lock check for duplicate payment_id in payment_transactions
+    // 3.2 Lock check for duplicate or reused payment_id in payment_transactions
     $stmtExisting = $pdo->prepare('SELECT * FROM payment_transactions WHERE payment_id = ? FOR UPDATE');
     $stmtExisting->execute([$paymentId]);
     $existingTx = $stmtExisting->fetch();
     if ($existingTx) {
+        $txOrderMismatch = !empty($existingTx['order_id']) && (string)$existingTx['order_id'] !== $orderId;
+        $txUserMismatch = strcasecmp((string)$existingTx['user_id'], $userId) !== 0;
+        $txVideoMismatch = !empty($videoId) && !empty($existingTx['video_id']) && (string)$existingTx['video_id'] !== $videoId;
+        if ($txOrderMismatch || $txUserMismatch || $txVideoMismatch || (string)$existingTx['purpose'] !== $purpose) {
+            $safeRollback($pdo);
+            jsonResponse([
+                'verified' => false,
+                'paymentId' => $paymentId,
+                'orderId' => $orderId,
+                'error' => 'Conflict: Payment ID has already been used for a different order, video, or user.'
+            ], 409);
+        }
+
         $existingSub = null;
         if ($existingTx['purpose'] === 'paid_subscription') {
             try {
@@ -389,6 +514,55 @@ try {
         }
         jsonResponse($duplicateResp);
         exit;
+    }
+
+    // Video ownership & anti-reuse verification under row lock
+    $lockedVideoRow = null;
+    if (!empty($videoId)) {
+        $promoPaySelect = $hasPromoPaymentIdCol ? ', promotion_payment_id' : '';
+        $stmtVidLock = $pdo->prepare("SELECT id, user_id, video_type, payment_status, payment_id{$promoPaySelect} FROM uploaded_videos WHERE id = ? FOR UPDATE");
+        $stmtVidLock->execute([$videoId]);
+        $lockedVideoRow = $stmtVidLock->fetch();
+        if ($lockedVideoRow) {
+            if (strcasecmp((string)$lockedVideoRow['user_id'], $userId) !== 0 && !$isAdmin) {
+                $safeRollback($pdo);
+                jsonResponse([
+                    'verified' => false,
+                    'error' => 'Unauthorized: Video record does not belong to the authenticated payer.'
+                ], 403);
+            }
+            if ($purpose === 'premium_video_upload' && strtolower((string)($lockedVideoRow['video_type'] ?? '')) === 'free') {
+                $safeRollback($pdo);
+                jsonResponse([
+                    'verified' => false,
+                    'error' => 'Free video uploads do not require payment or commission.'
+                ], 400);
+            }
+        } elseif ($purpose === 'ads_promotion') {
+            $safeRollback($pdo);
+            jsonResponse([
+                'verified' => false,
+                'error' => 'Video not found for ads promotion.'
+            ], 404);
+        }
+
+        if ($purpose === 'premium_video_upload') {
+            $stmtReuseVid = $pdo->prepare('SELECT id FROM uploaded_videos WHERE payment_id = ? AND id != ? LIMIT 1');
+            $stmtReuseVid->execute([$paymentId, $videoId]);
+            if ($stmtReuseVid->fetch()) {
+                $safeRollback($pdo);
+                jsonResponse([
+                    'verified' => false,
+                    'error' => 'Conflict: Payment ID is already linked to another video.'
+                ], 409);
+            }
+        }
+    } elseif ($purpose === 'ads_promotion') {
+        $safeRollback($pdo);
+        jsonResponse([
+            'verified' => false,
+            'error' => 'Video ID is required for ads promotion.'
+        ], 400);
     }
 
     $createdSubscription = null;
@@ -1099,35 +1273,47 @@ try {
     }
 
     // 3.7 Feature Activation: Premium Video or Ad Promotion
+    $promotionAppliedNow = false;
     if (!empty($videoId)) {
         if ($purpose === 'ads_promotion') {
-            // Plan durations
-            $planDurations = [
-                'plan-7-days' => 7,
-                'plan-15-days' => 15,
-                'plan-monthly' => 30,
-                'plan-yearly' => 365,
-            ];
-            $durationDays = $planDurations[$planId] ?? 30;
+            $alreadyAppliedOrder = $hasPromoAppliedAtCol && !empty($orderRecord['promotion_applied_at']);
+            $alreadyAppliedVideo = $hasPromoPaymentIdCol && $lockedVideoRow && ((string)($lockedVideoRow['promotion_payment_id'] ?? '') === $paymentId);
 
-            // Business Rule: Add duration to active expiry date, otherwise start from NOW()
-            $stmtPromo = $pdo->prepare('
-                UPDATE uploaded_videos 
-                SET is_promoted = 1,
-                    promotion_plan = :planId,
-                    promotion_expires_at = IF(
-                        promotion_expires_at IS NOT NULL AND promotion_expires_at > NOW(),
-                        DATE_ADD(promotion_expires_at, INTERVAL :durationDays DAY),
-                        DATE_ADD(NOW(), INTERVAL :durationDays DAY)
-                    ),
-                    updated_at = NOW()
-                WHERE id = :videoId
-            ');
-            $stmtPromo->execute([
-                ':planId' => $planId,
-                ':durationDays' => $durationDays,
-                ':videoId' => $videoId
-            ]);
+            if (!$alreadyAppliedOrder && !$alreadyAppliedVideo) {
+                // Plan durations strictly derived server-side from verified planId
+                $planDurations = [
+                    'plan-7-days' => 7,
+                    'plan-15-days' => 15,
+                    'plan-monthly' => 30,
+                    'plan-yearly' => 365,
+                ];
+                $durationDays = $planDurations[$planId] ?? 30;
+
+                // Business Rule: Add duration to active expiry date, otherwise start from NOW()
+                $promoPaymentSetSql = $hasPromoPaymentIdCol ? ', promotion_payment_id = :paymentId' : '';
+                $stmtPromo = $pdo->prepare("
+                    UPDATE uploaded_videos 
+                    SET is_promoted = 1,
+                        promotion_plan = :planId,
+                        promotion_expires_at = IF(
+                            promotion_expires_at IS NOT NULL AND promotion_expires_at > NOW(),
+                            DATE_ADD(promotion_expires_at, INTERVAL :durationDays DAY),
+                            DATE_ADD(NOW(), INTERVAL :durationDays DAY)
+                        ){$promoPaymentSetSql},
+                        updated_at = NOW()
+                    WHERE id = :videoId
+                ");
+                $promoParams = [
+                    ':planId' => $planId,
+                    ':durationDays' => $durationDays,
+                    ':videoId' => $videoId,
+                ];
+                if ($hasPromoPaymentIdCol) {
+                    $promoParams[':paymentId'] = $paymentId;
+                }
+                $stmtPromo->execute($promoParams);
+                $promotionAppliedNow = true;
+            }
         } elseif ($isPremiumUpload) {
             $pdo->prepare('
                 UPDATE uploaded_videos 
@@ -1137,13 +1323,21 @@ try {
         }
     }
 
-    // 3.8 Update payment_orders status to 'paid'
+    // 3.8 Update payment_orders status to 'paid' (and promotion_applied_at when ads_promotion was activated)
     try {
-        $pdo->prepare('
-            UPDATE payment_orders 
-            SET status = "paid", payment_id = ?, updated_at = NOW() 
-            WHERE order_id = ?
-        ')->execute([$paymentId, $orderId]);
+        if ($purpose === 'ads_promotion' && $hasPromoAppliedAtCol && $promotionAppliedNow) {
+            $pdo->prepare('
+                UPDATE payment_orders 
+                SET status = "paid", payment_id = ?, promotion_applied_at = NOW(), updated_at = NOW() 
+                WHERE order_id = ?
+            ')->execute([$paymentId, $orderId]);
+        } else {
+            $pdo->prepare('
+                UPDATE payment_orders 
+                SET status = "paid", payment_id = ?, updated_at = NOW() 
+                WHERE order_id = ?
+            ')->execute([$paymentId, $orderId]);
+        }
     } catch (Exception $ePoUpdate) {
         // Optional
     }

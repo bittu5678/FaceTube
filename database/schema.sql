@@ -75,14 +75,18 @@ CREATE TABLE IF NOT EXISTS `uploaded_videos` (
   `payment_id` VARCHAR(100) DEFAULT NULL,
   `payment_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
   `is_promoted` TINYINT(1) NOT NULL DEFAULT 0,
+  `visibility` ENUM('public', 'unlisted', 'private') NOT NULL DEFAULT 'public',
   `promotion_plan` VARCHAR(50) DEFAULT NULL,
   `promotion_expires_at` DATETIME DEFAULT NULL,
+  `promotion_payment_id` VARCHAR(100) DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_videos_user_id` (`user_id`),
   KEY `idx_videos_type_content` (`video_type`, `content_type`),
   KEY `idx_videos_payment_status` (`payment_status`),
+  KEY `idx_videos_visibility` (`visibility`),
+  KEY `idx_videos_promotion_payment_id` (`promotion_payment_id`),
   KEY `idx_videos_created_at` (`created_at` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -263,12 +267,14 @@ CREATE TABLE IF NOT EXISTS `payment_orders` (
   `currency` VARCHAR(10) NOT NULL DEFAULT 'INR',
   `status` ENUM('created', 'paid', 'failed', 'cancelled') NOT NULL DEFAULT 'created',
   `payment_id` VARCHAR(100) DEFAULT NULL,
+  `promotion_applied_at` DATETIME DEFAULT NULL,
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uniq_po_order_id` (`order_id`),
   KEY `idx_po_user_id` (`user_id`),
   KEY `idx_po_video_id` (`video_id`),
+  KEY `idx_po_payment_id` (`payment_id`),
   KEY `idx_po_status` (`status`),
   KEY `idx_po_created_at` (`created_at` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

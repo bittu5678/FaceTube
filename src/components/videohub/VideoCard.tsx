@@ -55,23 +55,23 @@ export function VideoCard({ video }: { video: Video }) {
             </h3>
           </Link>
 
-          {/* YouTube-style small Sponsor & Ads labels immediately below video title */}
-          {(labels.showSponsorLabel || labels.showAdsLabel) && (
+          {/* YouTube-style small Ads label immediately below video title */}
+          {labels.showAdsLabel && (
             <div className="mt-1 flex items-center gap-1.5">
-              {labels.showSponsorLabel && (
-                <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
-                  Sponsor
-                </span>
-              )}
-              {labels.showAdsLabel && (
-                <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wide bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
-                  Ads
-                </span>
-              )}
+              <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wide bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+                Ads
+              </span>
             </div>
           )}
 
-          <p className="mt-1 truncate text-sm text-muted-foreground">{video.channel}</p>
+          <div className="mt-1 flex items-center gap-1.5 min-w-0">
+            <p className="truncate text-sm text-muted-foreground">{video.channel}</p>
+            {labels.showSponsorLabel && (
+              <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                Sponsored
+              </span>
+            )}
+          </div>
           <p className="truncate text-sm text-muted-foreground">
             {video.views} · {video.age}
           </p>

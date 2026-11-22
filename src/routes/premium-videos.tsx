@@ -19,6 +19,7 @@ import {
   fetchUploadedVideos,
   convertUploadedToCatalogVideo,
   getStoredVideos,
+  getVideoBadgeLabels,
   type UploadedVideo,
   VIDEO_CATEGORIES,
 } from "@/lib/video-service";
@@ -301,6 +302,7 @@ export function PremiumVideosPage() {
             {filteredList.map((video) => {
               const thumbUrl = resolveVideoThumbnail(video);
               const isNewlyUploaded = video.id.startsWith("vid-") || video.id.startsWith("vid_");
+              const labels = getVideoBadgeLabels(video);
 
               return (
                 <article
@@ -367,18 +369,15 @@ export function PremiumVideosPage() {
                         </h3>
                       </Link>
 
-                      {/* YouTube-style small Sponsor & Ads labels immediately below video title */}
-                      <div className="mt-1 flex items-center gap-1.5">
-                        <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
-                          Sponsor
-                        </span>
-                        {video.isPromoted && (
+                      {/* YouTube-style small Ads label immediately below video title */}
+                      {labels.showAdsLabel && (
+                        <div className="mt-1 flex items-center gap-1.5">
                           <span className="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wide bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
                             Ads
                           </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 text-[11px] text-muted-foreground mt-1.5">
+                        </div>
+                      )}
+                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mt-1.5 min-w-0">
                         <ChannelAvatar
                           src={video.channelLogoUrl || video.channel_logo_url}
                           name={video.channel}
@@ -389,8 +388,15 @@ export function PremiumVideosPage() {
                           fallbackClassName="text-[9px] font-bold text-white"
                         />
                         <span className="truncate">{video.channel}</span>
-                        <span>·</span>
-                        <span className="font-semibold text-amber-400/90">{video.category}</span>
+                        {labels.showSponsorLabel && (
+                          <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                            Sponsored
+                          </span>
+                        )}
+                        <span className="shrink-0">·</span>
+                        <span className="shrink-0 font-semibold text-amber-400/90">
+                          {video.category}
+                        </span>
                       </div>
                     </div>
 

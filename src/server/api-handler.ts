@@ -519,8 +519,10 @@ interface ServerStore {
     payment_id?: string | undefined;
     payment_amount: number;
     is_promoted: boolean;
+    visibility?: "public" | "unlisted" | "private" | undefined;
     promotion_plan?: string | undefined;
     promotion_expires_at?: string | undefined;
+    promotion_payment_id?: string | undefined;
     is_blocked?: boolean | undefined;
     block_reason?: string | undefined;
     blocked_at?: string | undefined;
@@ -722,6 +724,8 @@ interface ServerStore {
     amount: number;
     currency: string;
     status: string;
+    payment_id?: string | null;
+    promotion_applied_at?: string | null;
     created_at: string;
     updated_at?: string;
   }>;
@@ -1105,6 +1109,7 @@ function getInitialStore(): ServerStore {
         payment_status: "not_required",
         payment_amount: 0,
         is_promoted: false,
+        visibility: "public",
         created_at: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(),
         updated_at: new Date(Date.now() - 12 * 24 * 60 * 60 * 1000).toISOString(),
       },
@@ -1126,6 +1131,7 @@ function getInitialStore(): ServerStore {
         payment_status: "not_required",
         payment_amount: 0,
         is_promoted: false,
+        visibility: "public",
         created_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
         updated_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
       },
@@ -1148,6 +1154,7 @@ function getInitialStore(): ServerStore {
         payment_id: "pay_seed_maya_short_01",
         payment_amount: 6,
         is_promoted: false,
+        visibility: "public",
         created_at: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(),
         updated_at: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString(),
       },
@@ -1170,6 +1177,7 @@ function getInitialStore(): ServerStore {
         payment_id: "pay_seed_maya_long_01",
         payment_amount: 6,
         is_promoted: true,
+        visibility: "public",
         promotion_plan: "plan-monthly",
         promotion_expires_at: new Date(Date.now() + 25 * 24 * 60 * 60 * 1000).toISOString(),
         created_at: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString(),
@@ -1194,6 +1202,7 @@ function getInitialStore(): ServerStore {
         payment_status: "not_required",
         payment_amount: 0,
         is_promoted: false,
+        visibility: "public",
         created_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
         updated_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
       },
@@ -1216,6 +1225,7 @@ function getInitialStore(): ServerStore {
         payment_status: "not_required",
         payment_amount: 0,
         is_promoted: false,
+        visibility: "public",
         created_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
         updated_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString(),
       },
@@ -1391,6 +1401,29 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
           inMemoryStore.subscriptionRefundRequests = [];
         if (!inMemoryStore.kycAuditLog) inMemoryStore.kycAuditLog = [];
         if (!inMemoryStore.channelSubscriptions) inMemoryStore.channelSubscriptions = [];
+        if (Array.isArray(inMemoryStore.videos)) {
+          const verifiedSeedIds = new Set([
+            "vid-seed-001",
+            "vid-seed-002",
+            "vid-seed-003",
+            "vid-seed-004",
+            "vid-seed-005",
+            "vid-seed-006",
+            "vid-seed-007",
+            "vid-seed-008",
+          ]);
+          for (const v of inMemoryStore.videos) {
+            if (!v.visibility) {
+              const uid = String(v.user_id || "")
+                .trim()
+                .toUpperCase();
+              v.visibility =
+                verifiedSeedIds.has(v.id) && (uid === "FT483921" || uid === "FT900431")
+                  ? "public"
+                  : "private";
+            }
+          }
+        }
       }
       return inMemoryStore!;
     }
@@ -2156,31 +2189,115 @@ async function dispatchApiRequest(
           );
         }
 
+        const keyId = readEnv("RAZORPAY_KEY_ID")
+          .replace(/^["']|["']$/g, "")
+          .trim();
+        const keySecret = readEnv("RAZORPAY_KEY_SECRET")
+          .replace(/^["']|["']$/g, "")
+          .trim();
+        if (!keyId || !keySecret) {
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                "Razorpay credentials (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET) are not configured on the server. Real payments cannot be initiated until valid credentials are provided.",
+            },
+            503,
+          );
+        }
+
         const payload = await request.json();
         const authUser = await getAuthUserFromRequest(request, store, pool, env);
         const reqUserId = String(payload.userId || payload.user_id || "")
           .trim()
           .toUpperCase();
-        let effectiveUserId = authUser ? authUser.user_id : reqUserId;
-
-        if (authUser && reqUserId && reqUserId !== authUser.user_id.toUpperCase()) {
-          if (authUser.role !== "admin") {
-            return jsonResponse(
-              {
-                success: false,
-                error: "Unauthorized: Cannot create payment orders for another user account.",
-              },
-              403,
-            );
-          }
-          effectiveUserId = reqUserId;
+        const authCheck = requireAuth(authUser, reqUserId || undefined);
+        if (!authCheck.success) {
+          return authCheck.response;
         }
+        const effectiveUserId = authCheck.effectiveUserId;
 
         const videoId = String(payload.videoId || payload.video_id || "").trim();
         const purpose = String(payload.purpose || "premium_video_upload").trim();
-        const planId = String(
+        let planId = String(
           payload.planId || payload.plan_id || payload.metadata?.planId || "",
         ).trim();
+
+        if (purpose === "ads_promotion") {
+          if (!videoId) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Video ID is required for promotion.",
+              },
+              400,
+            );
+          }
+          if (!planId) {
+            planId = "plan-monthly";
+          } else if (!(planId in PRICING_CONFIG.ADS_PROMOTION)) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Invalid ads promotion plan specified.",
+              },
+              400,
+            );
+          }
+        } else if (purpose === "paid_subscription") {
+          if (!planId) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Plan ID is required for paid subscription.",
+              },
+              400,
+            );
+          }
+          let planValidated = false;
+          if (pool) {
+            try {
+              const [pRows]: any = await pool.query(
+                "SELECT price, is_active FROM subscriber_plans WHERE plan_id = ? LIMIT 1",
+                [planId],
+              );
+              if (pRows && pRows.length > 0) {
+                if (!pRows[0].is_active) {
+                  return jsonResponse(
+                    {
+                      success: false,
+                      error: "This subscriber plan is currently inactive.",
+                    },
+                    400,
+                  );
+                }
+                planValidated = true;
+              }
+            } catch (_ePlan) {
+              // Fall back to baseline plans if subscriber_plans table is absent
+            }
+          }
+          if (!planValidated) {
+            const subPlans = PRICING_CONFIG.SUBSCRIBER_PLANS as Record<string, unknown>;
+            if (!(planId in subPlans)) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Invalid subscriber plan specified.",
+                },
+                400,
+              );
+            }
+          }
+        } else if (purpose !== "premium_video_upload") {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Unsupported payment purpose.",
+            },
+            400,
+          );
+        }
 
         if (videoId) {
           if (pool) {
@@ -2191,16 +2308,13 @@ async function dispatchApiRequest(
                 [videoId],
               );
             } catch (_eVid) {
-              if (isProduction) {
-                return jsonResponse(
-                  {
-                    success: false,
-                    error: "Database error verifying video eligibility.",
-                  },
-                  500,
-                );
-              }
-              vRows = [];
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Database error verifying video eligibility.",
+                },
+                500,
+              );
             }
 
             if (vRows && vRows.length > 0) {
@@ -2209,7 +2323,7 @@ async function dispatchApiRequest(
                 String(vid.user_id || "")
                   .trim()
                   .toUpperCase() === effectiveUserId.toUpperCase();
-              const isAdmin = authUser?.role === "admin";
+              const isAdmin = String(authUser?.role || "").toLowerCase() === "admin";
               if (!isOwner && !isAdmin) {
                 return jsonResponse(
                   {
@@ -2234,7 +2348,7 @@ async function dispatchApiRequest(
                   400,
                 );
               }
-            } else if (isProduction && purpose === "ads_promotion") {
+            } else if (purpose === "ads_promotion") {
               return jsonResponse(
                 {
                   success: false,
@@ -2243,21 +2357,40 @@ async function dispatchApiRequest(
                 404,
               );
             }
-          } else if (!isProduction && purpose === "ads_promotion") {
+          } else if (purpose === "ads_promotion" || purpose === "premium_video_upload") {
             const v = store.videos.find((vid) => vid.id === videoId);
             if (v) {
               const isOwner = v.user_id.toUpperCase() === effectiveUserId.toUpperCase();
-              const isAdmin = authUser?.role === "admin";
+              const isAdmin = String(authUser?.role || "").toLowerCase() === "admin";
               if (!isOwner && !isAdmin) {
                 return jsonResponse(
                   {
                     success: false,
                     error:
-                      "Unauthorized: You can only initiate promotion for your own uploaded videos.",
+                      purpose === "ads_promotion"
+                        ? "Unauthorized: You can only initiate promotion for your own uploaded videos."
+                        : "Unauthorized: You can only initiate payment or promotion for your own uploaded videos.",
                   },
                   403,
                 );
               }
+              if (purpose === "premium_video_upload" && v.video_type === "free") {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: "Free video uploads do not require payment.",
+                  },
+                  400,
+                );
+              }
+            } else if (purpose === "ads_promotion") {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Video not found for promotion.",
+                },
+                404,
+              );
             }
           }
         }
@@ -2265,6 +2398,7 @@ async function dispatchApiRequest(
         const result = await createServerPaymentOrder(
           {
             ...payload,
+            planId: planId || payload.planId,
             userId: effectiveUserId,
           },
           env,
@@ -2349,6 +2483,8 @@ async function dispatchApiRequest(
   if (route === "payments/verify" || route === "payment/verify") {
     if (method === "POST") {
       try {
+        const readEnv = (key: string) => readEnvValue(env, key);
+        const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
         const pool = getMysqlPool();
         const payload = await request.json();
         const orderId = String(payload.orderId || payload.order_id || "").trim();
@@ -2357,12 +2493,8 @@ async function dispatchApiRequest(
         const requestedUserId = String(payload.userId || payload.user_id || "")
           .trim()
           .toUpperCase();
-        const userName = String(payload.userName || payload.user_name || "Creator").trim();
-        const videoId = String(payload.videoId || payload.video_id || "").trim();
-        const purpose = String(payload.purpose || "premium_video_upload").trim();
-        const planId = String(
-          payload.planId || payload.plan_id || payload.metadata?.planId || "plan-monthly",
-        ).trim() as AdsPlanId;
+        const requestedVideoId = String(payload.videoId || payload.video_id || "").trim();
+        const requestedPurpose = String(payload.purpose || "").trim();
         const requestedAmount = payload.amount !== undefined ? Number(payload.amount) : undefined;
 
         if (!orderId || !paymentId) {
@@ -2375,7 +2507,7 @@ async function dispatchApiRequest(
           );
         }
 
-        if (process.env["NODE_ENV"] === "production" && !pool) {
+        if ((isProduction || process.env["NODE_ENV"] === "production") && !pool) {
           return jsonResponse(
             {
               verified: false,
@@ -2388,9 +2520,10 @@ async function dispatchApiRequest(
           );
         }
 
-        // 1. PAYMENT VERIFICATION: Cryptographic Signature & Fail-Closed Credential Check
-        const keyId = env?.["RAZORPAY_KEY_ID"] || process.env["RAZORPAY_KEY_ID"];
-        const secretKey = env?.["RAZORPAY_KEY_SECRET"] || process.env["RAZORPAY_KEY_SECRET"];
+        // 1. PAYMENT VERIFICATION: Cryptographic Credential & Fail-Closed Secret Check
+        const sanitizeKey = (val: string) => val.replace(/^["']|["']$/g, "").trim();
+        const keyId = sanitizeKey(readEnv("RAZORPAY_KEY_ID"));
+        const secretKey = sanitizeKey(readEnv("RAZORPAY_KEY_SECRET"));
         if (!secretKey) {
           return jsonResponse(
             {
@@ -2401,6 +2534,51 @@ async function dispatchApiRequest(
                 "Payment verification configuration unavailable on server (RAZORPAY_KEY_SECRET missing). Failed closed.",
             },
             500,
+          );
+        }
+
+        // 2. STRICT AUTHENTICATION CHECK (after readiness/DB checks)
+        let authUser: AuthUser | null = null;
+        try {
+          authUser = await getAuthUserFromRequest(request, store, pool, env);
+        } catch (authErr: any) {
+          if (authErr instanceof AuthDatabaseError) {
+            return jsonResponse(
+              {
+                verified: false,
+                paymentId,
+                orderId,
+                error: authErr.message,
+              },
+              authErr.status,
+            );
+          }
+          throw authErr;
+        }
+        if (!authUser) {
+          return jsonResponse(
+            {
+              verified: false,
+              paymentId,
+              orderId,
+              error: "Authentication required. Please log in to verify payment.",
+            },
+            401,
+          );
+        }
+
+        const isAuthAdmin = String(authUser.role || "").toLowerCase() === "admin";
+        if (
+          requestedUserId &&
+          requestedUserId.toUpperCase() !== authUser.user_id.toUpperCase() &&
+          !isAuthAdmin
+        ) {
+          return jsonResponse(
+            {
+              verified: false,
+              error: "Unauthorized: You cannot verify payments on behalf of another user.",
+            },
+            403,
           );
         }
 
@@ -2433,12 +2611,129 @@ async function dispatchApiRequest(
           );
         }
 
-        // Authoritative pricing check before gateway verification
+        // 3. SERVER ORDER LOOKUP & OWNERSHIP/METADATA VERIFICATION
+        let orderRecord: any = null;
+        if (pool) {
+          try {
+            const [poRows]: any = await pool.query(
+              `SELECT * FROM payment_orders WHERE order_id = ? LIMIT 1`,
+              [orderId],
+            );
+            orderRecord = poRows?.[0] || null;
+          } catch (_ePo) {
+            return jsonResponse(
+              {
+                verified: false,
+                paymentId,
+                orderId,
+                error: "Database error verifying payment order.",
+              },
+              500,
+            );
+          }
+        } else {
+          orderRecord = (store.paymentOrders || []).find((o) => o.order_id === orderId) || null;
+        }
+
+        if (!orderRecord) {
+          return jsonResponse(
+            {
+              verified: false,
+              paymentId,
+              orderId,
+              error:
+                "Payment order not found. Please initiate checkout through a valid server order.",
+            },
+            404,
+          );
+        }
+
+        const orderOwnerId = String(orderRecord.user_id || "")
+          .trim()
+          .toUpperCase();
+        if (orderOwnerId !== authUser.user_id.toUpperCase() && !isAuthAdmin) {
+          return jsonResponse(
+            {
+              verified: false,
+              error: "Unauthorized: Payment order does not belong to the authenticated user.",
+            },
+            403,
+          );
+        }
+        if (requestedUserId && requestedUserId !== orderOwnerId && !isAuthAdmin) {
+          return jsonResponse(
+            {
+              verified: false,
+              error: "Unauthorized: Payment order does not belong to the requested user.",
+            },
+            403,
+          );
+        }
+
+        if (
+          String(orderRecord.currency || "INR")
+            .trim()
+            .toUpperCase() !== "INR"
+        ) {
+          return jsonResponse(
+            {
+              verified: false,
+              error: "Payment order currency mismatch: expected INR.",
+            },
+            400,
+          );
+        }
+
+        const purpose = String(orderRecord.purpose || "").trim();
+        if (requestedPurpose && requestedPurpose !== purpose) {
+          return jsonResponse(
+            {
+              verified: false,
+              error: "Payment purpose does not match the server order record.",
+            },
+            400,
+          );
+        }
+
+        const orderVideoId = String(orderRecord.video_id || "").trim();
+        if (orderVideoId && requestedVideoId && orderVideoId !== requestedVideoId) {
+          return jsonResponse(
+            {
+              verified: false,
+              error: "Video ID does not match the server payment order record.",
+            },
+            400,
+          );
+        }
+        const videoId = orderVideoId || requestedVideoId;
+        const uploaderId = orderOwnerId;
+        const userName = String(
+          orderRecord.user_name || payload.userName || payload.user_name || authUser.name || "Creator",
+        ).trim();
+        const orderPlanId = String(orderRecord.plan_id || "").trim();
+        const planId = (
+          purpose === "ads_promotion"
+            ? orderPlanId || "plan-monthly"
+            : purpose === "paid_subscription"
+              ? orderPlanId || "member-monthly"
+              : orderPlanId
+        ) as AdsPlanId;
+
+        // Authoritative pricing check derived strictly from server order record
         let expectedAmount = 6.0;
         let subDurationDays = 30;
         if (purpose === "ads_promotion") {
           const plan = PRICING_CONFIG.ADS_PROMOTION[planId as AdsPlanId];
-          expectedAmount = plan ? plan.price : 300.0;
+          if (!plan) {
+            return jsonResponse(
+              {
+                verified: false,
+                error: "Invalid ads promotion plan in order record.",
+              },
+              400,
+            );
+          }
+          expectedAmount = plan.price;
         } else if (purpose === "paid_subscription") {
           let planFound = false;
           if (pool) {
@@ -2460,14 +2755,33 @@ async function dispatchApiRequest(
             const plan = (
               PRICING_CONFIG.SUBSCRIBER_PLANS as Record<string, { price: number; days: number }>
             )[planId];
-            expectedAmount = plan ? plan.price : 49.0;
-            subDurationDays = plan ? plan.days : 30;
+            if (!plan) {
+              return jsonResponse(
+                {
+                  verified: false,
+                  error: "Invalid subscriber plan in order record.",
+                },
+                400,
+              );
+            }
+            expectedAmount = plan.price;
+            subDurationDays = plan.days;
           }
         } else if (purpose !== "premium_video_upload") {
           return jsonResponse(
             {
               verified: false,
-              error: "Unsupported payment purpose.",
+              error: "Unsupported payment purpose in order record.",
+            },
+            400,
+          );
+        }
+
+        if (Math.abs(Number(orderRecord.amount) - expectedAmount) > 0.01) {
+          return jsonResponse(
+            {
+              verified: false,
+              error: "Payment order amount does not match authoritative pricing.",
             },
             400,
           );
@@ -2483,11 +2797,186 @@ async function dispatchApiRequest(
           );
         }
 
+        // Order fast-path idempotency / conflict check before hitting remote gateway
+        if (orderRecord.status === "paid") {
+          if (orderRecord.payment_id && String(orderRecord.payment_id) !== paymentId) {
+            return jsonResponse(
+              {
+                verified: false,
+                paymentId,
+                orderId,
+                error: "Conflict: Payment order was already settled with a different payment ID.",
+              },
+              409,
+            );
+          }
+        }
+
+        // Anti-reuse & video ownership pre-checks
+        if (!pool) {
+          const conflictingOrder = (store.paymentOrders || []).find(
+            (o) =>
+              o.payment_id === paymentId &&
+              (o.order_id !== orderId ||
+                String(o.user_id || "")
+                  .trim()
+                  .toUpperCase() !== uploaderId),
+          );
+          if (conflictingOrder) {
+            return jsonResponse(
+              {
+                verified: false,
+                paymentId,
+                orderId,
+                error:
+                  "Conflict: Payment ID has already been used for a different order, video, or user.",
+              },
+              409,
+            );
+          }
+
+          const existingTxs = await getPersistentTransactions();
+          const existingPersistentTx = existingTxs.find((t) => t.paymentId === paymentId);
+          if (existingPersistentTx) {
+            const expectedTxType =
+              purpose === "premium_video_upload" ? "premium_upload" : purpose;
+            const orderMismatch =
+              Boolean(existingPersistentTx.orderId) && existingPersistentTx.orderId !== orderId;
+            const userMismatch =
+              String(existingPersistentTx.userId || "")
+                .trim()
+                .toUpperCase() !== uploaderId;
+            const vidMismatch =
+              Boolean(videoId) &&
+              Boolean(existingPersistentTx.videoId) &&
+              existingPersistentTx.videoId !== videoId;
+            if (
+              orderMismatch ||
+              userMismatch ||
+              vidMismatch ||
+              existingPersistentTx.transactionType !== expectedTxType
+            ) {
+              return jsonResponse(
+                {
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  error:
+                    "Conflict: Payment ID has already been used for a different order, video, or user.",
+                },
+                409,
+              );
+            }
+          }
+
+          if (purpose === "premium_video_upload" && videoId) {
+            const reusedVid = (store.videos || []).find(
+              (v) => v.payment_id === paymentId && v.id !== videoId,
+            );
+            if (reusedVid) {
+              return jsonResponse(
+                {
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  error: "Conflict: Payment ID is already linked to another video.",
+                },
+                409,
+              );
+            }
+          }
+        }
+
+        // 4. VIDEO OWNERSHIP & ELIGIBILITY VERIFICATION
+        if (videoId) {
+          if (pool) {
+            const [vRows]: any = await pool.query(
+              `SELECT id, user_id, video_type, payment_status FROM uploaded_videos WHERE id = ? LIMIT 1`,
+              [videoId],
+            );
+            if (vRows && vRows.length > 0) {
+              const vid = vRows[0];
+              if (
+                String(vid.user_id || "")
+                  .trim()
+                  .toUpperCase() !== uploaderId &&
+                !isAuthAdmin
+              ) {
+                return jsonResponse(
+                  {
+                    verified: false,
+                    error: "Unauthorized: Video record does not match the authenticated payer.",
+                  },
+                  403,
+                );
+              }
+              if (
+                purpose === "premium_video_upload" &&
+                String(vid.video_type).toLowerCase() === "free"
+              ) {
+                return jsonResponse(
+                  {
+                    verified: false,
+                    error: "Free video uploads do not require payment or commission.",
+                  },
+                  400,
+                );
+              }
+            } else if (purpose === "ads_promotion") {
+              return jsonResponse(
+                {
+                  verified: false,
+                  error: "Video not found for ads promotion.",
+                },
+                404,
+              );
+            }
+          } else {
+            const vid = store.videos.find((v) => v.id === videoId);
+            if (vid) {
+              if (vid.user_id.toUpperCase() !== uploaderId && !isAuthAdmin) {
+                return jsonResponse(
+                  {
+                    verified: false,
+                    error: "Unauthorized: Video record does not match the authenticated payer.",
+                  },
+                  403,
+                );
+              }
+              if (purpose === "premium_video_upload" && vid.video_type === "free") {
+                return jsonResponse(
+                  {
+                    verified: false,
+                    error: "Free video uploads do not require payment or commission.",
+                  },
+                  400,
+                );
+              }
+            } else if (purpose === "ads_promotion") {
+              return jsonResponse(
+                {
+                  verified: false,
+                  error: "Video not found for ads promotion.",
+                },
+                404,
+              );
+            }
+          }
+        } else if (purpose === "ads_promotion") {
+          return jsonResponse(
+            {
+              verified: false,
+              error: "Video ID is required for ads promotion.",
+            },
+            400,
+          );
+        }
+
         const expectedPaise = Math.round(expectedAmount * 100);
 
         // Remote Razorpay API confirmation (status, order_id, amount in paise)
         const skipRemote = Boolean(
-          env?.["RAZORPAY_SKIP_REMOTE_CHECK"] || process.env["RAZORPAY_SKIP_REMOTE_CHECK"],
+          readEnv("RAZORPAY_SKIP_REMOTE_CHECK"),
         );
 
         if (keyId && !skipRemote) {
@@ -2605,153 +3094,68 @@ async function dispatchApiRequest(
           }
         }
 
-        // 2. AUTHORIZATION & OWNERSHIP VERIFICATION
-        const authUser = await getAuthUserFromRequest(request, store, pool);
-        let uploaderId = requestedUserId;
-        if (authUser) {
-          if (requestedUserId && requestedUserId.toUpperCase() !== authUser.user_id.toUpperCase()) {
-            if (authUser.role !== "admin") {
-              return jsonResponse(
-                {
-                  verified: false,
-                  error: "Unauthorized: You cannot verify payments on behalf of another user.",
-                },
-                403,
-              );
-            }
-            uploaderId = requestedUserId;
-          } else {
-            uploaderId = authUser.user_id;
-          }
-        } else {
-          if (!uploaderId) {
-            return jsonResponse(
-              {
-                verified: false,
-                error: "User identity required for payment processing.",
-              },
-              401,
-            );
-          }
-        }
-
-        // Verify pre-checkout order ownership
-        let orderOwnerId: string | null = null;
-        if (pool) {
-          try {
-            const [poRows]: any = await pool.query(
-              `SELECT user_id, purpose, amount, plan_id FROM payment_orders WHERE order_id = ? LIMIT 1`,
-              [orderId],
-            );
-            if (poRows && poRows.length > 0) {
-              orderOwnerId = poRows[0].user_id;
-            }
-          } catch (_e) {
-            // Ignore if payment_orders table is not yet migrated
-          }
-        }
-        if (!orderOwnerId && store.paymentOrders) {
-          const po = store.paymentOrders.find((o) => o.order_id === orderId);
-          if (po) orderOwnerId = po.user_id;
-        }
-
-        if (orderOwnerId) {
-          if (
-            authUser &&
-            authUser.user_id.toUpperCase() !== orderOwnerId.toUpperCase() &&
-            authUser.role !== "admin"
-          ) {
-            return jsonResponse(
-              {
-                verified: false,
-                error: "Unauthorized: Payment order does not belong to the authenticated user.",
-              },
-              403,
-            );
-          }
-          if (
-            uploaderId &&
-            uploaderId.toUpperCase() !== orderOwnerId.toUpperCase() &&
-            authUser?.role !== "admin"
-          ) {
-            return jsonResponse(
-              {
-                verified: false,
-                error: "Unauthorized: Payment order does not belong to the requested user.",
-              },
-              403,
-            );
-          }
-        }
-
-        // 3. SET FINAL AUTHORITATIVE AMOUNT
+        // 5. SET FINAL AUTHORITATIVE AMOUNT
         const amount = expectedAmount;
 
-        // 4. VIDEO OWNERSHIP & ELIGIBILITY VERIFICATION
-        if (videoId) {
-          if (pool) {
-            try {
-              const [vRows]: any = await pool.query(
-                `SELECT id, user_id, video_type, payment_status FROM uploaded_videos WHERE id = ? LIMIT 1`,
-                [videoId],
-              );
-              if (vRows && vRows.length > 0) {
-                const vid = vRows[0];
-                if (vid.user_id.toUpperCase() !== uploaderId.toUpperCase()) {
-                  return jsonResponse(
-                    {
-                      verified: false,
-                      error: "Video record does not match the authenticated payer.",
-                    },
-                    403,
-                  );
-                }
-                if (
-                  purpose === "premium_video_upload" &&
-                  String(vid.video_type).toLowerCase() === "free"
-                ) {
-                  return jsonResponse(
-                    {
-                      verified: false,
-                      error: "Free video uploads do not require payment or commission.",
-                    },
-                    400,
-                  );
-                }
-              }
-            } catch (_e) {
-              // Ignore video lookup check if table optional
-            }
-          } else {
-            const vid = store.videos.find((v) => v.id === videoId);
-            if (vid) {
-              if (vid.user_id.toUpperCase() !== uploaderId.toUpperCase()) {
-                return jsonResponse(
-                  {
-                    verified: false,
-                    error: "Video record does not match the authenticated payer.",
-                  },
-                  403,
-                );
-              }
-              if (purpose === "premium_video_upload" && vid.video_type === "free") {
-                return jsonResponse(
-                  {
-                    verified: false,
-                    error: "Free video uploads do not require payment or commission.",
-                  },
-                  400,
-                );
-              }
-            }
-          }
-        }
-
-        // 5. ATOMIC RECORDING & DEDUPLICATION (MySQL or Fallback Store)
+        // 6. ATOMIC RECORDING & DEDUPLICATION (MySQL or Fallback Store)
         if (pool) {
+          let hasPromoPaymentIdCol = false;
+          let hasPromoAppliedAtCol = false;
+          try {
+            const [colRows]: any = await pool.query(
+              `SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+               WHERE TABLE_SCHEMA = DATABASE()
+                 AND ((TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME = 'promotion_payment_id')
+                   OR (TABLE_NAME = 'payment_orders' AND COLUMN_NAME = 'promotion_applied_at'))`,
+            );
+            for (const colRow of colRows || []) {
+              const tbl = String(colRow.TABLE_NAME || "").toLowerCase();
+              const col = String(colRow.COLUMN_NAME || "").toLowerCase();
+              if (tbl === "uploaded_videos" && col === "promotion_payment_id") {
+                hasPromoPaymentIdCol = true;
+              } else if (tbl === "payment_orders" && col === "promotion_applied_at") {
+                hasPromoAppliedAtCol = true;
+              }
+            }
+          } catch (_eCols) {
+            // Keep false defaults if schema metadata check fails
+          }
+
           const conn = await pool.getConnection();
           try {
             await conn.beginTransaction();
+
+            const [lockedPoRows]: any = await conn.query(
+              `SELECT * FROM payment_orders WHERE order_id = ? FOR UPDATE`,
+              [orderId],
+            );
+            const lockedOrder = lockedPoRows?.[0];
+            if (!lockedOrder) {
+              await conn.rollback();
+              return jsonResponse(
+                {
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  error:
+                    "Payment order not found. Please initiate checkout through a valid server order.",
+                },
+                404,
+              );
+            }
+
+            if (lockedOrder.status === "paid" && lockedOrder.payment_id && lockedOrder.payment_id !== paymentId) {
+              await conn.rollback();
+              return jsonResponse(
+                {
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  error: "Conflict: Payment order was already settled with a different payment ID.",
+                },
+                409,
+              );
+            }
 
             // Check duplicate under row lock
             const [existingRows]: any = await conn.query(
@@ -2759,8 +3163,37 @@ async function dispatchApiRequest(
               [paymentId],
             );
             if (existingRows && existingRows.length > 0) {
-              await conn.rollback();
               const existingTx = existingRows[0];
+              const txOrderMismatch =
+                Boolean(existingTx.order_id) && String(existingTx.order_id) !== orderId;
+              const txUserMismatch =
+                String(existingTx.user_id || "")
+                  .trim()
+                  .toUpperCase() !== uploaderId;
+              const txVideoMismatch =
+                Boolean(videoId) &&
+                Boolean(existingTx.video_id) &&
+                String(existingTx.video_id) !== videoId;
+              if (
+                txOrderMismatch ||
+                txUserMismatch ||
+                txVideoMismatch ||
+                String(existingTx.purpose) !== purpose
+              ) {
+                await conn.rollback();
+                return jsonResponse(
+                  {
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    error:
+                      "Conflict: Payment ID has already been used for a different order, video, or user.",
+                  },
+                  409,
+                );
+              }
+
+              await conn.rollback();
               if (existingTx.purpose === "paid_subscription") {
                 let existingSub: any = null;
                 try {
@@ -2819,6 +3252,72 @@ async function dispatchApiRequest(
                 duplicate: true,
                 message: "Payment already verified and credited previously (idempotent duplicate).",
               });
+            }
+
+            let lockedVideoRow: any = null;
+            if (videoId) {
+              const promoSelect = hasPromoPaymentIdCol ? ", promotion_payment_id" : "";
+              const [vidLockRows]: any = await conn.query(
+                `SELECT id, user_id, video_type, payment_status, payment_id${promoSelect} FROM uploaded_videos WHERE id = ? FOR UPDATE`,
+                [videoId],
+              );
+              lockedVideoRow = vidLockRows?.[0] || null;
+              if (lockedVideoRow) {
+                if (
+                  String(lockedVideoRow.user_id || "")
+                    .trim()
+                    .toUpperCase() !== uploaderId &&
+                  !isAuthAdmin
+                ) {
+                  await conn.rollback();
+                  return jsonResponse(
+                    {
+                      verified: false,
+                      error: "Unauthorized: Video record does not match the authenticated payer.",
+                    },
+                    403,
+                  );
+                }
+                if (
+                  purpose === "premium_video_upload" &&
+                  String(lockedVideoRow.video_type || "").toLowerCase() === "free"
+                ) {
+                  await conn.rollback();
+                  return jsonResponse(
+                    {
+                      verified: false,
+                      error: "Free video uploads do not require payment or commission.",
+                    },
+                    400,
+                  );
+                }
+              } else if (purpose === "ads_promotion") {
+                await conn.rollback();
+                return jsonResponse(
+                  {
+                    verified: false,
+                    error: "Video not found for ads promotion.",
+                  },
+                  404,
+                );
+              }
+
+              if (purpose === "premium_video_upload") {
+                const [reuseVidRows]: any = await conn.query(
+                  `SELECT id FROM uploaded_videos WHERE payment_id = ? AND id != ? LIMIT 1`,
+                  [paymentId, videoId],
+                );
+                if (reuseVidRows && reuseVidRows.length > 0) {
+                  await conn.rollback();
+                  return jsonResponse(
+                    {
+                      verified: false,
+                      error: "Conflict: Payment ID is already linked to another video.",
+                    },
+                    409,
+                  );
+                }
+              }
             }
 
             if (purpose === "paid_subscription") {
@@ -3271,35 +3770,79 @@ async function dispatchApiRequest(
               }
             }
 
-            // 4. Update uploaded_videos payment status & promotion activation
+            // 4. Update uploaded_videos payment status & idempotent promotion activation
+            let promotionAppliedNow = false;
             if (videoId) {
               if (purpose === "ads_promotion") {
-                const planDurations: Record<string, number> = {
-                  "plan-7-days": 7,
-                  "plan-15-days": 15,
-                  "plan-monthly": 30,
-                  "plan-yearly": 365,
-                };
-                const durationDays = planDurations[planId] || 30;
-                await conn.query(
-                  `UPDATE uploaded_videos 
-                   SET is_promoted = 1,
-                       promotion_plan = ?,
-                       promotion_expires_at = IF(
-                         promotion_expires_at IS NOT NULL AND promotion_expires_at > NOW(),
-                         DATE_ADD(promotion_expires_at, INTERVAL ? DAY),
-                         DATE_ADD(NOW(), INTERVAL ? DAY)
-                       ),
-                       updated_at = NOW()
-                   WHERE id = ?`,
-                  [planId, durationDays, durationDays, videoId],
-                );
+                const alreadyAppliedOrder =
+                  hasPromoAppliedAtCol && Boolean(lockedOrder.promotion_applied_at);
+                const alreadyAppliedVideo =
+                  hasPromoPaymentIdCol &&
+                  lockedVideoRow &&
+                  String(lockedVideoRow.promotion_payment_id || "") === paymentId;
+
+                if (!alreadyAppliedOrder && !alreadyAppliedVideo) {
+                  const planDurations: Record<string, number> = {
+                    "plan-7-days": 7,
+                    "plan-15-days": 15,
+                    "plan-monthly": 30,
+                    "plan-yearly": 365,
+                  };
+                  const durationDays = planDurations[planId] || 30;
+                  if (hasPromoPaymentIdCol) {
+                    await conn.query(
+                      `UPDATE uploaded_videos 
+                       SET is_promoted = 1,
+                           promotion_plan = ?,
+                           promotion_expires_at = IF(
+                             promotion_expires_at IS NOT NULL AND promotion_expires_at > NOW(),
+                             DATE_ADD(promotion_expires_at, INTERVAL ? DAY),
+                             DATE_ADD(NOW(), INTERVAL ? DAY)
+                           ),
+                           promotion_payment_id = ?,
+                           updated_at = NOW()
+                       WHERE id = ?`,
+                      [planId, durationDays, durationDays, paymentId, videoId],
+                    );
+                  } else {
+                    await conn.query(
+                      `UPDATE uploaded_videos 
+                       SET is_promoted = 1,
+                           promotion_plan = ?,
+                           promotion_expires_at = IF(
+                             promotion_expires_at IS NOT NULL AND promotion_expires_at > NOW(),
+                             DATE_ADD(promotion_expires_at, INTERVAL ? DAY),
+                             DATE_ADD(NOW(), INTERVAL ? DAY)
+                           ),
+                           updated_at = NOW()
+                       WHERE id = ?`,
+                      [planId, durationDays, durationDays, videoId],
+                    );
+                  }
+                  promotionAppliedNow = true;
+                }
               } else {
                 await conn.query(
                   `UPDATE uploaded_videos SET payment_status = 'paid', payment_id = ?, payment_amount = ?, updated_at = NOW() WHERE id = ?`,
                   [paymentId, amount, videoId],
                 );
               }
+            }
+
+            try {
+              if (purpose === "ads_promotion" && hasPromoAppliedAtCol && promotionAppliedNow) {
+                await conn.query(
+                  `UPDATE payment_orders SET status = 'paid', payment_id = ?, promotion_applied_at = NOW(), updated_at = NOW() WHERE order_id = ?`,
+                  [paymentId, orderId],
+                );
+              } else {
+                await conn.query(
+                  `UPDATE payment_orders SET status = 'paid', payment_id = ?, updated_at = NOW() WHERE order_id = ?`,
+                  [paymentId, orderId],
+                );
+              }
+            } catch (_ePoUpd) {
+              // Ignore optional order update error
             }
 
             await conn.commit();
@@ -3399,6 +3942,7 @@ async function dispatchApiRequest(
               adEarnings: Number(v.ad_earnings) || 0,
             }));
 
+          // Pass authoritative order planId (never trusting client payload overrides)
           const result = await verifyServerPayment(
             {
               orderId,
@@ -3409,11 +3953,7 @@ async function dispatchApiRequest(
               videoId,
               purpose: purpose as any,
               referrerUserId: verifiedReferrerId,
-              metadata:
-                payload.metadata ||
-                (payload.planId || payload.plan_id
-                  ? { planId: payload.planId || payload.plan_id }
-                  : undefined),
+              ...(planId ? { planId, metadata: { planId } } : {}),
             },
             storeEligibleVideos,
             verifiedReferrerId,
@@ -3427,6 +3967,7 @@ async function dispatchApiRequest(
               ? `TX_ADS_ADM_${result.paymentId}`
               : `TX_ADM_${result.paymentId}`;
           const isDuplicate = Boolean(
+            orderRecord.status === "paid" ||
             result.error?.includes("already") ||
             result.duplicate ||
             store.walletTransactions.some(
@@ -3700,34 +4241,42 @@ async function dispatchApiRequest(
             }
           }
 
-          // Update video payment status & promotion activation in store (only on initial verification, never on duplicate)
+          // Update video payment status & idempotent promotion activation in store
+          const nowIso = new Date().toISOString();
           if (result.verified && !isDuplicate && videoId) {
             const v = store.videos.find((vid) => vid.id === videoId);
             if (v) {
               if (purpose === "ads_promotion") {
-                const planDurations: Record<string, number> = {
-                  "plan-7-days": 7,
-                  "plan-15-days": 15,
-                  "plan-monthly": 30,
-                  "plan-yearly": 365,
-                };
-                const durationDays = planDurations[planId] || 30;
-                v.is_promoted = true;
-                v.promotion_plan = planId;
-                const now = Date.now();
-                const currentExpiry = v.promotion_expires_at
-                  ? new Date(v.promotion_expires_at).getTime()
-                  : 0;
-                const baseTime = currentExpiry > now ? currentExpiry : now;
-                v.promotion_expires_at = new Date(
-                  baseTime + durationDays * 24 * 60 * 60 * 1000,
-                ).toISOString();
+                const alreadyApplied =
+                  Boolean(orderRecord.promotion_applied_at) ||
+                  v.promotion_payment_id === paymentId;
+                if (!alreadyApplied) {
+                  const planDurations: Record<string, number> = {
+                    "plan-7-days": 7,
+                    "plan-15-days": 15,
+                    "plan-monthly": 30,
+                    "plan-yearly": 365,
+                  };
+                  const durationDays = planDurations[planId] || 30;
+                  v.is_promoted = true;
+                  v.promotion_plan = planId;
+                  const now = Date.now();
+                  const currentExpiry = v.promotion_expires_at
+                    ? new Date(v.promotion_expires_at).getTime()
+                    : 0;
+                  const baseTime = currentExpiry > now ? currentExpiry : now;
+                  v.promotion_expires_at = new Date(
+                    baseTime + durationDays * 24 * 60 * 60 * 1000,
+                  ).toISOString();
+                  v.promotion_payment_id = paymentId;
+                  orderRecord.promotion_applied_at = nowIso;
+                }
               } else {
                 v.payment_status = "paid";
                 v.payment_id = paymentId;
                 v.payment_amount = amount;
               }
-              v.updated_at = new Date().toISOString();
+              v.updated_at = nowIso;
             }
           }
 
@@ -3758,13 +4307,13 @@ async function dispatchApiRequest(
             } else {
               store.userSubscriptions.unshift(subStoreRecord);
             }
-            if (store.paymentOrders) {
-              const po = store.paymentOrders.find((o) => o.order_id === orderId);
-              if (po) {
-                po.status = "paid";
-                po.updated_at = new Date().toISOString();
-              }
-            }
+          }
+
+          // Mark order as paid across all payment purposes
+          if (result.verified) {
+            orderRecord.status = "paid";
+            orderRecord.payment_id = paymentId;
+            orderRecord.updated_at = nowIso;
           }
 
           saveStore(store, env);

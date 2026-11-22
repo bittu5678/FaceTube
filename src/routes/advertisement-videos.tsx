@@ -27,6 +27,7 @@ import { api } from "@/lib/api";
 import { Skeleton } from "@/components/ui/skeleton";
 import { resolveVideoThumbnail, SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
 import { resolveMediaUrl } from "@/lib/media-url";
+import { getVideoBadgeLabels } from "@/lib/video-service";
 
 export const Route = createFileRoute("/advertisement-videos")({
   head: () => ({
@@ -625,6 +626,7 @@ function AdvertisementVideosPage() {
                 // Engagement rate
                 const engagementPercent =
                   ad.views > 0 ? ((ad.likes / ad.views) * 100).toFixed(2) + "%" : "0.00%";
+                const adLabels = getVideoBadgeLabels(ad);
 
                 return (
                   <div
@@ -686,7 +688,7 @@ function AdvertisementVideosPage() {
                         </div>
 
                         {/* Creator Attribution with ChannelAvatar */}
-                        <div className="flex items-center gap-2 text-[11px] text-muted-foreground pt-1 border-t border-border/40">
+                        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground pt-1 border-t border-border/40 min-w-0">
                           <ChannelAvatar
                             src={ad.channelLogoUrl}
                             name={ad.channelName || ad.creatorName}
@@ -697,6 +699,11 @@ function AdvertisementVideosPage() {
                           <span className="truncate font-semibold text-foreground">
                             {ad.channelName || ad.creatorName}
                           </span>
+                          {adLabels.showSponsorLabel && (
+                            <span className="inline-flex shrink-0 items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                              Sponsored
+                            </span>
+                          )}
                           {isAdmin && adminScope === "all" && ad.userId && (
                             <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
                               ({ad.userId})

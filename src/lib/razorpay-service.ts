@@ -508,6 +508,7 @@ export async function initiateAdsPromotionPayment(params: {
           paymentId,
           signature,
           userId: params.userId,
+          videoId: params.videoId,
           purpose: "ads_promotion",
           planId: params.planId,
           referrerUserId: params.directReferrerId ?? null,
