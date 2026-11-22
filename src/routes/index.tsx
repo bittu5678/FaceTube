@@ -11,26 +11,19 @@ import { ImageCard } from "@/components/videohub/ImageCard";
 import { ShortsShelf } from "@/components/videohub/ShortsShelf";
 import { BottomNav } from "@/components/videohub/BottomNav";
 import { Footer } from "@/components/videohub/Footer";
-import {
-  allVideos,
-  categories,
-  creators,
-  recent,
-  recommended,
-  trending,
-  type Video,
-} from "@/data/videos";
+import { categories, type Video } from "@/data/videos";
 import {
   fetchUploadedImages,
   interleaveFeedWithImages,
   IMAGE_FEED_INTERVAL,
   type UploadedImage,
 } from "@/lib/image-service";
-import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
+import type { ShortItem } from "@/data/shorts";
 import {
+  buildPublicHomeSections,
   fetchUploadedVideos,
-  convertUploadedToCatalogVideo,
   convertVideoToShortItem,
+  isPubliclyCacheableVideo,
   isShortVideo,
   getAvailableCategories,
   deriveCreatorsFromVideos,
@@ -100,6 +93,7 @@ function Index() {
   const [query, setQuery] = useState(searchParams.q || "");
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
+  const [uploadedHomeShorts, setUploadedHomeShorts] = useState<UploadedVideo[]>([]);
   const [dynamicCategories, setDynamicCategories] = useState<string[]>(categories);
 
   useEffect(() => {
@@ -131,19 +125,33 @@ function Index() {
 
     fetchUploadedImages()
       .then((imgs) => {
-        if (isMounted && imgs && imgs.length > 0) {
-          setUploadedImages(imgs);
+        if (isMounted) {
+          setUploadedImages(Array.isArray(imgs) ? imgs : []);
         }
       })
       .catch((err) => console.error("Error loading feed images:", err));
 
     fetchUploadedVideos()
       .then((vids) => {
-        if (isMounted && vids && vids.length > 0) {
-          setUploadedVideos(vids);
+        if (isMounted) {
+          setUploadedVideos(Array.isArray(vids) ? vids : []);
         }
       })
-      .catch((err) => console.error("Error loading feed videos:", err));
+      .catch((err) => {
+        console.error("Error loading feed videos:", err);
+        if (isMounted) setUploadedVideos([]);
+      });
+
+    fetchUploadedVideos({ contentType: "short" })
+      .then((vids) => {
+        if (isMounted) {
+          setUploadedHomeShorts(Array.isArray(vids) ? vids : []);
+        }
+      })
+      .catch((err) => {
+        console.error("Error loading home shorts:", err);
+        if (isMounted) setUploadedHomeShorts([]);
+      });
 
     const loadHomeCategories = () => {
       getAvailableCategories()
@@ -173,27 +181,12 @@ function Index() {
     };
   }, []);
 
-  // Combined video catalog: uploaded videos from DB + baseline static catalog
-  const allCombinedVideos: Video[] = useMemo(() => {
-    const fromDb = uploadedVideos.map(convertUploadedToCatalogVideo);
-    const seen = new Set<string>();
-    const list: Video[] = [];
+  const homeSections = useMemo(
+    () => buildPublicHomeSections(uploadedVideos, uploadedHomeShorts),
+    [uploadedVideos, uploadedHomeShorts],
+  );
 
-    // Promoted and newly uploaded videos first
-    for (const v of fromDb) {
-      if (!seen.has(v.id)) {
-        seen.add(v.id);
-        list.push(v);
-      }
-    }
-    for (const v of allVideos) {
-      if (!seen.has(v.id)) {
-        seen.add(v.id);
-        list.push(v);
-      }
-    }
-    return list;
-  }, [uploadedVideos]);
+  const allCombinedVideos: Video[] = homeSections.allCombinedVideos;
 
   const isFiltering = query.trim().length > 0 || activeCategory !== "All";
 
@@ -217,32 +210,22 @@ function Index() {
     });
   }, [allCombinedVideos, query, activeCategory]);
 
-  const recommendedCombined = useMemo(() => {
-    // Put uploaded videos at front of recommended
-    const fromDb = uploadedVideos.map(convertUploadedToCatalogVideo);
-    return [...fromDb, ...recommended];
-  }, [uploadedVideos]);
+  const recommendedCombined = homeSections.recommendedVideos;
+  const trendingVideos = homeSections.trendingVideos;
+  const recentVideos = homeSections.recentVideos;
 
   const homeShorts: ShortItem[] = useMemo(() => {
-    const uploadedShortItems = uploadedVideos
-      .filter((v) => isShortVideo({ contentType: v.contentType, duration: v.duration }))
-      .map(convertVideoToShortItem);
     const seen = new Set<string>();
     const list: ShortItem[] = [];
-    for (const s of uploadedShortItems) {
-      if (!seen.has(s.id)) {
-        seen.add(s.id);
-        list.push(s);
-      }
-    }
-    for (const s of SHORTS_LIST) {
-      if (!seen.has(s.id)) {
-        seen.add(s.id);
-        list.push(s);
-      }
+    for (const v of uploadedHomeShorts) {
+      if (!v || !v.id || seen.has(v.id)) continue;
+      if (!isPubliclyCacheableVideo(v)) continue;
+      if (!isShortVideo({ contentType: v.contentType, duration: v.duration })) continue;
+      seen.add(v.id);
+      list.push(convertVideoToShortItem(v));
     }
     return list;
-  }, [uploadedVideos]);
+  }, [uploadedHomeShorts]);
 
   // Requirement 2: Interleave feed with images after every 5 videos
   const interleavedRecommended = useMemo(() => {
@@ -250,44 +233,28 @@ function Index() {
   }, [recommendedCombined, uploadedImages]);
 
   const interleavedTrending = useMemo(() => {
-    return interleaveFeedWithImages(trending, uploadedImages, IMAGE_FEED_INTERVAL);
-  }, [uploadedImages]);
+    return interleaveFeedWithImages(trendingVideos, uploadedImages, IMAGE_FEED_INTERVAL);
+  }, [trendingVideos, uploadedImages]);
 
   const interleavedRecent = useMemo(() => {
-    return interleaveFeedWithImages(recent, uploadedImages, IMAGE_FEED_INTERVAL);
-  }, [uploadedImages]);
+    return interleaveFeedWithImages(recentVideos, uploadedImages, IMAGE_FEED_INTERVAL);
+  }, [recentVideos, uploadedImages]);
 
   const interleavedFiltered = useMemo(() => {
     return interleaveFeedWithImages(results, uploadedImages, IMAGE_FEED_INTERVAL);
   }, [results, uploadedImages]);
 
   const popularCreators = useMemo(() => {
-    const liveCreators = deriveCreatorsFromVideos(uploadedVideos).slice(0, 6);
-    if (liveCreators.length > 0) {
-      return liveCreators.map((c) => ({
-        key: c.key,
-        name: c.name,
-        initials: c.initials,
-        channelLogoUrl: c.channelLogoUrl,
-        subtitle: `${c.uploadCount} ${c.uploadCount === 1 ? "video" : "videos"}`,
-      }));
-    }
-
-    return creators.map((c) => {
-      const creatorMeta = c as typeof c & {
-        channelLogoUrl?: string | undefined;
-        channel_logo_url?: string | undefined;
-        channelName?: string | undefined;
-        channel_name?: string | undefined;
-      };
-      return {
-        key: c.name,
-        name: creatorMeta.channelName || creatorMeta.channel_name || c.name,
-        initials: c.initials,
-        channelLogoUrl: creatorMeta.channelLogoUrl || creatorMeta.channel_logo_url,
-        subtitle: c.subs,
-      };
-    });
+    const liveCreators = deriveCreatorsFromVideos(
+      uploadedVideos.filter(isPubliclyCacheableVideo),
+    ).slice(0, 6);
+    return liveCreators.map((c) => ({
+      key: c.key,
+      name: c.name,
+      initials: c.initials,
+      channelLogoUrl: c.channelLogoUrl,
+      subtitle: `${c.uploadCount} ${c.uploadCount === 1 ? "video" : "videos"}`,
+    }));
   }, [uploadedVideos]);
 
   return (

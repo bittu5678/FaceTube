@@ -270,7 +270,10 @@ export async function recordNewImageUpload(data: {
   effect?: string | undefined;
   music?: SelectedImageMusic | undefined;
 }): Promise<UploadedImage> {
-  const normUserId = data.userId.trim().toUpperCase();
+  const normUserId = (data.userId || "").trim().toUpperCase();
+  if (!normUserId) {
+    throw new Error("Authentication required. Please log in to upload images.");
+  }
   const id = `img-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
   const now = new Date().toISOString();
 

@@ -659,7 +659,7 @@ describe("Phase 2B Step 3B: Secure Video Read Endpoints (list, get, counts)", ()
     assert.equal(ownerCounts.premiumShort, basePub.premiumShort + 1);
     assert.equal(ownerCounts.totalUploaded, basePub.totalUploaded + 3);
 
-    // Admin counts without include_blocked matches non-blocked total; with include_blocked adds blocked (+1 freeShort)
+    // Admin counts without include_blocked MUST match public eligible counts; with include_blocked=1 returns full moderation totals (+1 blocked freeShort)
     const adminNoBlkRes = await handleApiRequest(
       new Request(`http://localhost:3000/api/videos/counts?userId=${alex.userId}`, {
         method: "GET",
@@ -667,7 +667,11 @@ describe("Phase 2B Step 3B: Secure Video Read Endpoints (list, get, counts)", ()
       }),
     );
     const adminNoBlk = (await adminNoBlkRes!.json()).counts;
-    assert.equal(adminNoBlk.totalUploaded, ownerCounts.totalUploaded);
+    assert.deepEqual(
+      adminNoBlk,
+      basePub,
+      "Admin counts without include_blocked must enforce public visibility/payment/block filters",
+    );
 
     const adminWithBlkRes = await handleApiRequest(
       new Request(
@@ -880,14 +884,16 @@ describe("Phase 2B Step 3B: Secure Video Read Endpoints (list, get, counts)", ()
       );
     }
 
-    // list.php parity
+    // list.php parity (Step 3D-A: Admin isolation & fail-closed visibility)
     assert.match(listPhp, /include_blocked/);
     assert.match(listPhp, /includeBlocked/);
     assert.match(listPhp, /COALESCE\(v\.is_blocked, 0\) = 0/);
     assert.match(listPhp, /COALESCE\(NULLIF\(v\.visibility, ''\), 'public'\) = 'public'/);
     assert.match(listPhp, /'visibility'\s*=>\s*\$visibility/);
+    assert.match(listPhp, /if\s*\(\s*!\$isOwnerFilter\s*&&\s*!\(\$isAdmin\s*&&\s*\$includeBlocked\)\s*\)/);
+    assert.match(listPhp, /\$visibility\s*=\s*'private'/);
 
-    // get.php parity: blocked + private + unpaid checks BEFORE view increment
+    // get.php parity: blocked + private + unpaid checks BEFORE view increment + fail-closed visibility
     const blockedCheckIdx = getPhp.indexOf("!empty($row['is_blocked'])");
     const privateCheckIdx = getPhp.indexOf("$visibility === 'private'");
     const paymentCheckIdx = getPhp.indexOf("!$isPaymentEligible");
@@ -908,12 +914,449 @@ describe("Phase 2B Step 3B: Secure Video Read Endpoints (list, get, counts)", ()
       "get.php must check payment eligibility before incrementing views",
     );
     assert.match(getPhp, /'visibility'\s*=>\s*\$visibility/);
+    assert.match(getPhp, /\$visibility\s*=\s*'private'/);
 
-    // counts.php parity: excludes unpaid premium, private, unlisted, blocked; supports include_blocked/includeBlocked
+    // counts.php parity: excludes unpaid premium, private, unlisted, blocked; supports include_blocked/includeBlocked; isolates Admin public counts
     assert.match(countsPhp, /include_blocked/);
     assert.match(countsPhp, /includeBlocked/);
     assert.match(countsPhp, /COALESCE\(is_blocked, 0\) = 0/);
     assert.match(countsPhp, /COALESCE\(NULLIF\(visibility, ''\), 'public'\) = 'public'/);
     assert.match(countsPhp, /video_type = 'premium' AND payment_status = 'paid'/);
+    assert.match(
+      countsPhp,
+      /if\s*\(\s*!\$isOwnerCounts\s*&&\s*!\(\$isAdmin\s*&&\s*\$includeBlocked\)\s*\)/,
+    );
+  });
+
+  it("8. Step 3D-A: Logged-in Admin receives only eligible public videos on normal feeds/counts while preserving include_blocked=1 and /api/admin/videos moderation", async () => {
+    const alex = await loginAs("alex@facetube.com", "password123");
+    const admin = await loginAs("admin@facetube.com", "password123");
+
+    await createVideo(alex.token, {
+      id: "vid-3da-pub-free",
+      title: "3DA Public Free",
+      video_url: "https://example.com/3da-pub-free.mp4",
+      video_type: "free",
+      content_type: "long",
+      visibility: "public",
+    });
+
+    const sponsorPayId = await createVerifiedSponsorPayment({
+      token: alex.token,
+      userId: alex.userId,
+      videoId: "vid-3da-pub-paid-sponsor",
+    });
+    await createVideo(alex.token, {
+      id: "vid-3da-pub-paid-sponsor",
+      title: "3DA Public Paid Sponsor",
+      video_url: "https://example.com/3da-paid.mp4",
+      video_type: "premium",
+      content_type: "short",
+      visibility: "public",
+      payment_id: sponsorPayId,
+      payment_status: "paid",
+      payment_amount: 6,
+    });
+
+    await createVideo(alex.token, {
+      id: "vid-3da-priv",
+      title: "3DA Private",
+      video_url: "https://example.com/3da-priv.mp4",
+      video_type: "free",
+      content_type: "long",
+      visibility: "private",
+    });
+    await createVideo(alex.token, {
+      id: "vid-3da-unl",
+      title: "3DA Unlisted",
+      video_url: "https://example.com/3da-unl.mp4",
+      video_type: "free",
+      content_type: "short",
+      visibility: "unlisted",
+    });
+    await createVideo(alex.token, {
+      id: "vid-3da-blk",
+      title: "3DA Blocked",
+      video_url: "https://example.com/3da-blk.mp4",
+      video_type: "free",
+      content_type: "long",
+      visibility: "public",
+    });
+    await setVideoBlocked(admin.token, "vid-3da-blk", true, "Moderation test");
+
+    injectStoreVideos([
+      {
+        id: "vid-3da-unpaid-pend",
+        user_id: alex.userId,
+        creator_name: "Alex Rivera",
+        title: "3DA Pending Sponsor",
+        video_url: "https://example.com/3da-pend.mp4",
+        video_type: "premium",
+        content_type: "long",
+        visibility: "public",
+        payment_status: "pending",
+      },
+      {
+        id: "vid-3da-unpaid-nr",
+        user_id: alex.userId,
+        creator_name: "Alex Rivera",
+        title: "3DA NotRequired Sponsor",
+        video_url: "https://example.com/3da-nr.mp4",
+        video_type: "premium",
+        content_type: "long",
+        visibility: "public",
+        payment_status: "not_required",
+      },
+    ]);
+
+    // 1) Admin calling normal public videos/list (all, userId=alex, videoType=free, videoType=premium) without include_blocked
+    for (const url of [
+      "http://localhost:3000/api/videos/list?limit=100",
+      `http://localhost:3000/api/videos/list?userId=${alex.userId}&limit=100`,
+    ]) {
+      const res = await handleApiRequest(
+        new Request(url, {
+          method: "GET",
+          headers: { Authorization: `Bearer ${admin.token}` },
+        }),
+      );
+      assert.equal(res?.status, 200);
+      const data = await res!.json();
+      const ids = new Set((data.videos as any[]).map((v) => v.id));
+
+      assert.equal(ids.has("vid-3da-pub-free"), true);
+      assert.equal(ids.has("vid-3da-pub-paid-sponsor"), true);
+      assert.equal(ids.has("vid-3da-priv"), false, `Admin normal feed must hide private (${url})`);
+      assert.equal(ids.has("vid-3da-unl"), false, `Admin normal feed must hide unlisted (${url})`);
+      assert.equal(ids.has("vid-3da-blk"), false, `Admin normal feed must hide blocked (${url})`);
+      assert.equal(
+        ids.has("vid-3da-unpaid-pend"),
+        false,
+        `Admin normal feed must hide pending Sponsor (${url})`,
+      );
+      assert.equal(
+        ids.has("vid-3da-unpaid-nr"),
+        false,
+        `Admin normal feed must hide not_required Sponsor (${url})`,
+      );
+    }
+
+    const adminPremRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/list?videoType=premium&limit=100", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${admin.token}` },
+      }),
+    );
+    const adminPremIds = new Set(((await adminPremRes!.json()).videos as any[]).map((v) => v.id));
+    assert.equal(adminPremIds.has("vid-3da-pub-paid-sponsor"), true);
+    assert.equal(adminPremIds.has("vid-3da-unpaid-pend"), false);
+    assert.equal(adminPremIds.has("vid-3da-unpaid-nr"), false);
+
+    // 2) Admin global videos/counts without include_blocked equals unauthenticated global counts
+    const pubCountsRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/counts", { method: "GET" }),
+    );
+    const adminCountsRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/counts", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${admin.token}` },
+      }),
+    );
+    assert.deepEqual((await adminCountsRes!.json()).counts, (await pubCountsRes!.json()).counts);
+
+    // 3) Admin moderation scope WITH include_blocked=1 and /api/admin/videos remain intact
+    const modListRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/list?include_blocked=1&limit=100", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${admin.token}` },
+      }),
+    );
+    assert.equal(modListRes?.status, 200);
+    const modIds = new Set(((await modListRes!.json()).videos as any[]).map((v) => v.id));
+    assert.equal(modIds.has("vid-3da-blk"), true);
+    assert.equal(modIds.has("vid-3da-priv"), true);
+    assert.equal(modIds.has("vid-3da-unl"), true);
+
+    const adminEndpointRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/admin/videos?limit=100", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${admin.token}` },
+      }),
+    );
+    assert.equal(adminEndpointRes?.status, 200);
+    const adminEndpointIds = new Set(
+      ((await adminEndpointRes!.json()).videos as any[]).map((v) => v.id),
+    );
+    assert.equal(adminEndpointIds.has("vid-3da-blk"), true);
+  });
+
+  it("9. Step 3D-A: Unknown or corrupted non-empty visibility values fail closed to private in list, counts, and get", async () => {
+    const alex = await loginAs("alex@facetube.com", "password123");
+    const maya = await loginAs("maya@facetube.com", "password123");
+    const admin = await loginAs("admin@facetube.com", "password123");
+
+    const baseCountsRes = await handleApiRequest(
+      new Request(`http://localhost:3000/api/videos/counts?userId=${alex.userId}`, {
+        method: "GET",
+      }),
+    );
+    const baseCounts = (await baseCountsRes!.json()).counts;
+
+    injectStoreVideos([
+      {
+        id: "vid-corrupt-vis-1",
+        user_id: alex.userId,
+        creator_name: "Alex Rivera",
+        title: "Corrupted Visibility Video",
+        video_url: "https://example.com/corrupt.mp4",
+        video_type: "free",
+        content_type: "long",
+        visibility: "draft_legacy_unknown",
+        payment_status: "not_required",
+        views: 0,
+      },
+    ]);
+
+    // Excluded from public, cross-user, and Admin normal list
+    for (const headers of [
+      {},
+      { Authorization: `Bearer ${maya.token}` },
+      { Authorization: `Bearer ${admin.token}` },
+    ]) {
+      const listRes = await handleApiRequest(
+        new Request(`http://localhost:3000/api/videos/list?userId=${alex.userId}&limit=100`, {
+          method: "GET",
+          headers,
+        }),
+      );
+      const ids = new Set(((await listRes!.json()).videos as any[]).map((v) => v.id));
+      assert.equal(ids.has("vid-corrupt-vis-1"), false);
+    }
+
+    // Excluded from public and Admin normal counts
+    const afterPubCounts = await handleApiRequest(
+      new Request(`http://localhost:3000/api/videos/counts?userId=${alex.userId}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${admin.token}` },
+      }),
+    );
+    assert.deepEqual((await afterPubCounts!.json()).counts, baseCounts);
+
+    // videos/get denies unauth (401) and non-owner (403) without incrementing views
+    const unauthGet = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/get?id=vid-corrupt-vis-1", { method: "GET" }),
+    );
+    assert.equal(unauthGet?.status, 401);
+
+    const otherGet = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/get?id=vid-corrupt-vis-1", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${maya.token}` },
+      }),
+    );
+    assert.equal(otherGet?.status, 403);
+
+    // Owner and Admin receive fail-closed visibility: "private", proving denied calls didn't increment views
+    const ownerGet = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/get?id=vid-corrupt-vis-1", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${alex.token}` },
+      }),
+    );
+    assert.equal(ownerGet?.status, 200);
+    const ownerVideo = (await ownerGet!.json()).video;
+    assert.equal(ownerVideo.visibility, "private");
+    assert.equal(ownerVideo.views, 1);
+
+    // Production MySQL path fail-closed check for corrupted visibility
+    const prodEnv = { APP_ENV: "production", NODE_ENV: "production" };
+    const prevDbHost = process.env["DB_HOST"];
+    const prevDbName = process.env["DB_NAME"];
+    const prevDbUser = process.env["DB_USER"];
+    process.env["DB_HOST"] = "127.0.0.1";
+    process.env["DB_NAME"] = "facetube_prod";
+    process.env["DB_USER"] = "prod_user";
+    let mysqlUpdates = 0;
+
+    setMysqlPoolForTesting({
+      query: async (sql: string, params: any[] = []) => {
+        if (sql.includes("FROM sessions") && sql.includes("JOIN users")) {
+          const tok = params[0];
+          const isAdm = tok === admin.token;
+          return [
+            [
+              {
+                token: tok,
+                user_id: isAdm ? admin.userId : alex.userId,
+                id: isAdm ? "adm-1" : "alex-1",
+                name: isAdm ? "Admin" : "Alex",
+                email: isAdm ? "admin@facetube.com" : "alex@facetube.com",
+                role: isAdm ? "admin" : "user",
+                expires_at: new Date(Date.now() + 3600_000).toISOString(),
+              },
+            ],
+            [],
+          ];
+        }
+        if (sql.includes("FROM uploaded_videos v") && sql.includes("WHERE v.id = ?")) {
+          return [
+            [
+              {
+                id: "mysql-corrupt-1",
+                user_id: "FT900431",
+                creator_name: "Maya Lin",
+                title: "MySQL Corrupt Vis",
+                video_url: "https://example.com/mc.mp4",
+                video_type: "free",
+                content_type: "long",
+                visibility: "corrupted_status",
+                payment_status: "not_required",
+                payment_amount: 0,
+                views: 4,
+                likes: 0,
+                is_blocked: 0,
+                is_promoted: 0,
+              },
+            ],
+            [],
+          ];
+        }
+        if (sql.includes("UPDATE uploaded_videos SET views = views + 1")) {
+          mysqlUpdates += 1;
+          return [{ affectedRows: 1 }, []];
+        }
+        return [[], []];
+      },
+    } as any);
+
+    try {
+      const mysqlDenied = await handleApiRequest(
+        new Request("https://facetube.online/api/videos/get?id=mysql-corrupt-1", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${alex.token}` },
+        }),
+        prodEnv,
+      );
+      assert.equal(mysqlDenied?.status, 403);
+      assert.equal(mysqlUpdates, 0);
+
+      const mysqlAdmin = await handleApiRequest(
+        new Request("https://facetube.online/api/videos/get?id=mysql-corrupt-1", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${admin.token}` },
+        }),
+        prodEnv,
+      );
+      assert.equal(mysqlAdmin?.status, 200);
+      assert.equal((await mysqlAdmin!.json()).video.visibility, "private");
+      assert.equal(mysqlUpdates, 1);
+    } finally {
+      setMysqlPoolForTesting(null);
+      if (prevDbHost === undefined) delete process.env["DB_HOST"];
+      else process.env["DB_HOST"] = prevDbHost;
+      if (prevDbName === undefined) delete process.env["DB_NAME"];
+      else process.env["DB_NAME"] = prevDbName;
+      if (prevDbUser === undefined) delete process.env["DB_USER"];
+      else process.env["DB_USER"] = prevDbUser;
+    }
+  });
+
+  it("10. Step 3D-A: Public Shorts query (?contentType=short) returns only eligible public Shorts and excludes long, private, unlisted, blocked, and unpaid Sponsor Shorts", async () => {
+    const alex = await loginAs("alex@facetube.com", "password123");
+    const admin = await loginAs("admin@facetube.com", "password123");
+
+    await createVideo(alex.token, {
+      id: "vid-short-pub-free",
+      title: "Public Free Short",
+      video_url: "https://example.com/s1.mp4",
+      video_type: "free",
+      content_type: "short",
+      visibility: "public",
+    });
+
+    const paidShortPayId = await createVerifiedSponsorPayment({
+      token: alex.token,
+      userId: alex.userId,
+      videoId: "vid-short-pub-paid-sponsor",
+    });
+    await createVideo(alex.token, {
+      id: "vid-short-pub-paid-sponsor",
+      title: "Public Paid Sponsor Short",
+      video_url: "https://example.com/s2.mp4",
+      video_type: "premium",
+      content_type: "short",
+      visibility: "public",
+      payment_id: paidShortPayId,
+      payment_status: "paid",
+      payment_amount: 6,
+    });
+
+    await createVideo(alex.token, {
+      id: "vid-long-pub-free",
+      title: "Public Free Long",
+      video_url: "https://example.com/l1.mp4",
+      video_type: "free",
+      content_type: "long",
+      visibility: "public",
+    });
+    await createVideo(alex.token, {
+      id: "vid-short-priv",
+      title: "Private Short",
+      video_url: "https://example.com/s3.mp4",
+      video_type: "free",
+      content_type: "short",
+      visibility: "private",
+    });
+    await createVideo(alex.token, {
+      id: "vid-short-unl",
+      title: "Unlisted Short",
+      video_url: "https://example.com/s4.mp4",
+      video_type: "free",
+      content_type: "short",
+      visibility: "unlisted",
+    });
+    await createVideo(alex.token, {
+      id: "vid-short-blk",
+      title: "Blocked Short",
+      video_url: "https://example.com/s5.mp4",
+      video_type: "free",
+      content_type: "short",
+      visibility: "public",
+    });
+    await setVideoBlocked(admin.token, "vid-short-blk", true);
+
+    injectStoreVideos([
+      {
+        id: "vid-short-unpaid-sponsor",
+        user_id: alex.userId,
+        creator_name: "Alex Rivera",
+        title: "Unpaid Sponsor Short",
+        video_url: "https://example.com/s6.mp4",
+        video_type: "premium",
+        content_type: "short",
+        visibility: "public",
+        payment_status: "not_required",
+      },
+    ]);
+
+    for (const headers of [{}, { Authorization: `Bearer ${admin.token}` }]) {
+      const shortsRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/list?contentType=short&limit=100", {
+          method: "GET",
+          headers,
+        }),
+      );
+      assert.equal(shortsRes?.status, 200);
+      const shorts = (await shortsRes!.json()).videos as any[];
+      const ids = new Set(shorts.map((v) => v.id));
+
+      assert.equal(ids.has("vid-short-pub-free"), true);
+      assert.equal(ids.has("vid-short-pub-paid-sponsor"), true);
+      assert.equal(ids.has("vid-long-pub-free"), false, "Long video must be excluded from Shorts");
+      assert.equal(ids.has("vid-short-priv"), false, "Private short must be excluded");
+      assert.equal(ids.has("vid-short-unl"), false, "Unlisted short must be excluded");
+      assert.equal(ids.has("vid-short-blk"), false, "Blocked short must be excluded");
+      assert.equal(ids.has("vid-short-unpaid-sponsor"), false, "Unpaid Sponsor short excluded");
+    }
   });
 });

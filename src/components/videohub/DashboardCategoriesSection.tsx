@@ -16,13 +16,14 @@ import {
   VIDEO_CATEGORIES,
   fetchUploadedVideos,
   convertUploadedToCatalogVideo,
+  isPubliclyCacheableVideo,
 } from "@/lib/video-service";
 import {
   buildDashboardCategoryCatalog,
   toCategorySlug,
   type ApiCategoryRecord,
 } from "@/lib/dashboard-categories";
-import { allVideos, type Video } from "@/data/videos";
+import type { Video } from "@/data/videos";
 import { VideoCard } from "./VideoCard";
 
 function getFeaturedCategoryMeta(name: string) {
@@ -129,12 +130,12 @@ export function DashboardCategoriesSection({
 
         const normTarget = trimmed.toLowerCase();
         const fromDb = uploaded
-          .filter((v) => (v.category || "General").trim().toLowerCase() === normTarget)
+          .filter(
+            (v) =>
+              isPubliclyCacheableVideo(v) &&
+              (v.category || "General").trim().toLowerCase() === normTarget,
+          )
           .map(convertUploadedToCatalogVideo);
-
-        const fromCatalog = allVideos.filter(
-          (v) => (v.category || "General").trim().toLowerCase() === normTarget,
-        );
 
         const seen = new Set<string>();
         const merged: Video[] = [];
@@ -144,20 +145,11 @@ export function DashboardCategoriesSection({
             merged.push(vid);
           }
         }
-        for (const vid of fromCatalog) {
-          if (!seen.has(vid.id)) {
-            seen.add(vid.id);
-            merged.push(vid);
-          }
-        }
 
         setCategoryVideos(merged);
       } catch {
         if (cancelled) return;
-        const normTarget = trimmed.toLowerCase();
-        setCategoryVideos(
-          allVideos.filter((v) => (v.category || "General").trim().toLowerCase() === normTarget),
-        );
+        setCategoryVideos([]);
       } finally {
         if (!cancelled) setIsLoadingVideos(false);
       }

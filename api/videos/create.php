@@ -80,8 +80,9 @@ if (empty($videoUrl)) {
 }
 
 $rawVisibility = $input['visibility'] ?? null;
+$hasExplicitVisibility = $rawVisibility !== null && trim((string)$rawVisibility) !== '';
 $visibility = 'public';
-if ($rawVisibility !== null && trim((string)$rawVisibility) !== '') {
+if ($hasExplicitVisibility) {
     $normalizedVisibility = strtolower(trim((string)$rawVisibility));
     if (!in_array($normalizedVisibility, ['public', 'unlisted', 'private'], true)) {
         jsonResponse(['success' => false, 'error' => 'Invalid visibility value. Allowed values: public, unlisted, private.'], 400);
@@ -159,7 +160,7 @@ try {
 
     // 1. Check existing video ownership before allowing updates
     $stmtExisting = $pdo->prepare('
-        SELECT id, user_id, payment_status, payment_id, payment_amount, is_promoted, promotion_plan, promotion_expires_at, created_at
+        SELECT id, user_id, visibility, payment_status, payment_id, payment_amount, is_promoted, promotion_plan, promotion_expires_at, created_at
         FROM uploaded_videos
         WHERE id = ?
         FOR UPDATE
@@ -179,6 +180,13 @@ try {
         // Preserve original owner if Admin updates without specifying a target user
         if ($isAuthAdmin && $requestedUserId === '') {
             $userId = $existingOwner;
+        }
+        // Preserve existing visibility when update omits visibility
+        if (!$hasExplicitVisibility) {
+            $existingVisibility = strtolower(trim((string)($existingVideo['visibility'] ?? '')));
+            $visibility = in_array($existingVisibility, ['public', 'unlisted', 'private'], true)
+                ? $existingVisibility
+                : 'public';
         }
     }
 

@@ -21,7 +21,7 @@ import { VideoCard } from "@/components/videohub/VideoCard";
 import { ImageCard } from "@/components/videohub/ImageCard";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { FaceTubeVideoPlayer } from "@/components/videohub/FaceTubeVideoPlayer";
-import { allVideos, findVideoAsync, resolveWatchVideo, type Video } from "@/data/videos";
+import { findVideoAsync, resolveWatchVideo, type Video } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
 import { buildVideoSharePayload, persistPendingReferral } from "@/lib/referral-service";
 import { api, getStoredAuthToken } from "@/lib/api";
@@ -29,6 +29,7 @@ import {
   fetchUploadedVideos,
   convertUploadedToCatalogVideo,
   getVideoBadgeLabels,
+  isPubliclyCacheableVideo,
   type UploadedVideo,
 } from "@/lib/video-service";
 import {
@@ -173,9 +174,7 @@ function WatchPage() {
   };
 
   const creatorUserId = video
-    ? (video as any).userId ||
-      (video as any).user_id ||
-      (video.channel ? video.channel.toLowerCase().replace(/\s+/g, "_") : "FT483921")
+    ? String((video as any).userId || (video as any).user_id || "")
     : "";
 
   const [subscribed, setSubscribed] = useState(false);
@@ -202,7 +201,7 @@ function WatchPage() {
   }, [video, creatorUserId]);
 
   const handleToggleSubscribe = async () => {
-    if (!video) return;
+    if (!video || !creatorUserId) return;
     if (isSelfChannel) {
       toast.error("You cannot subscribe to your own channel.");
       return;
@@ -274,9 +273,12 @@ function WatchPage() {
     if (!video) return;
     fetchUploadedVideos()
       .then((vids) => {
-        if (vids && vids.length > 0) setUploadedVideos(vids);
+        setUploadedVideos(Array.isArray(vids) ? vids : []);
       })
-      .catch((err) => console.error("Error loading videos for related feed:", err));
+      .catch((err) => {
+        console.error("Error loading videos for related feed:", err);
+        setUploadedVideos([]);
+      });
 
     fetchUploadedImages()
       .then((imgs) => {
@@ -302,10 +304,9 @@ function WatchPage() {
 
   const watchLabels = getVideoBadgeLabels(video);
 
-  const allAvailableVideos: Video[] = [
-    ...uploadedVideos.map(convertUploadedToCatalogVideo),
-    ...allVideos,
-  ];
+  const allAvailableVideos: Video[] = uploadedVideos
+    .filter(isPubliclyCacheableVideo)
+    .map(convertUploadedToCatalogVideo);
   const seenRelatedIds = new Set<string>([video.id]);
   const related = allAvailableVideos
     .filter((v) => {

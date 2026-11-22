@@ -2,7 +2,7 @@ import type { Video } from "@/data/videos";
 import { api } from "./api";
 import { resolveMediaUrl } from "./media-url";
 import { resolveVideoThumbnail } from "./thumbnail-service";
-import { isPubliclyCacheableVideo, normalizeVideoVisibility } from "./video-service";
+import { isPubliclyCacheableVideo, resolveStoredVideoVisibility } from "./video-service";
 
 function checkAdPromotionActive(item: {
   isPromoted?: boolean | number | null | undefined;
@@ -60,8 +60,8 @@ export function mapApiVideoToCatalogVideo(v: Record<string, any>): Video {
     videoType: v["video_type"] || v["videoType"] || "free",
     contentType: v["content_type"] || v["contentType"] || "long",
     isPromoted: checkAdPromotionActive(v),
-    visibility: normalizeVideoVisibility(v["visibility"], "public"),
-    userId: v["user_id"] || v["userId"] || "FT483921",
+    visibility: resolveStoredVideoVisibility(v["visibility"]),
+    userId: String(v["user_id"] || v["userId"] || ""),
   };
 }
 
@@ -112,7 +112,7 @@ export function findPublicCachedVideo(id: string): Video | undefined {
       videoType: match.videoType || match.video_type || "free",
       contentType: match.contentType || match.content_type || "long",
       isPromoted: checkAdPromotionActive(match),
-      visibility: normalizeVideoVisibility(match.visibility, "public"),
+      visibility: resolveStoredVideoVisibility(match.visibility),
     };
   } catch {
     return undefined;

@@ -29,6 +29,7 @@ import { DashboardSummaryCards } from "@/components/videohub/DashboardSummaryCar
 import {
   fetchUploadedVideos,
   calculateUserVideoCounts,
+  resolveAuthenticatedUserId,
   type UploadedVideo,
   type VideoCategoryCounts,
 } from "@/lib/video-service";
@@ -49,8 +50,8 @@ export const Route = createFileRoute("/your-videos")({
 });
 
 function YourVideosPage() {
-  const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const { user, profile, dbUser, isLoading: authLoading } = useAuth();
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const metadataChannelName =
     typeof user?.user_metadata?.["channel_name"] === "string"
       ? user.user_metadata["channel_name"].trim()
@@ -84,6 +85,19 @@ function YourVideosPage() {
   });
 
   useEffect(() => {
+    if (!userId) {
+      setVideos([]);
+      setCounts({
+        freeShort: 0,
+        freeLong: 0,
+        premiumShort: 0,
+        premiumLong: 0,
+        totalFree: 0,
+        totalPremium: 0,
+        totalUploaded: 0,
+      });
+      return;
+    }
     fetchUploadedVideos(userId).then((list) => {
       setVideos(list);
     });
@@ -120,7 +134,9 @@ function YourVideosPage() {
                 Your Videos
               </h1>
               <p className="text-sm text-muted-foreground">
-                Channel content hub, metadata records, and upload table for {channelName} ({userId})
+                {userId
+                  ? `Channel content hub, metadata records, and upload table for ${channelName} (${userId})`
+                  : "Sign in to your FaceTube account to view and manage your uploaded studio videos."}
               </p>
             </div>
           </div>
@@ -135,6 +151,23 @@ function YourVideosPage() {
             </Link>
           </div>
         </div>
+
+        {!authLoading && !userId && (
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
+              <span>
+                <strong>Sign in required:</strong> Please log in to access your studio uploads.
+              </span>
+            </div>
+            <Link
+              to="/auth"
+              className="inline-flex shrink-0 items-center justify-center rounded-xl bg-brand px-4 py-1.5 text-xs font-bold text-white transition hover:bg-brand-dark"
+            >
+              Sign In
+            </Link>
+          </div>
+        )}
 
         {videos.some((v) => v.isStale) && (
           <div className="flex items-center gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-400">

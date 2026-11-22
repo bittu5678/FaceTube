@@ -77,9 +77,13 @@ try {
         || (!empty($authUser['id']) && strcasecmp((string)($row['user_id'] ?? ''), (string)$authUser['id']) === 0)
     );
 
-    $visibility = strtolower(trim((string)($row['visibility'] ?? 'public')));
-    if (!in_array($visibility, ['public', 'unlisted', 'private'], true)) {
+    $rawVisibility = strtolower(trim((string)($row['visibility'] ?? '')));
+    if ($rawVisibility === '') {
         $visibility = 'public';
+    } elseif (in_array($rawVisibility, ['public', 'unlisted', 'private'], true)) {
+        $visibility = $rawVisibility;
+    } else {
+        $visibility = 'private';
     }
 
     $videoType = strtolower(trim((string)($row['video_type'] ?? 'free')));

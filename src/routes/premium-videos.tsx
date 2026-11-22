@@ -14,11 +14,10 @@ import {
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
-import { allVideos, type Video as CatalogVideo } from "@/data/videos";
+import type { Video as CatalogVideo } from "@/data/videos";
 import {
-  fetchUploadedVideos,
-  convertUploadedToCatalogVideo,
-  getStoredVideos,
+  buildPublicFeedVideos,
+  fetchPublicVideosFeed,
   getVideoBadgeLabels,
   type UploadedVideo,
   VIDEO_CATEGORIES,
@@ -58,24 +57,11 @@ export function PremiumVideosPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const vids = await fetchUploadedVideos({ videoType: "premium" });
-      const stored = getStoredVideos().filter(
-        (v) =>
-          v.videoType === "premium" &&
-          (v.paymentStatus === "paid" || v.paymentStatus === "not_required"),
-      );
-      const map = new Map<string, UploadedVideo>();
-      stored.forEach((v) => map.set(v.id, v));
-      vids.forEach((v) => map.set(v.id, v));
-      setUploadedPremiumVideos(Array.from(map.values()));
+      const vids = await fetchPublicVideosFeed("premium");
+      setUploadedPremiumVideos(vids);
     } catch (err) {
-      console.warn("Failed to fetch premium videos from API, reading cache:", err);
-      const stored = getStoredVideos().filter(
-        (v) =>
-          v.videoType === "premium" &&
-          (v.paymentStatus === "paid" || v.paymentStatus === "not_required"),
-      );
-      setUploadedPremiumVideos(stored);
+      console.warn("Failed to fetch premium videos:", err);
+      setUploadedPremiumVideos([]);
     } finally {
       setLoading(false);
     }
@@ -85,45 +71,10 @@ export function PremiumVideosPage() {
     loadData();
   }, [searchParams.refresh]);
 
-  // Baseline catalog premium videos
-  const catalogPremium: CatalogVideo[] = useMemo(() => {
-    return allVideos.slice(4, 10).map((v) => ({
-      ...v,
-      thumb: resolveVideoThumbnail(v),
-      thumbnail: resolveVideoThumbnail(v),
-      thumbnailUrl: resolveVideoThumbnail(v),
-      videoType: "premium" as const,
-      contentType: (v.duration && v.duration.startsWith("0:") ? "short" : "long") as
-        "short" | "long",
-    }));
-  }, []);
-
-  // Merge uploaded verified premium videos (priority) with baseline catalog premium videos
+  // Verified public Sponsor videos only (paid + public + non-blocked; never merged with static catalog)
   const mergedPremiumVideos: CatalogVideo[] = useMemo(() => {
-    // Only published premium videos that have verified payments or not_required status
-    const verifiedUploaded = uploadedPremiumVideos
-      .filter((v) => v.paymentStatus === "paid" || v.paymentStatus === "not_required")
-      .map(convertUploadedToCatalogVideo);
-
-    const seenIds = new Set<string>();
-    const combined: CatalogVideo[] = [];
-
-    for (const v of verifiedUploaded) {
-      if (!seenIds.has(v.id)) {
-        seenIds.add(v.id);
-        combined.push(v);
-      }
-    }
-
-    for (const v of catalogPremium) {
-      if (!seenIds.has(v.id)) {
-        seenIds.add(v.id);
-        combined.push(v);
-      }
-    }
-
-    return combined;
-  }, [uploadedPremiumVideos, catalogPremium]);
+    return buildPublicFeedVideos(uploadedPremiumVideos, { videoType: "premium" });
+  }, [uploadedPremiumVideos]);
 
   const filteredList = useMemo(() => {
     return mergedPremiumVideos.filter((v) => {

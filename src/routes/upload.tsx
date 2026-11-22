@@ -43,8 +43,10 @@ import {
   fetchUploadedVideos,
   validateVideoFileForUpload,
   uploadSingleBulkVideoItem,
+  selectBulkQueueItemForUpload,
   getAvailableCategories,
   normalizeVideoVisibility,
+  resolveAuthenticatedUserId,
   type VideoType,
   type ContentType,
   type VideoVisibility,
@@ -132,15 +134,19 @@ export const Route = createFileRoute("/upload")({
 function UploadStudioPage() {
   const search = useSearch({ from: "/upload" });
   const navigate = useNavigate();
-  const { user, profile, dbUser } = useAuth();
+  const { user, profile, dbUser, isLoading: authLoading } = useAuth();
 
   const activeMode = search.mode || null;
   const initialFormat = search.format || "short";
 
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const [wallet, setWallet] = useState<UserWallet | null>(null);
 
   const refreshWallet = useCallback(() => {
+    if (!userId) {
+      setWallet(null);
+      return;
+    }
     getUserWallet(userId).then(setWallet).catch(console.error);
   }, [userId]);
 
@@ -196,13 +202,22 @@ function UploadStudioPage() {
               </button>
             )}
 
-            <Link
-              to="/wallet-balance"
-              className="hidden items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-bold text-emerald-400 sm:inline-flex"
-            >
-              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
-              Wallet: ₹{wallet ? wallet.balance.toFixed(2) : "4,280.50"}
-            </Link>
+            {userId ? (
+              <Link
+                to="/wallet-balance"
+                className="hidden items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-bold text-emerald-400 sm:inline-flex"
+              >
+                <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                Wallet: ₹{wallet ? wallet.balance.toFixed(2) : "0.00"}
+              </Link>
+            ) : (
+              <Link
+                to="/auth"
+                className="hidden items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-bold text-amber-400 hover:bg-amber-500/20 sm:inline-flex"
+              >
+                Sign In to Upload
+              </Link>
+            )}
 
             <ThemeToggle showLabelsOnWide={false} />
 
@@ -218,6 +233,26 @@ function UploadStudioPage() {
 
       {/* Main Studio Viewport */}
       <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-10 pb-28 lg:pb-16">
+        {!authLoading && !userId && (
+          <div
+            role="alert"
+            className="mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-300"
+          >
+            <div className="flex items-center gap-2.5">
+              <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
+              <span>
+                <strong>Sign in required:</strong> Log in to your FaceTube account to upload videos,
+                launch promotions, or publish images.
+              </span>
+            </div>
+            <Link
+              to="/auth"
+              className="inline-flex shrink-0 items-center justify-center rounded-xl bg-brand px-4 py-2 text-xs font-bold text-white transition hover:bg-brand-dark"
+            >
+              Sign In
+            </Link>
+          </div>
+        )}
         {!activeMode ? (
           <FourOptionsSelectionView onSelect={setMode} wallet={wallet} />
         ) : activeMode === "bulk" ? (
@@ -620,17 +655,22 @@ export function BulkVideoUploadView({
   initialFiles?: File[] | undefined;
 }) {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Alex Rivera";
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
 
   const [queue, setQueue] = useState<BulkVideoItem[]>([]);
+  const queueRef = useRef<BulkVideoItem[]>(queue);
   const [isProcessing, setIsProcessing] = useState(false);
   const [categories, setCategories] = useState<string[]>([...VIDEO_CATEGORIES]);
   const [batchCategory, setBatchCategory] = useState<string>("Entertainment");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isProcessingRef = useRef(false);
   const notifiedItemIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
 
   // Load available categories asynchronously
   useEffect(() => {
@@ -741,20 +781,21 @@ export function BulkVideoUploadView({
 
   // Upload an individual video item from queue
   const uploadVideoItem = async (itemId: string): Promise<boolean> => {
-    let targetItem: BulkVideoItem | undefined;
-    setQueue((prev) => {
-      targetItem = prev.find((it) => it.id === itemId);
-      return prev.map((it) =>
+    if (!userId) {
+      toast.error("Please sign in to your FaceTube account before uploading videos.");
+      return false;
+    }
+    const activeQueue = queueRef.current.length > 0 ? queueRef.current : queue;
+    const item = selectBulkQueueItemForUpload(activeQueue, itemId);
+    if (!item) return false;
+
+    setQueue((prev) =>
+      prev.map((it) =>
         it.id === itemId
           ? { ...it, status: "uploading", progress: 15, errorMessage: undefined }
           : it,
-      );
-    });
-
-    if (!targetItem) return false;
-    const item = targetItem as BulkVideoItem;
-    // Prevent duplicate upload if already successful
-    if (item.status === "success") return true;
+      ),
+    );
 
     try {
       // 1. Upload video file to server storage via existing production API
@@ -864,7 +905,7 @@ export function BulkVideoUploadView({
           duration: item.detectedDuration || (item.contentType === "short" ? "0:45" : "12:30"),
           paymentStatus: "not_required",
           paymentAmount: 0,
-          visibility: item.visibility,
+          visibility: normalizeVideoVisibility(item.visibility, "public"),
         });
       }
 
@@ -907,6 +948,10 @@ export function BulkVideoUploadView({
 
   // Process all queued items sequentially (skips already successful items to prevent duplicates)
   const handleProcessQueue = async () => {
+    if (!userId) {
+      toast.error("Please sign in to your FaceTube account before uploading videos.");
+      return;
+    }
     if (isProcessingRef.current) return;
     const queuedItems = queue.filter((it) => it.status === "queued");
     if (queuedItems.length === 0) {
@@ -929,6 +974,10 @@ export function BulkVideoUploadView({
 
   // Retry an individual failed item without touching completed items
   const handleRetryItem = async (itemId: string) => {
+    if (!userId) {
+      toast.error("Please sign in to your FaceTube account before uploading videos.");
+      return;
+    }
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
     setIsProcessing(true);
@@ -943,6 +992,10 @@ export function BulkVideoUploadView({
 
   // Retry all failed items
   const handleRetryAllFailed = async () => {
+    if (!userId) {
+      toast.error("Please sign in to your FaceTube account before uploading videos.");
+      return;
+    }
     if (isProcessingRef.current) return;
     const failedItems = queue.filter((it) => it.status === "error");
     if (failedItems.length === 0) return;
@@ -1593,9 +1646,9 @@ function FreeVideoUploadView({
   onUploaded?: () => void;
 }) {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Alex Rivera";
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
 
   const [uploadTab, setUploadTab] = useState<"single" | "bulk">("single");
   const [queuedFilesForBulk, setQueuedFilesForBulk] = useState<File[]>([]);
@@ -1746,6 +1799,12 @@ function FreeVideoUploadView({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!userId) {
+      toast.error(
+        "Your FaceTube account session is still loading or not signed in. Please log in and try again.",
+      );
+      return;
+    }
     if (!videoFile) {
       toast.error("Please select a video file to upload.");
       return;
@@ -2196,8 +2255,9 @@ function PremiumVideoUploadView({
   onUploaded?: () => void;
 }) {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || "";
-  const creatorName = profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Creator";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
+  const creatorName =
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
   const referrerId = profile?.referral_code || dbUser?.referral_code || undefined;
 
   const [format, setFormat] = useState<VideoFormatChoice>(initialFormat);
@@ -2838,9 +2898,9 @@ function AdPromotionUploadView({
   onUploaded?: () => void;
 }) {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Alex Rivera";
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
   const referrerId = profile?.referral_code || dbUser?.referral_code || undefined;
 
   type AdsPlanKey = "plan-7-days" | "plan-15-days" | "plan-monthly" | "plan-yearly";
@@ -2914,6 +2974,11 @@ function AdPromotionUploadView({
   }, []);
 
   useEffect(() => {
+    if (!userId) {
+      setAvailableVideos([]);
+      setSelectedVideoId("");
+      return;
+    }
     fetchUploadedVideos(userId).then((vids) => {
       setAvailableVideos(vids);
       const firstVid = vids[0];
@@ -2928,6 +2993,12 @@ function AdPromotionUploadView({
 
   const handleLaunch = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!userId) {
+      const msg = "Please sign in to your FaceTube account before launching an ad promotion.";
+      setPromoError(msg);
+      toast.error(msg);
+      return;
+    }
     if (!selectedVideoId && availableVideos.length === 0) {
       toast.error("Please upload a video first before promoting.");
       return;
@@ -3233,9 +3304,9 @@ function AdPromotionUploadView({
 /* -------------------------------------------------------------------------- */
 function ImageUploadView({ onBack }: { onBack: () => void }) {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const creatorName =
-    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "Alex Rivera";
+    profile?.name || dbUser?.name || user?.user_metadata?.full_name || "FaceTube Creator";
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -3323,6 +3394,10 @@ function ImageUploadView({ onBack }: { onBack: () => void }) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!userId) {
+      toast.error("Please sign in to your FaceTube account before uploading images.");
+      return;
+    }
     if (!imageFile) {
       toast.error("Please select an image file to upload.");
       return;

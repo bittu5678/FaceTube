@@ -199,8 +199,14 @@ export async function initiatePremiumVideoPayment(
   }
   activeCheckoutLock = true;
 
-  const effectiveUserId = params.userId || params.uploaderUserId || "FT483921";
-  const effectiveUserName = params.userName || params.uploaderName || "Alex Rivera";
+  const effectiveUserId = (params.userId || params.uploaderUserId || "").trim();
+  if (!effectiveUserId) {
+    activeCheckoutLock = false;
+    params.onFailure("Authentication required. Please log in before uploading a Sponsor video.");
+    return;
+  }
+  const effectiveUserName =
+    (params.userName || params.uploaderName || "").trim() || "FaceTube Creator";
   const effectiveTitle = params.title || params.videoTitle || "Untitled Premium Video";
   const effectiveDescription = params.description || "";
   const effectiveVideoId =

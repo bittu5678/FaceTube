@@ -67,8 +67,9 @@ try {
         $where[] = 'COALESCE(is_blocked, 0) = 0';
     }
 
-    // Public and cross-user counts exclude private, unlisted, blocked, and unpaid/pending/failed videos
-    if (!$isAdmin && !$isOwnerCounts) {
+    // Public and cross-user counts exclude private, unlisted, blocked, and unpaid/pending/failed videos.
+    // Admin privileges alone must NOT bypass public filters unless include_blocked moderation scope is active.
+    if (!$isOwnerCounts && !($isAdmin && $includeBlocked)) {
         $where[] = "COALESCE(NULLIF(visibility, ''), 'public') = 'public'";
         $where[] = "((video_type = 'free' AND COALESCE(NULLIF(payment_status, ''), 'not_required') IN ('not_required', 'paid')) OR (video_type = 'premium' AND payment_status = 'paid'))";
     }

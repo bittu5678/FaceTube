@@ -1542,6 +1542,16 @@ export function setStoreWalletBalance(userId: string, balance: number): void {
   saveStore(s);
 }
 
+function resolveStoredVisibilityFailClosed(value: unknown): "public" | "unlisted" | "private" {
+  if (value === null || value === undefined) return "public";
+  const clean = String(value).trim().toLowerCase();
+  if (clean === "") return "public";
+  if (clean === "public" || clean === "unlisted" || clean === "private") {
+    return clean;
+  }
+  return "private";
+}
+
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -5925,7 +5935,7 @@ async function dispatchApiRequest(
           if (!includeBlocked) {
             where.push("COALESCE(v.is_blocked, 0) = 0");
           }
-          if (!isAdmin && !isOwnerFilter) {
+          if (!isOwnerFilter && !(isAdmin && includeBlocked)) {
             where.push("COALESCE(NULLIF(v.visibility, ''), 'public') = 'public'");
             where.push(
               "((v.video_type = 'free' AND COALESCE(NULLIF(v.payment_status, ''), 'not_required') IN ('not_required', 'paid')) OR (v.video_type = 'premium' AND v.payment_status = 'paid'))",
@@ -5981,11 +5991,7 @@ async function dispatchApiRequest(
             });
             const channelName = r.creator_channel_name || r.creator_name || "FaceTube Creator";
             const channelLogoUrl = r.creator_channel_logo_url || null;
-            const rawVis = String(r.visibility || "public")
-              .trim()
-              .toLowerCase();
-            const visibility: "public" | "unlisted" | "private" =
-              rawVis === "private" || rawVis === "unlisted" ? rawVis : "public";
+            const visibility = resolveStoredVisibilityFailClosed(r.visibility);
             const isBlocked = Boolean(r.is_blocked);
             return {
               id: String(r.id),
@@ -6065,12 +6071,9 @@ async function dispatchApiRequest(
       if (!includeBlocked) {
         filtered = filtered.filter((v) => !v.is_blocked);
       }
-      if (!isAdmin && !isOwnerFilter) {
+      if (!isOwnerFilter && !(isAdmin && includeBlocked)) {
         filtered = filtered.filter((v) => {
-          const rawVis = String(v.visibility || "public")
-            .trim()
-            .toLowerCase();
-          const vis = rawVis === "private" || rawVis === "unlisted" ? rawVis : "public";
+          const vis = resolveStoredVisibilityFailClosed(v.visibility);
           if (vis !== "public") return false;
           const vType = String(v.video_type || "free")
             .trim()
@@ -6133,11 +6136,7 @@ async function dispatchApiRequest(
         );
         const channelName = owner?.channel_name || v.creator_name || "FaceTube Creator";
         const channelLogoUrl = owner?.channel_logo_url || null;
-        const rawVis = String(v.visibility || "public")
-          .trim()
-          .toLowerCase();
-        const visibility: "public" | "unlisted" | "private" =
-          rawVis === "private" || rawVis === "unlisted" ? rawVis : "public";
+        const visibility = resolveStoredVisibilityFailClosed(v.visibility);
         const isBlocked = Boolean(v.is_blocked);
         return {
           ...v,
@@ -6255,11 +6254,7 @@ async function dispatchApiRequest(
                 (authUser.id &&
                   rowOwner.toUpperCase() === String(authUser.id).trim().toUpperCase())),
             );
-            const rawVis = String(r.visibility || "public")
-              .trim()
-              .toLowerCase();
-            const visibility: "public" | "unlisted" | "private" =
-              rawVis === "private" || rawVis === "unlisted" ? rawVis : "public";
+            const visibility = resolveStoredVisibilityFailClosed(r.visibility);
             const vType = String(r.video_type || "free")
               .trim()
               .toLowerCase();
@@ -6412,11 +6407,7 @@ async function dispatchApiRequest(
           (rowOwner.toUpperCase() === authUserId.toUpperCase() ||
             (authUser.id && rowOwner.toUpperCase() === String(authUser.id).trim().toUpperCase())),
         );
-        const rawVis = String(v.visibility || "public")
-          .trim()
-          .toLowerCase();
-        const visibility: "public" | "unlisted" | "private" =
-          rawVis === "private" || rawVis === "unlisted" ? rawVis : "public";
+        const visibility = resolveStoredVisibilityFailClosed(v.visibility);
         const vType = String(v.video_type || "free")
           .trim()
           .toLowerCase();
@@ -6576,12 +6567,18 @@ async function dispatchApiRequest(
       }
 
       const rawVisibility = body.visibility;
-      let visibility: "public" | "unlisted" | "private" = "public";
-      if (
+      const hasExplicitVisibility =
         rawVisibility !== undefined &&
         rawVisibility !== null &&
-        String(rawVisibility).trim() !== ""
-      ) {
+        String(rawVisibility).trim() !== "";
+      const resolvePreservedVisibility = (raw: unknown): "public" | "unlisted" | "private" => {
+        const norm = String(raw ?? "")
+          .trim()
+          .toLowerCase();
+        return norm === "private" || norm === "unlisted" || norm === "public" ? norm : "public";
+      };
+      let visibility: "public" | "unlisted" | "private" = "public";
+      if (hasExplicitVisibility) {
         const normalizedVisibility = String(rawVisibility).trim().toLowerCase();
         if (
           normalizedVisibility !== "public" &&
@@ -6656,7 +6653,7 @@ async function dispatchApiRequest(
           await conn.beginTransaction();
 
           const [existingRows]: any = await conn.query(
-            `SELECT id, user_id, payment_status, payment_id, payment_amount, is_promoted, promotion_plan, promotion_expires_at, views, likes, created_at
+            `SELECT id, user_id, visibility, payment_status, payment_id, payment_amount, is_promoted, promotion_plan, promotion_expires_at, views, likes, created_at
              FROM uploaded_videos
              WHERE id = ?
              FOR UPDATE`,
@@ -6677,6 +6674,9 @@ async function dispatchApiRequest(
             }
             if (isAuthAdmin && !requestedUserId) {
               effectiveUserId = existingOwner;
+            }
+            if (!hasExplicitVisibility) {
+              visibility = resolvePreservedVisibility(preservedMysqlVideo.visibility);
             }
           }
 
@@ -7003,6 +7003,9 @@ async function dispatchApiRequest(
         }
         if (isAuthAdmin && !requestedUserId) {
           effectiveUserId = existingStoreVideo.user_id;
+        }
+        if (!hasExplicitVisibility) {
+          visibility = resolvePreservedVisibility(existingStoreVideo.visibility);
         }
       }
 
@@ -7343,7 +7346,7 @@ async function dispatchApiRequest(
           if (!includeBlocked) {
             where.push("COALESCE(is_blocked, 0) = 0");
           }
-          if (!isAdmin && !isOwnerCounts) {
+          if (!isOwnerCounts && !(isAdmin && includeBlocked)) {
             where.push("COALESCE(NULLIF(visibility, ''), 'public') = 'public'");
             where.push(
               "((video_type = 'free' AND COALESCE(NULLIF(payment_status, ''), 'not_required') IN ('not_required', 'paid')) OR (video_type = 'premium' AND payment_status = 'paid'))",
@@ -7401,12 +7404,9 @@ async function dispatchApiRequest(
       if (!includeBlocked) {
         list = list.filter((v) => !v.is_blocked);
       }
-      if (!isAdmin && !isOwnerCounts) {
+      if (!isOwnerCounts && !(isAdmin && includeBlocked)) {
         list = list.filter((v) => {
-          const rawVis = String(v.visibility || "public")
-            .trim()
-            .toLowerCase();
-          const vis = rawVis === "private" || rawVis === "unlisted" ? rawVis : "public";
+          const vis = resolveStoredVisibilityFailClosed(v.visibility);
           if (vis !== "public") return false;
           const vType = String(v.video_type || "free")
             .trim()

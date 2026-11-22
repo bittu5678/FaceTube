@@ -15,10 +15,12 @@ import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { VideoCard } from "@/components/videohub/VideoCard";
 import { AdMobBanner } from "@/components/admob/AdMobBanner";
-import { trending, creators, allVideos } from "@/data/videos";
 import {
+  buildPublicFeedVideos,
   fetchUploadedVideos,
   deriveCreatorsFromVideos,
+  isPubliclyCacheableVideo,
+  parseCatalogViews,
   type UploadedVideo,
 } from "@/lib/video-service";
 
@@ -74,13 +76,14 @@ function ExplorePage() {
     let isMounted = true;
     fetchUploadedVideos()
       .then((vids) => {
-        if (isMounted && vids && vids.length > 0) {
-          setUploadedVideos(vids);
+        if (isMounted) {
+          setUploadedVideos(Array.isArray(vids) ? vids : []);
         }
       })
       .catch((err) => {
         if (isMounted) {
           console.error("Error loading explore creators:", err);
+          setUploadedVideos([]);
         }
       });
     return () => {
@@ -88,54 +91,62 @@ function ExplorePage() {
     };
   }, []);
 
-  const featuredCreators = useMemo(() => {
-    const liveCreators = deriveCreatorsFromVideos(uploadedVideos).slice(0, 6);
-    if (liveCreators.length > 0) {
-      return liveCreators.map((c) => ({
-        key: c.key,
-        name: c.name,
-        initials: c.initials,
-        channelLogoUrl: c.channelLogoUrl,
-        subtitle: `${c.uploadCount} ${c.uploadCount === 1 ? "video" : "videos"}`,
-        tag: c.category || "Creator",
-      }));
-    }
+  const eligibleVideos = useMemo(
+    () => buildPublicFeedVideos(uploadedVideos),
+    [uploadedVideos],
+  );
 
-    return creators.map((c) => {
-      const creatorMeta = c as typeof c & {
-        channelLogoUrl?: string | undefined;
-        channel_logo_url?: string | undefined;
-        channelName?: string | undefined;
-        channel_name?: string | undefined;
-      };
-      return {
-        key: c.name,
-        name: creatorMeta.channelName || creatorMeta.channel_name || c.name,
-        initials: c.initials,
-        channelLogoUrl: creatorMeta.channelLogoUrl || creatorMeta.channel_logo_url,
-        subtitle: c.subs,
-        tag: c.tag,
-      };
-    });
+  const trendingExploreVideos = useMemo(
+    () =>
+      [...eligibleVideos]
+        .sort((a, b) => parseCatalogViews(b.views) - parseCatalogViews(a.views))
+        .slice(0, 8),
+    [eligibleVideos],
+  );
+
+  const featuredCreators = useMemo(() => {
+    const liveCreators = deriveCreatorsFromVideos(
+      uploadedVideos.filter(isPubliclyCacheableVideo),
+    ).slice(0, 6);
+    return liveCreators.map((c) => ({
+      key: c.key,
+      name: c.name,
+      initials: c.initials,
+      channelLogoUrl: c.channelLogoUrl,
+      subtitle: `${c.uploadCount} ${c.uploadCount === 1 ? "video" : "videos"}`,
+      tag: c.category || "Creator",
+    }));
   }, [uploadedVideos]);
 
-  const filteredVideos = allVideos.filter((v) => {
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      return (
-        v.title.toLowerCase().includes(q) ||
-        v.channel.toLowerCase().includes(q) ||
-        v.category.toLowerCase().includes(q)
-      );
-    }
-    if (selectedTag === "Trending") return true;
-    if (selectedTag === "Music") return v.category === "Music";
-    if (selectedTag === "Gaming") return v.category === "Gaming";
-    if (selectedTag === "Learning")
-      return v.category === "Coding" || v.category === "AI" || v.category === "React";
-    if (selectedTag === "Podcasts") return v.category === "Podcasts";
-    return true;
-  });
+  const filteredVideos = useMemo(() => {
+    return eligibleVideos.filter((v) => {
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        return (
+          v.title.toLowerCase().includes(q) ||
+          v.channel.toLowerCase().includes(q) ||
+          v.category.toLowerCase().includes(q)
+        );
+      }
+      if (selectedTag === "Trending") return true;
+      if (selectedTag === "Music") return v.category === "Music";
+      if (selectedTag === "Gaming") return v.category === "Gaming";
+      if (selectedTag === "Movies & Shows") {
+        return v.category === "Movie" || v.category === "Entertainment";
+      }
+      if (selectedTag === "News") return v.category === "News" || v.category === "Blog";
+      if (selectedTag === "Learning") {
+        return (
+          v.category === "Coding" ||
+          v.category === "AI" ||
+          v.category === "React" ||
+          v.category === "Education"
+        );
+      }
+      if (selectedTag === "Podcasts") return v.category === "Podcasts";
+      return true;
+    });
+  }, [eligibleVideos, searchQuery, selectedTag]);
 
   return (
     <VideoHubLayout query={searchQuery} onQueryChange={setSearchQuery}>
@@ -192,11 +203,17 @@ function ExplorePage() {
             <span className="text-xs text-muted-foreground">Updated in real-time</span>
           </div>
 
-          <div className="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {trending.map((v) => (
-              <VideoCard key={`explore-trending-${v.id}`} video={v} />
-            ))}
-          </div>
+          {trendingExploreVideos.length > 0 ? (
+            <div className="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {trendingExploreVideos.map((v) => (
+                <VideoCard key={`explore-trending-${v.id}`} video={v} />
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-2xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+              No public trending videos available yet.
+            </p>
+          )}
         </section>
 
         {/* Popular Creators Shelf */}
@@ -210,32 +227,38 @@ function ExplorePage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-            {featuredCreators.map((c) => (
-              <div
-                key={c.key}
-                className="flex flex-col items-center justify-center p-3 rounded-2xl border border-border bg-background text-center transition hover:border-brand/40"
-              >
-                <div className="mb-2">
-                  <ChannelAvatar
-                    src={c.channelLogoUrl}
-                    name={c.name}
-                    initials={c.initials}
-                    sizeClassName="h-12 w-12"
-                    imageRingClassName="ring-1 ring-border shadow-sm"
-                    fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-sm font-bold text-white shadow-sm"
-                  />
+          {featuredCreators.length > 0 ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+              {featuredCreators.map((c) => (
+                <div
+                  key={c.key}
+                  className="flex flex-col items-center justify-center p-3 rounded-2xl border border-border bg-background text-center transition hover:border-brand/40"
+                >
+                  <div className="mb-2">
+                    <ChannelAvatar
+                      src={c.channelLogoUrl}
+                      name={c.name}
+                      initials={c.initials}
+                      sizeClassName="h-12 w-12"
+                      imageRingClassName="ring-1 ring-border shadow-sm"
+                      fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-sm font-bold text-white shadow-sm"
+                    />
+                  </div>
+                  <p className="text-xs font-bold text-foreground truncate w-full">{c.name}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5 truncate w-full">
+                    {c.subtitle}
+                  </p>
+                  <span className="mt-2 rounded-full bg-secondary px-2 py-0.5 text-[9px] font-semibold text-muted-foreground">
+                    {c.tag}
+                  </span>
                 </div>
-                <p className="text-xs font-bold text-foreground truncate w-full">{c.name}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5 truncate w-full">
-                  {c.subtitle}
-                </p>
-                <span className="mt-2 rounded-full bg-secondary px-2 py-0.5 text-[9px] font-semibold text-muted-foreground">
-                  {c.tag}
-                </span>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <p className="py-4 text-center text-xs text-muted-foreground">
+              No creators available yet.
+            </p>
+          )}
         </section>
 
         {/* Filtered & Discovered Feed */}
@@ -244,11 +267,17 @@ function ExplorePage() {
             {selectedTag === "Trending" ? "Fresh Discoveries" : `${selectedTag} Videos`}
           </h2>
 
-          <div className="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {filteredVideos.map((v) => (
-              <VideoCard key={`explore-feed-${v.id}`} video={v} />
-            ))}
-          </div>
+          {filteredVideos.length > 0 ? (
+            <div className="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {filteredVideos.map((v) => (
+                <VideoCard key={`explore-feed-${v.id}`} video={v} />
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-2xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+              No public videos match the selected topic yet.
+            </p>
+          )}
         </section>
 
         <AdMobBanner margin={64} />

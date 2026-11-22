@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, Play } from "lucide-react";
-import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
+import type { ShortItem } from "@/data/shorts";
 import { getVideoBadgeLabels } from "@/lib/video-service";
 import { ChannelAvatar } from "./ChannelAvatar";
 import { ShortsIcon } from "./ShortsIcon";
@@ -14,7 +14,7 @@ interface ShortsShelfProps {
 
 export function ShortsShelf({
   title = "Shorts",
-  items = SHORTS_LIST,
+  items = [],
   className = "",
 }: ShortsShelfProps) {
   const navigate = useNavigate();
@@ -166,6 +166,11 @@ export function ShortsShelf({
       </div>
 
       {/* Horizontal Carousel Row */}
+      {items.length === 0 ? (
+        <p className="rounded-2xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">
+          No public short videos available right now.
+        </p>
+      ) : (
       <div
         ref={scrollRef}
         onMouseDown={handleMouseDown}
@@ -250,6 +255,7 @@ export function ShortsShelf({
           );
         })}
       </div>
+      )}
     </section>
   );
 }

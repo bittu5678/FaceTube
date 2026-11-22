@@ -13,11 +13,10 @@ import {
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
-import { allVideos, type Video as CatalogVideo } from "@/data/videos";
+import type { Video as CatalogVideo } from "@/data/videos";
 import {
-  fetchUploadedVideos,
-  convertUploadedToCatalogVideo,
-  getStoredVideos,
+  buildPublicFeedVideos,
+  fetchPublicVideosFeed,
   type UploadedVideo,
   VIDEO_CATEGORIES,
 } from "@/lib/video-service";
@@ -56,19 +55,11 @@ export function FreeVideosPage() {
   const loadData = async () => {
     setLoading(true);
     try {
-      const vids = await fetchUploadedVideos({ videoType: "free" });
-      // Merge with any freshly recorded session uploads to ensure zero-latency appearance
-      const stored = getStoredVideos().filter((v) => v.videoType === "free");
-      const map = new Map<string, UploadedVideo>();
-      // Stored local session videos first for immediate visibility
-      stored.forEach((v) => map.set(v.id, v));
-      // API results overwrite with server-authoritative data
-      vids.forEach((v) => map.set(v.id, v));
-      setUploadedFreeVideos(Array.from(map.values()));
+      const vids = await fetchPublicVideosFeed("free");
+      setUploadedFreeVideos(vids);
     } catch (err) {
-      console.warn("Failed to fetch free videos from API, reading cache:", err);
-      const stored = getStoredVideos().filter((v) => v.videoType === "free");
-      setUploadedFreeVideos(stored);
+      console.warn("Failed to fetch free videos:", err);
+      setUploadedFreeVideos([]);
     } finally {
       setLoading(false);
     }
@@ -78,40 +69,9 @@ export function FreeVideosPage() {
     loadData();
   }, [searchParams.refresh]);
 
-  // Merge uploaded videos (priority) with baseline catalog free videos
+  // Public Free feed from live/sanitized public records only (never merged with static catalog)
   const mergedFreeVideos: CatalogVideo[] = useMemo(() => {
-    const uploadedConverted = uploadedFreeVideos.map(convertUploadedToCatalogVideo);
-
-    // Standard static catalog free videos (excluding any items marked premium)
-    const catalogFree = allVideos.map((v) => ({
-      ...v,
-      thumb: resolveVideoThumbnail(v),
-      thumbnail: resolveVideoThumbnail(v),
-      thumbnailUrl: resolveVideoThumbnail(v),
-      videoType: "free" as const,
-      contentType: (v.duration && v.duration.startsWith("0:") ? "short" : "long") as
-        "short" | "long",
-    }));
-
-    // Deduplicate by ID
-    const seenIds = new Set<string>();
-    const combined: CatalogVideo[] = [];
-
-    for (const v of uploadedConverted) {
-      if (!seenIds.has(v.id)) {
-        seenIds.add(v.id);
-        combined.push(v);
-      }
-    }
-
-    for (const v of catalogFree) {
-      if (!seenIds.has(v.id)) {
-        seenIds.add(v.id);
-        combined.push(v);
-      }
-    }
-
-    return combined;
+    return buildPublicFeedVideos(uploadedFreeVideos, { videoType: "free" });
   }, [uploadedFreeVideos]);
 
   // Apply format and category filters

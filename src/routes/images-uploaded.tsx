@@ -16,7 +16,6 @@ import {
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
-import { useAuth } from "@/lib/auth-context";
 import { fetchUploadedImages, type UploadedImage } from "@/lib/image-service";
 import { SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
 import {
@@ -43,9 +42,6 @@ export const Route = createFileRoute("/images-uploaded")({
 });
 
 export function ImagesUploadedPage() {
-  const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
-
   const [images, setImages] = useState<UploadedImage[]>([]);
   const [loading, setLoading] = useState(true);
   const [playingImageId, setPlayingImageId] = useState<string | null>(null);

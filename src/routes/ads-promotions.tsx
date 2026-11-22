@@ -30,6 +30,7 @@ import { useAuth } from "@/lib/auth-context";
 import {
   recordNewVideoUpload,
   normalizeVideoVisibility,
+  resolveAuthenticatedUserId,
   type UploadedVideo,
 } from "@/lib/video-service";
 import { resolveVideoThumbnail, SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
@@ -155,10 +156,9 @@ function AdsPromotionsPage() {
     profile?.name ||
     dbUser?.name ||
     user?.user_metadata?.name ||
-    "Alex Rivera";
+    "FaceTube Creator";
 
-  const effectiveUserId =
-    profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const effectiveUserId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
   const sponsorId =
     (profile as any)?.referred_by ||
@@ -212,6 +212,9 @@ function AdsPromotionsPage() {
   // Fetch real channel videos and dynamic campaigns from backend API
   const loadVideosAndCampaigns = useCallback(async () => {
     if (!effectiveUserId) {
+      setUserVideos([]);
+      setCampaigns([]);
+      setSelectedVideoId("");
       setLoadingUserVideos(false);
       return;
     }
@@ -373,6 +376,10 @@ function AdsPromotionsPage() {
 
   // Activate Promotion Submission with Razorpay Payment Gateway
   const handleActivatePromotion = async () => {
+    if (!effectiveUserId) {
+      toast.error("Please sign in to your FaceTube account before launching an ad promotion.");
+      return;
+    }
     if (!campaignTitle.trim()) {
       toast.error("Please enter an Advertisement Campaign Title.");
       return;

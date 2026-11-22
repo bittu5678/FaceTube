@@ -12,8 +12,13 @@ import {
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
-import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
-import { fetchUploadedVideos, getVideoBadgeLabels, isShortVideo } from "@/lib/video-service";
+import type { ShortItem } from "@/data/shorts";
+import {
+  fetchUploadedVideos,
+  getVideoBadgeLabels,
+  isPubliclyCacheableVideo,
+  isShortVideo,
+} from "@/lib/video-service";
 
 export const Route = createFileRoute("/short-videos")({
   head: () => ({
@@ -33,10 +38,16 @@ function ShortVideosPage() {
   const [uploadedShorts, setUploadedShorts] = useState<ShortItem[]>([]);
 
   useEffect(() => {
-    fetchUploadedVideos()
+    let mounted = true;
+    fetchUploadedVideos({ contentType: "short" })
       .then((videos) => {
+        if (!mounted) return;
         const mapped = videos
-          .filter((v) => isShortVideo({ contentType: v.contentType, duration: v.duration }))
+          .filter(
+            (v) =>
+              isPubliclyCacheableVideo(v) &&
+              isShortVideo({ contentType: v.contentType, duration: v.duration }),
+          )
           .map((v): ShortItem => {
             const channel = v.channelName || v.creatorName || "FaceTube Creator";
             return {
@@ -54,18 +65,22 @@ function ShortVideosPage() {
               thumb: v.thumbnailUrl,
               aspectColor: "from-purple-900/60 to-brand/80",
               videoUrl: v.videoUrl,
-              userId: v.userId,
+              userId: String(v.userId || (v as any).user_id || ""),
               channelLogoUrl: v.channelLogoUrl || (v as any).channel_logo_url,
               videoType: v.videoType,
               isPromoted: v.isPromoted,
               promotionExpiresAt: v.promotionExpiresAt,
             };
           });
-        if (mapped.length > 0) {
-          setUploadedShorts(mapped);
-        }
+        setUploadedShorts(mapped);
       })
-      .catch((err) => console.warn("Could not fetch shorts from API:", err));
+      .catch((err) => {
+        console.warn("Could not fetch shorts from API:", err);
+        if (mounted) setUploadedShorts([]);
+      });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const allShorts: ShortItem[] = useMemo(() => {
@@ -77,13 +92,7 @@ function ShortVideosPage() {
         list.push(s);
       }
     }
-    for (const s of SHORTS_LIST) {
-      if (!seen.has(s.id)) {
-        seen.add(s.id);
-        list.push(s);
-      }
-    }
-    return list.length > 0 ? list : SHORTS_LIST;
+    return list;
   }, [uploadedShorts]);
   return (
     <VideoHubLayout>

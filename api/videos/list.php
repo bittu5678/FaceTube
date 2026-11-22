@@ -73,8 +73,9 @@ if (!$includeBlocked) {
     $where[] = 'COALESCE(v.is_blocked, 0) = 0';
 }
 
-// Public and cross-user discovery: restrict to public, non-blocked, payment-eligible videos
-if (!$isAdmin && !$isOwnerFilter) {
+// Public and cross-user discovery: restrict to public, non-blocked, payment-eligible videos.
+// Admin privileges alone must NOT bypass public filters unless include_blocked moderation scope is active.
+if (!$isOwnerFilter && !($isAdmin && $includeBlocked)) {
     $where[] = "COALESCE(NULLIF(v.visibility, ''), 'public') = 'public'";
     $where[] = "((v.video_type = 'free' AND COALESCE(NULLIF(v.payment_status, ''), 'not_required') IN ('not_required', 'paid')) OR (v.video_type = 'premium' AND v.payment_status = 'paid'))";
 }
@@ -141,9 +142,13 @@ try {
         $channelName = !empty($row['creator_channel_name'])
             ? $row['creator_channel_name']
             : ($row['creator_name'] ?? 'FaceTube Creator');
-        $visibility = strtolower(trim((string)($row['visibility'] ?? 'public')));
-        if (!in_array($visibility, ['public', 'unlisted', 'private'], true)) {
+        $rawVisibility = strtolower(trim((string)($row['visibility'] ?? '')));
+        if ($rawVisibility === '') {
             $visibility = 'public';
+        } elseif (in_array($rawVisibility, ['public', 'unlisted', 'private'], true)) {
+            $visibility = $rawVisibility;
+        } else {
+            $visibility = 'private';
         }
         $isBlocked = !empty($row['is_blocked']);
 

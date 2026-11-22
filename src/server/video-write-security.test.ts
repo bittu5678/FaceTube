@@ -1011,4 +1011,272 @@ describe("Phase 2B Step 3A: Secure Video Write Endpoints & Checkout Parity", () 
     assert.ok(uploadIdx < createIdx, "Upload video file before persisting video record");
     assert.ok(createIdx < payIdx, "Persist real video record before initiating ads payment");
   });
+
+  it("9. Existing private/unlisted visibility is preserved when omitted, explicit updates work, new uploads default to public, and PHP matches", async () => {
+    const alex = await loginAs("alex@facetube.com", "password123");
+    const admin = await loginAs("admin@facetube.com", "password");
+
+    // 1. New video without visibility defaults to "public"
+    const createNewRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${alex.token}`,
+        },
+        body: JSON.stringify({
+          id: "vid-default-public-1",
+          title: "Brand New Video No Visibility",
+          video_url: "/uploads/videos/new_default.mp4",
+          video_type: "free",
+          content_type: "long",
+        }),
+      }),
+    );
+    assert.ok(createNewRes);
+    assert.equal(createNewRes.status, 201);
+    const createNewBody = await createNewRes.json();
+    assert.equal(createNewBody.video.visibility, "public");
+
+    // 2. Existing private video remains private when visibility is omitted (missing or blank)
+    const createPrivRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${alex.token}`,
+        },
+        body: JSON.stringify({
+          id: "vid-priv-preserve-1",
+          title: "Initial Private Title",
+          video_url: "/uploads/videos/priv_preserve.mp4",
+          video_type: "free",
+          content_type: "long",
+          visibility: "private",
+        }),
+      }),
+    );
+    assert.ok(createPrivRes);
+    assert.equal(createPrivRes.status, 201);
+    assert.equal((await createPrivRes.json()).video.visibility, "private");
+
+    const updatePrivOmittedRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${alex.token}`,
+        },
+        body: JSON.stringify({
+          id: "vid-priv-preserve-1",
+          title: "Updated Private Title Without Visibility",
+          video_url: "/uploads/videos/priv_preserve.mp4",
+          video_type: "free",
+          content_type: "long",
+        }),
+      }),
+    );
+    assert.ok(updatePrivOmittedRes);
+    assert.equal(updatePrivOmittedRes.status, 201);
+    const updatePrivOmittedBody = await updatePrivOmittedRes.json();
+    assert.equal(updatePrivOmittedBody.video.visibility, "private");
+    assert.equal(updatePrivOmittedBody.video.title, "Updated Private Title Without Visibility");
+
+    // 3. Existing unlisted video remains unlisted when visibility is omitted or whitespace
+    const createUnlistedRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${alex.token}`,
+        },
+        body: JSON.stringify({
+          id: "vid-unlisted-preserve-1",
+          title: "Initial Unlisted Title",
+          video_url: "/uploads/videos/unlisted_preserve.mp4",
+          video_type: "free",
+          content_type: "short",
+          visibility: "unlisted",
+        }),
+      }),
+    );
+    assert.ok(createUnlistedRes);
+    assert.equal(createUnlistedRes.status, 201);
+
+    const updateUnlistedOmittedRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${alex.token}`,
+        },
+        body: JSON.stringify({
+          id: "vid-unlisted-preserve-1",
+          title: "Updated Unlisted Title",
+          video_url: "/uploads/videos/unlisted_preserve.mp4",
+          video_type: "free",
+          content_type: "short",
+          visibility: "   ",
+        }),
+      }),
+    );
+    assert.ok(updateUnlistedOmittedRes);
+    assert.equal(updateUnlistedOmittedRes.status, 201);
+    assert.equal((await updateUnlistedOmittedRes.json()).video.visibility, "unlisted");
+
+    // 4. Explicit public/private/unlisted transitions continue working (including Admin update)
+    for (const nextVis of ["unlisted", "public", "private"] as const) {
+      const explicitRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${alex.token}`,
+          },
+          body: JSON.stringify({
+            id: "vid-priv-preserve-1",
+            title: `Explicit Transition (${nextVis})`,
+            video_url: "/uploads/videos/priv_preserve.mp4",
+            video_type: "free",
+            content_type: "long",
+            visibility: nextVis,
+          }),
+        }),
+      );
+      assert.ok(explicitRes);
+      assert.equal(explicitRes.status, 201);
+      assert.equal((await explicitRes.json()).video.visibility, nextVis);
+    }
+
+    // Admin updating owner's private video without visibility must preserve owner and private visibility
+    const adminUpdateOmitted = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/create", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${admin.token}`,
+        },
+        body: JSON.stringify({
+          id: "vid-priv-preserve-1",
+          title: "Admin Moderated Title",
+          video_url: "/uploads/videos/priv_preserve.mp4",
+          video_type: "free",
+          content_type: "long",
+        }),
+      }),
+    );
+    assert.ok(adminUpdateOmitted);
+    assert.equal(adminUpdateOmitted.status, 201);
+    const adminBody = await adminUpdateOmitted.json();
+    assert.equal(adminBody.video.user_id, alex.userId);
+    assert.equal(adminBody.video.visibility, "private");
+
+    // Public list must still exclude private & unlisted videos
+    const publicListRes = await handleApiRequest(
+      new Request("http://localhost:3000/api/videos/list?video_type=free&limit=50"),
+    );
+    assert.ok(publicListRes);
+    const publicIds = ((await publicListRes.json()).videos || []).map((v: any) => v.id);
+    assert.equal(publicIds.includes("vid-default-public-1"), true);
+    assert.equal(publicIds.includes("vid-priv-preserve-1"), false);
+    assert.equal(publicIds.includes("vid-unlisted-preserve-1"), false);
+
+    // 5. MySQL path preserves existing private visibility when visibility is omitted
+    let capturedInsertVisibility: string | null = null;
+    const mockMysqlConn = {
+      async beginTransaction() {},
+      async commit() {},
+      async rollback() {},
+      release() {},
+      async query(sql: string, params: any[] = []) {
+        if (sql.includes("FROM uploaded_videos") && sql.includes("FOR UPDATE")) {
+          return [
+            [
+              {
+                id: "vid-mysql-priv-1",
+                user_id: alex.userId,
+                visibility: "private",
+                payment_status: "not_required",
+                payment_id: null,
+                payment_amount: 0,
+                is_promoted: 0,
+                promotion_plan: null,
+                promotion_expires_at: null,
+                views: 5,
+                likes: 1,
+                created_at: "2026-11-22T00:00:00.000Z",
+              },
+            ],
+          ];
+        }
+        if (sql.includes("INSERT INTO uploaded_videos")) {
+          capturedInsertVisibility = String(params[14] ?? "");
+          return [{ affectedRows: 1 }];
+        }
+        return [[]];
+      },
+    };
+    const mockMysqlPool = {
+      async query(sql: string) {
+        if (
+          sql.includes("FROM sessions") ||
+          sql.includes("FROM user_sessions") ||
+          sql.includes("FROM users")
+        ) {
+          return [[{ user_id: alex.userId, role: "user", name: "Alex Rivera", is_blocked: 0 }]];
+        }
+        return [[], []];
+      },
+      async getConnection() {
+        return mockMysqlConn;
+      },
+    };
+
+    const prevDbHost = process.env["DB_HOST"];
+    const prevDbName = process.env["DB_NAME"];
+    const prevDbUser = process.env["DB_USER"];
+    process.env["DB_HOST"] = "127.0.0.1";
+    process.env["DB_NAME"] = "facetube_test";
+    process.env["DB_USER"] = "facetube_test";
+
+    try {
+      setMysqlPoolForTesting(mockMysqlPool);
+      const mysqlUpdateRes = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${alex.token}`,
+          },
+          body: JSON.stringify({
+            id: "vid-mysql-priv-1",
+            title: "MySQL Private Update Without Visibility",
+            video_url: "/uploads/videos/mysql_priv.mp4",
+            video_type: "free",
+            content_type: "long",
+          }),
+        }),
+      );
+      assert.ok(mysqlUpdateRes);
+      assert.equal(mysqlUpdateRes.status, 201);
+      const mysqlBody = await mysqlUpdateRes.json();
+      assert.equal(capturedInsertVisibility, "private");
+      assert.equal(mysqlBody.video.visibility, "private");
+    } finally {
+      setMysqlPoolForTesting(null);
+      if (prevDbHost === undefined) delete process.env["DB_HOST"];
+      else process.env["DB_HOST"] = prevDbHost;
+      if (prevDbName === undefined) delete process.env["DB_NAME"];
+      else process.env["DB_NAME"] = prevDbName;
+      if (prevDbUser === undefined) delete process.env["DB_USER"];
+      else process.env["DB_USER"] = prevDbUser;
+    }
+
+    // 6. PHP create.php parity check
+    const createPhp = fs.readFileSync(path.resolve(process.cwd(), "api/videos/create.php"), "utf8");
+    assert.match(createPhp, /\$hasExplicitVisibility\s*=/);
+    assert.match(createPhp, /SELECT\s+id,\s*user_id,\s*visibility,/);
+    assert.match(createPhp, /if\s*\(\s*!\$hasExplicitVisibility\s*\)/);
+    assert.match(createPhp, /\$existingVideo\['visibility'\]/);
+  });
 });

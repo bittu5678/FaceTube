@@ -24,9 +24,14 @@ import { Logo } from "@/components/videohub/Logo";
 import { ThemeToggle } from "@/components/videohub/ThemeToggle";
 import { BottomNav } from "@/components/videohub/BottomNav";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
-import { SHORTS_LIST, type ShortItem } from "@/data/shorts";
+import type { ShortItem } from "@/data/shorts";
 import { useAuth } from "@/lib/auth-context";
-import { fetchUploadedVideos, getVideoBadgeLabels, isShortVideo } from "@/lib/video-service";
+import {
+  fetchUploadedVideos,
+  getVideoBadgeLabels,
+  isPubliclyCacheableVideo,
+  isShortVideo,
+} from "@/lib/video-service";
 import { api } from "@/lib/api";
 
 export interface ShortsSearch {
@@ -78,12 +83,20 @@ function ShortsPage() {
   );
 
   const [uploadedShorts, setUploadedShorts] = useState<ShortItem[]>([]);
+  const [loadingShorts, setLoadingShorts] = useState(true);
 
   useEffect(() => {
-    fetchUploadedVideos()
+    let mounted = true;
+    setLoadingShorts(true);
+    fetchUploadedVideos({ contentType: "short" })
       .then((videos) => {
+        if (!mounted) return;
         const mapped = videos
-          .filter((v) => isShortVideo({ contentType: v.contentType, duration: v.duration }))
+          .filter(
+            (v) =>
+              isPubliclyCacheableVideo(v) &&
+              isShortVideo({ contentType: v.contentType, duration: v.duration }),
+          )
           .map((v): ShortItem => ({
             id: v.id,
             title: v.title,
@@ -99,17 +112,24 @@ function ShortsPage() {
             thumb: v.thumbnailUrl,
             aspectColor: "from-purple-900/60 to-brand/80",
             videoUrl: v.videoUrl,
-            userId: v.userId || (v as any).user_id || "FT483921",
+            userId: String(v.userId || (v as any).user_id || ""),
             channelLogoUrl: v.channelLogoUrl || (v as any).channel_logo_url,
             videoType: v.videoType,
             isPromoted: v.isPromoted,
             promotionExpiresAt: v.promotionExpiresAt,
           }));
-        if (mapped.length > 0) {
-          setUploadedShorts(mapped);
-        }
+        setUploadedShorts(mapped);
       })
-      .catch((err) => console.warn("Could not fetch shorts from API:", err));
+      .catch((err) => {
+        console.warn("Could not fetch shorts from API:", err);
+        if (mounted) setUploadedShorts([]);
+      })
+      .finally(() => {
+        if (mounted) setLoadingShorts(false);
+      });
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   const allShorts: ShortItem[] = useMemo(() => {
@@ -121,13 +141,7 @@ function ShortsPage() {
         list.push(s);
       }
     }
-    for (const s of SHORTS_LIST) {
-      if (!seen.has(s.id)) {
-        seen.add(s.id);
-        list.push(s);
-      }
-    }
-    return list.length > 0 ? list : SHORTS_LIST;
+    return list;
   }, [uploadedShorts]);
 
   const initialIndex = searchParams.id
@@ -165,9 +179,16 @@ function ShortsPage() {
   });
 
   const touchStartY = useRef<number | null>(null);
-  const fallbackShort: ShortItem = SHORTS_LIST[0] as ShortItem;
-  const activeShort: ShortItem = allShorts[currentIndex] ?? allShorts[0] ?? fallbackShort;
-  const activeShortLabels = getVideoBadgeLabels(activeShort);
+  const activeShort: ShortItem | undefined = allShorts[currentIndex] ?? allShorts[0];
+  const activeShortLabels = activeShort
+    ? getVideoBadgeLabels(activeShort)
+    : {
+        isFree: true,
+        showSponsorLabel: false,
+        showAdsLabel: false,
+        showThumbnailAdsOverlay: false as const,
+        badges: [],
+      };
 
   // YouTube-style Pinch-to-Zoom & Pan state
   const [scale, setScale] = useState(1);
@@ -191,7 +212,7 @@ function ShortsPage() {
 
   useEffect(() => {
     resetZoom();
-  }, [currentIndex, activeShort.id, resetZoom]);
+  }, [currentIndex, activeShort?.id, resetZoom]);
 
   // Clean up any pending single-tap timeout on unmount
   useEffect(() => {
@@ -203,10 +224,12 @@ function ShortsPage() {
   }, []);
 
   const handleNext = useCallback(() => {
+    if (allShorts.length <= 1) return;
     setCurrentIndex((prev) => (prev + 1) % allShorts.length);
   }, [allShorts.length]);
 
   const handlePrev = useCallback(() => {
+    if (allShorts.length <= 1) return;
     setCurrentIndex((prev) => (prev - 1 + allShorts.length) % allShorts.length);
   }, [allShorts.length]);
 
@@ -391,11 +414,8 @@ function ShortsPage() {
   };
 
   const activeCreatorUserId = useMemo(() => {
-    return (
-      activeShort.userId ||
-      (activeShort as any).user_id ||
-      (activeShort.creatorHandle ? activeShort.creatorHandle.replace(/^@/, "") : "FT483921")
-    );
+    if (!activeShort) return "";
+    return String(activeShort.userId || (activeShort as any).user_id || "");
   }, [activeShort]);
 
   useEffect(() => {
@@ -424,6 +444,10 @@ function ShortsPage() {
   }, [activeCreatorUserId, user]);
 
   const handleToggleSubscribe = async (creatorId: string, creatorName: string) => {
+    if (!creatorId) {
+      toast.error("Creator account unavailable for this short.");
+      return;
+    }
     if (selfCreators[creatorId]) {
       toast.error("You cannot subscribe to your own channel.");
       return;
@@ -466,7 +490,7 @@ function ShortsPage() {
 
   const handleAddComment = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newComment.trim()) return;
+    if (!activeShort || !newComment.trim()) return;
     const authorName = profile?.full_name || user?.email?.split("@")[0] || "You";
     const newEntry = {
       id: String(Date.now()),
@@ -518,6 +542,18 @@ function ShortsPage() {
 
       {/* Main Shorts Theater with Touch Swipe */}
       <main className="flex-1 flex items-center justify-center p-2 sm:p-4 pb-24 md:pb-28">
+        {!activeShort ? (
+          <div className="w-[340px] sm:w-[400px] rounded-3xl border border-border bg-card p-8 text-center shadow-xl space-y-3">
+            <p className="text-base font-bold text-foreground">
+              {loadingShorts ? "Loading Shorts..." : "No public Shorts available yet"}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {loadingShorts
+                ? "Fetching eligible short-form videos."
+                : "Public vertical short videos uploaded by creators will appear here."}
+            </p>
+          </div>
+        ) : (
         <div className="relative flex flex-col md:flex-row items-center gap-4 max-w-full">
           {/* Vertical Video Reel Card with YouTube-Style Pinch-to-Zoom */}
           <div
@@ -802,9 +838,10 @@ function ShortsPage() {
             </div>
           </div>
         </div>
+        )}
 
         {/* Interactive Comments Drawer / Modal */}
-        {commentsOpen && (
+        {activeShort && commentsOpen && (
           <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 p-0 sm:p-4 backdrop-blur-sm animate-in fade-in">
             <div className="relative w-full max-w-md rounded-t-3xl sm:rounded-3xl border border-border bg-card p-5 shadow-2xl animate-in slide-in-from-bottom">
               <div className="flex items-center justify-between border-b border-border/60 pb-3">
