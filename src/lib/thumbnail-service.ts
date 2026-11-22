@@ -66,36 +66,93 @@ export function getCategoryFallbackThumbnail(category?: string): string {
   return defaultThumbnail;
 }
 
+export interface OptionalThumbnailValidationResult {
+  valid: boolean;
+  error?: string;
+}
+
+/**
+ * Sanitizes an optional thumbnail URL input.
+ * Returns "" for missing, null, non-string, whitespace-only, or stringified nullish values.
+ */
+export function sanitizeOptionalThumbnailUrl(rawUrl: unknown): string {
+  if (typeof rawUrl !== "string") {
+    return "";
+  }
+  const trimmed = rawUrl.trim();
+  const lower = trimmed.toLowerCase();
+  if (
+    !trimmed ||
+    lower === "undefined" ||
+    lower === "null" ||
+    lower === "nan" ||
+    trimmed.includes("[object")
+  ) {
+    return "";
+  }
+  return trimmed;
+}
+
+/**
+ * Validates an optional custom thumbnail (cover image) file.
+ * Missing/null thumbnail is always valid because thumbnails are optional.
+ * When a file is provided, enforces supported image formats (JPG/JPEG/PNG/WEBP) and size <= 25MB.
+ */
+export function validateOptionalThumbnailFile(
+  file?: File | null,
+): OptionalThumbnailValidationResult {
+  if (!file) {
+    return { valid: true };
+  }
+
+  const maxSizeBytes = 25 * 1024 * 1024; // 25MB limit
+  if (file.size <= 0) {
+    return { valid: false, error: "Selected cover image is empty (0 bytes)." };
+  }
+  if (file.size > maxSizeBytes) {
+    return {
+      valid: false,
+      error: `Cover image exceeds 25MB limit (${(file.size / (1024 * 1024)).toFixed(1)} MB).`,
+    };
+  }
+
+  const validExts = [".jpg", ".jpeg", ".png", ".webp"];
+  const ext = "." + ((file.name || "").split(".").pop() || "").toLowerCase();
+  const validMimes = ["image/jpeg", "image/png", "image/webp"];
+  const isExtValid = validExts.includes(ext);
+  const isMimeValid = file.type ? validMimes.includes(file.type.toLowerCase()) : isExtValid;
+
+  if (!isExtValid || !isMimeValid) {
+    return {
+      valid: false,
+      error: "Unsupported cover image format. Please select a JPG, JPEG, PNG, or WEBP image.",
+    };
+  }
+
+  return { valid: true };
+}
+
 /**
  * Safely resolves a usable thumbnail URL for any video item.
  * Prioritizes custom uploaded posters, data URLs, static thumbnails, and category fallbacks.
  * Filters out invalid literal strings like "undefined" or "null" and normalizes relative paths.
  */
 export function resolveVideoThumbnail(video?: {
-  thumbnailUrl?: string;
-  thumbnail_url?: string;
-  thumb?: string;
-  thumbnail?: string;
-  category?: string;
+  thumbnailUrl?: string | null | undefined;
+  thumbnail_url?: string | null | undefined;
+  thumb?: string | null | undefined;
+  thumbnail?: string | null | undefined;
+  category?: string | null | undefined;
 }): string {
   if (!video) return CATEGORY_THUMBNAILS["General"] ?? SVG_FALLBACK_THUMBNAIL;
   const rawCand = video.thumbnailUrl || video.thumbnail_url || video.thumb || video.thumbnail;
+  const sanitized = sanitizeOptionalThumbnailUrl(rawCand);
 
-  if (rawCand && typeof rawCand === "string") {
-    const trimmed = rawCand.trim();
-    // Guard against literal "undefined", "null", or empty values
-    if (
-      trimmed.length > 0 &&
-      trimmed !== "undefined" &&
-      trimmed !== "null" &&
-      trimmed !== "NaN" &&
-      !trimmed.includes("[object")
-    ) {
-      return resolveMediaUrl(trimmed);
-    }
+  if (sanitized) {
+    return resolveMediaUrl(sanitized);
   }
 
-  return getCategoryFallbackThumbnail(video.category);
+  return getCategoryFallbackThumbnail(video.category ?? undefined);
 }
 
 /**

@@ -29,6 +29,10 @@ import {
   resolveSmtpConfig,
 } from "./email.ts";
 import { PRODUCTION_API_DOMAIN } from "../lib/media-url.ts";
+import {
+  getCategoryFallbackThumbnail,
+  sanitizeOptionalThumbnailUrl,
+} from "../lib/thumbnail-service.ts";
 
 const DATA_DIR = path.resolve(process.cwd(), "data");
 const STORE_FILE = path.join(DATA_DIR, "facetube_store.json");
@@ -544,6 +548,8 @@ interface ServerStore {
     format?: string | undefined;
     file_size?: string | undefined;
     category: string;
+    effect?: string | undefined;
+    music?: Record<string, unknown> | undefined;
     views: number;
     likes: number;
     created_at: string;
@@ -5663,10 +5669,15 @@ async function dispatchApiRequest(
         return jsonResponse({ success: false, error: "Video URL is required." }, 400);
       }
 
-      let finalThumbnailUrl =
-        body.thumbnail_url ||
-        body.thumbnailUrl ||
-        "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=60";
+      const category =
+        typeof body.category === "string" && body.category.trim()
+          ? body.category.trim()
+          : "General";
+      const fallbackThumbnailUrl = getCategoryFallbackThumbnail(category);
+      const sanitizedThumbnail =
+        sanitizeOptionalThumbnailUrl(body.thumbnail_url) ||
+        sanitizeOptionalThumbnailUrl(body.thumbnailUrl);
+      let finalThumbnailUrl = sanitizedThumbnail || fallbackThumbnailUrl;
 
       const vidId = body.id || `vid-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 
@@ -5674,17 +5685,24 @@ async function dispatchApiRequest(
       if (finalThumbnailUrl.startsWith("data:image/")) {
         try {
           const parts = finalThumbnailUrl.split(",");
-          if (parts.length === 2) {
+          if (parts.length === 2 && parts[1]) {
             const buffer = Buffer.from(parts[1], "base64");
-            const imgUploadDir = path.resolve(process.cwd(), "uploads", "images");
-            await fs.promises.mkdir(imgUploadDir, { recursive: true });
-            const safeVidId = vidId.replace(/[^a-zA-Z0-9_-]/g, "_");
-            const imgFileName = `thumb_${safeVidId}.jpg`;
-            await fs.promises.writeFile(path.join(imgUploadDir, imgFileName), buffer);
-            finalThumbnailUrl = `/uploads/images/${imgFileName}`;
+            if (buffer.length > 0) {
+              const imgUploadDir = path.resolve(process.cwd(), "uploads", "images");
+              await fs.promises.mkdir(imgUploadDir, { recursive: true });
+              const safeVidId = vidId.replace(/[^a-zA-Z0-9_-]/g, "_");
+              const imgFileName = `thumb_${safeVidId}.jpg`;
+              await fs.promises.writeFile(path.join(imgUploadDir, imgFileName), buffer);
+              finalThumbnailUrl = `/uploads/images/${imgFileName}`;
+            } else {
+              finalThumbnailUrl = fallbackThumbnailUrl;
+            }
+          } else {
+            finalThumbnailUrl = fallbackThumbnailUrl;
           }
         } catch (imgErr) {
           console.warn("Base64 thumbnail save error:", imgErr);
+          finalThumbnailUrl = fallbackThumbnailUrl;
         }
       }
 
@@ -6189,6 +6207,25 @@ async function dispatchApiRequest(
   }
 
   // 7. Images
+  const parseImageMusicRecord = (raw: unknown): Record<string, unknown> | undefined => {
+    if (!raw) return undefined;
+    let parsed: unknown = raw;
+    if (typeof raw === "string") {
+      const trimmed = raw.trim();
+      if (!trimmed) return undefined;
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        return undefined;
+      }
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const obj = parsed as Record<string, unknown>;
+    const trackId = typeof obj["trackId"] === "string" ? obj["trackId"].trim() : "";
+    if (!trackId) return undefined;
+    return obj;
+  };
+
   if (route === "images/list") {
     if (method === "GET") {
       const userId = url.searchParams.get("userId");
@@ -6209,15 +6246,26 @@ async function dispatchApiRequest(
       }
       if (pool) {
         try {
+          let hasMusicCol = false;
+          try {
+            const [cols] = (await pool.query(
+              "SHOW COLUMNS FROM uploaded_images LIKE 'music_json'",
+            )) as any;
+            hasMusicCol = Array.isArray(cols) && cols.length > 0;
+          } catch {
+            hasMusicCol = false;
+          }
+
+          const musicColSql = hasMusicCol ? ", i.music_json" : "";
           const sql = userId
-            ? `SELECT i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.format, i.file_size, i.category, i.views, i.likes, i.created_at,
+            ? `SELECT i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.format, i.file_size, i.category, i.views, i.likes, i.created_at${musicColSql},
                       u.channel_logo_url AS creator_channel_logo_url,
                       u.channel_name AS creator_channel_name
                FROM uploaded_images i
                LEFT JOIN users u ON UPPER(u.user_id) = UPPER(i.user_id)
                WHERE UPPER(i.user_id) = UPPER(?)
                ORDER BY i.created_at DESC`
-            : `SELECT i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.format, i.file_size, i.category, i.views, i.likes, i.created_at,
+            : `SELECT i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.format, i.file_size, i.category, i.views, i.likes, i.created_at${musicColSql},
                       u.channel_logo_url AS creator_channel_logo_url,
                       u.channel_name AS creator_channel_name
                FROM uploaded_images i
@@ -6232,6 +6280,7 @@ async function dispatchApiRequest(
             const channelName = rawChannelName || rawCreatorName || "FaceTube Creator";
             const creatorName = rawCreatorName || channelName;
             const channelLogoUrl = normalizeImageCreatorLogo(r.creator_channel_logo_url);
+            const music = parseImageMusicRecord(r.music_json ?? r.music);
             return {
               id: String(r.id),
               userId: r.user_id,
@@ -6252,6 +6301,7 @@ async function dispatchApiRequest(
               fileSize: r.file_size || "1.0 MB",
               file_size: r.file_size || "1.0 MB",
               category: r.category || "General",
+              music,
               views: Number(r.views) || 0,
               likes: Number(r.likes) || 0,
               createdAt: r.created_at,
@@ -6300,6 +6350,7 @@ async function dispatchApiRequest(
             imageUrl: i.image_url,
             thumbnailUrl: i.thumbnail_url || i.image_url,
             fileSize: i.file_size || "1.0 MB",
+            music: parseImageMusicRecord(i.music),
             createdAt: i.created_at,
           };
         }),
@@ -6323,6 +6374,7 @@ async function dispatchApiRequest(
       }
 
       const imgId = body.id || `img-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const normalizedMusic = parseImageMusicRecord(body.music ?? body.music_json);
       const newImage = {
         id: imgId,
         user_id: body.userId || body.user_id || "FT102857",
@@ -6334,8 +6386,8 @@ async function dispatchApiRequest(
         format: (body.format || "jpg").toLowerCase(),
         file_size: body.fileSize || body.file_size || "1.2 MB",
         category: body.category || "Entertainment",
-        effect: body.effect || "original",
-        music: body.music || undefined,
+        effect: typeof body.effect === "string" ? body.effect : "original",
+        music: normalizedMusic,
         views: 0,
         likes: 0,
         created_at: new Date().toISOString(),
@@ -6344,21 +6396,50 @@ async function dispatchApiRequest(
       const pool = getMysqlPool();
       if (pool) {
         try {
-          await pool.query(
-            `INSERT INTO uploaded_images (id, user_id, creator_name, title, description, image_url, format, file_size, category, views, likes, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NOW())`,
-            [
-              newImage.id,
-              newImage.user_id,
-              newImage.creator_name,
-              newImage.title,
-              newImage.description,
-              newImage.image_url,
-              newImage.format,
-              newImage.file_size,
-              newImage.category,
-            ],
-          );
+          let hasMusicCol = false;
+          try {
+            const [cols] = (await pool.query(
+              "SHOW COLUMNS FROM uploaded_images LIKE 'music_json'",
+            )) as any;
+            hasMusicCol = Array.isArray(cols) && cols.length > 0;
+          } catch {
+            hasMusicCol = false;
+          }
+
+          if (hasMusicCol) {
+            await pool.query(
+              `INSERT INTO uploaded_images (id, user_id, creator_name, title, description, image_url, format, file_size, category, music_json, views, likes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NOW())`,
+              [
+                newImage.id,
+                newImage.user_id,
+                newImage.creator_name,
+                newImage.title,
+                newImage.description,
+                newImage.image_url,
+                newImage.format,
+                newImage.file_size,
+                newImage.category,
+                normalizedMusic ? JSON.stringify(normalizedMusic) : null,
+              ],
+            );
+          } else {
+            await pool.query(
+              `INSERT INTO uploaded_images (id, user_id, creator_name, title, description, image_url, format, file_size, category, views, likes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NOW())`,
+              [
+                newImage.id,
+                newImage.user_id,
+                newImage.creator_name,
+                newImage.title,
+                newImage.description,
+                newImage.image_url,
+                newImage.format,
+                newImage.file_size,
+                newImage.category,
+              ],
+            );
+          }
         } catch (_dbErr) {
           // ignore error if MySQL is unreachable
         }
@@ -6375,6 +6456,7 @@ async function dispatchApiRequest(
           imageUrl: newImage.image_url,
           thumbnailUrl: newImage.thumbnail_url,
           fileSize: newImage.file_size,
+          music: normalizedMusic,
           createdAt: newImage.created_at,
         },
       });

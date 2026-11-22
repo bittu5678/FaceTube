@@ -1,7 +1,11 @@
 import { api } from "./api";
 import { resolveMediaUrl } from "./media-url";
 
-import type { SelectedImageMusic } from "./image-music-library";
+import {
+  resolveMusicTrack,
+  toSelectedImageMusic,
+  type SelectedImageMusic,
+} from "./image-music-library";
 
 export interface UploadedImage {
   id: string;
@@ -125,11 +129,68 @@ export function saveStoredImages(images: UploadedImage[]): void {
   }
 }
 
+export function normalizeImageMusic(raw: unknown): SelectedImageMusic | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const obj = parsed as Record<string, unknown>;
+  const trackId = typeof obj["trackId"] === "string" ? obj["trackId"].trim() : "";
+  if (!trackId) return undefined;
+
+  const startTime =
+    typeof obj["startTime"] === "number" &&
+    Number.isFinite(obj["startTime"]) &&
+    obj["startTime"] >= 0
+      ? obj["startTime"]
+      : 0;
+  const volume =
+    typeof obj["volume"] === "number" && Number.isFinite(obj["volume"])
+      ? Math.max(0, Math.min(1, obj["volume"]))
+      : 0.7;
+
+  const verifiedTrack = resolveMusicTrack({ trackId });
+  if (verifiedTrack) {
+    return toSelectedImageMusic(verifiedTrack, { startTime, volume });
+  }
+
+  const title = typeof obj["title"] === "string" ? obj["title"].trim() : "";
+  const artist = typeof obj["artist"] === "string" ? obj["artist"].trim() : "";
+  if (!title) return undefined;
+
+  return {
+    trackId,
+    title,
+    artist: artist || "FaceTube Audio",
+    license: typeof obj["license"] === "string" ? obj["license"] : undefined,
+    licenseUrl: typeof obj["licenseUrl"] === "string" ? obj["licenseUrl"] : undefined,
+    source: typeof obj["source"] === "string" ? obj["source"] : undefined,
+    attributionText:
+      typeof obj["attributionText"] === "string" ? obj["attributionText"] : undefined,
+    audioUrl: typeof obj["audioUrl"] === "string" ? obj["audioUrl"] : undefined,
+    startTime,
+    volume,
+  };
+}
+
 export async function fetchUploadedImages(userId?: string): Promise<UploadedImage[]> {
   try {
     const res = await api.images.list(userId ? { userId } : undefined);
     if (res && res.images && Array.isArray(res.images)) {
+      const stored = getStoredImages();
+      const storedById = new Map(stored.map((img) => [img.id, img]));
+
       const serverImages: UploadedImage[] = res.images.map((item: any) => {
+        const id = String(item.id);
+        const localMatch = storedById.get(id);
         const rawCreatorName =
           typeof (item.creator_name ?? item.creatorName) === "string"
             ? String(item.creator_name ?? item.creatorName).trim()
@@ -145,9 +206,16 @@ export async function fetchUploadedImages(userId?: string): Promise<UploadedImag
           typeof rawLogo === "string" && rawLogo.trim() !== ""
             ? resolveMediaUrl(rawLogo) || null
             : null;
+        const music =
+          normalizeImageMusic(item.music ?? item.music_json) ??
+          normalizeImageMusic(localMatch?.music);
+        const effect =
+          typeof item.effect === "string" && item.effect.trim() !== ""
+            ? item.effect
+            : localMatch?.effect;
 
         return {
-          id: String(item.id),
+          id,
           userId: item.user_id || item.userId || "FT102857",
           creatorName,
           channelName,
@@ -158,6 +226,8 @@ export async function fetchUploadedImages(userId?: string): Promise<UploadedImag
           format: (item.format || "jpg") as "jpg" | "jpeg" | "png" | "webp",
           fileSize: item.file_size || item.fileSize || "1.0 MB",
           category: item.category || "Entertainment",
+          effect,
+          music,
           views: Number(item.views) || 0,
           likes: Number(item.likes) || 0,
           createdAt: item.created_at || item.createdAt || new Date().toISOString(),
@@ -165,7 +235,6 @@ export async function fetchUploadedImages(userId?: string): Promise<UploadedImag
       });
 
       // Merge with stored local images so newly uploaded images never disappear
-      const stored = getStoredImages();
       const serverIds = new Set(serverImages.map((img) => img.id));
       const notInServer = stored.filter((img) => !serverIds.has(img.id));
       const combined = [...notInServer, ...serverImages];
@@ -222,7 +291,7 @@ export async function recordNewImageUpload(data: {
     createdAt: now,
   };
 
-  // 1. Persist to PHP MySQL API
+  // 1. Persist to PHP / Node API
   try {
     await api.images.create({
       id,
@@ -234,6 +303,8 @@ export async function recordNewImageUpload(data: {
       format: newImage.format,
       file_size: newImage.fileSize,
       category: newImage.category,
+      effect: newImage.effect,
+      music: newImage.music,
     });
   } catch (e) {
     console.warn("API recordNewImageUpload fallback:", e);

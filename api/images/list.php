@@ -28,9 +28,18 @@ if (!empty($category) && $category !== 'All') {
 $whereSql = !empty($where) ? 'WHERE ' . implode(' AND ', $where) : '';
 
 try {
+    $hasMusicCol = false;
+    try {
+        $colStmt = $pdo->query("SHOW COLUMNS FROM uploaded_images LIKE 'music_json'");
+        $hasMusicCol = $colStmt && $colStmt->fetch() !== false;
+    } catch (PDOException $colErr) {
+        $hasMusicCol = false;
+    }
+
+    $musicSelect = $hasMusicCol ? ', i.music_json' : '';
     $sql = "
         SELECT
-            i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.thumbnail_url, i.category, i.views, i.likes, i.created_at,
+            i.id, i.user_id, i.creator_name, i.title, i.description, i.image_url, i.thumbnail_url, i.category, i.views, i.likes, i.created_at{$musicSelect},
             u.channel_logo_url AS creator_channel_logo_url,
             u.channel_name AS creator_channel_name
         FROM uploaded_images i
@@ -58,7 +67,15 @@ try {
             : ($rawCreatorName !== '' ? $rawCreatorName : 'FaceTube Creator');
         $creatorName = $rawCreatorName !== '' ? $rawCreatorName : $channelName;
 
-        unset($img['creator_channel_logo_url'], $img['creator_channel_name']);
+        $music = null;
+        if (!empty($img['music_json']) && is_string($img['music_json'])) {
+            $decodedMusic = json_decode($img['music_json'], true);
+            if (is_array($decodedMusic) && !empty($decodedMusic['trackId'])) {
+                $music = $decodedMusic;
+            }
+        }
+
+        unset($img['creator_channel_logo_url'], $img['creator_channel_name'], $img['music_json']);
 
         $img['userId'] = $img['user_id'] ?? '';
         $img['creatorName'] = $creatorName;
@@ -71,6 +88,7 @@ try {
         $img['imageUrl'] = $img['image_url'];
         $img['thumbnail_url'] = toAbsoluteMediaUrl($img['thumbnail_url'] ?? '', 'images');
         $img['thumbnailUrl'] = $img['thumbnail_url'];
+        $img['music'] = $music;
         return $img;
     }, $rawImages);
 

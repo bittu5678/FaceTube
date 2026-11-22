@@ -11,6 +11,8 @@ import {
   FileVideo,
   Sparkles,
   Play,
+  Pause,
+  Music,
   Layers,
   Check,
   ChevronRight,
@@ -53,6 +55,7 @@ import {
   uploadThumbnailDataUrl,
   getCategoryFallbackThumbnail,
   resolveVideoThumbnail,
+  validateOptionalThumbnailFile,
 } from "@/lib/thumbnail-service";
 import { recordNewImageUpload, type UploadedImage } from "@/lib/image-service";
 import {
@@ -63,10 +66,16 @@ import {
   type ImageFilterId,
 } from "@/lib/image-effects";
 import {
+  IMAGE_MUSIC_CATEGORIES,
   IMAGE_MUSIC_LIBRARY,
-  playMusicPreview,
+  CC_BY_4_0_URL,
+  getTracksByCategory,
+  toSelectedImageMusic,
+  toggleMusicPreview,
   stopMusicPreview,
   setMusicPreviewVolume,
+  setMusicPreviewPlaybackListener,
+  type ImageMusicCategory,
   type SelectedImageMusic,
 } from "@/lib/image-music-library";
 import {
@@ -362,23 +371,23 @@ function FourOptionsSelectionView({
         </div>
 
         {/* OPTION 2: Sponsor */}
-        <div className="group relative flex flex-col justify-between overflow-hidden rounded-3xl border border-amber-500/40 bg-gradient-to-b from-amber-500/10 via-card to-card p-6 shadow-card hover:border-amber-500/70 hover:shadow-lg transition-all">
+        <div className="group relative flex flex-col justify-between overflow-hidden rounded-3xl border border-pink-500/40 bg-gradient-to-b from-pink-500/10 via-card to-card p-6 shadow-card hover:border-pink-500/70 hover:shadow-lg transition-all">
           <div className="space-y-4">
             <div className="flex items-center justify-between">
-              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-amber-500/20 text-amber-400 border border-amber-500/30 shadow-inner">
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-pink-500/20 text-pink-600 dark:text-pink-400 border border-pink-500/30 shadow-inner">
                 <Sparkles className="h-6 w-6" />
               </div>
               {/* Clear Sponsor Badge */}
-              <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-3 py-1 text-xs font-black uppercase text-amber-400">
+              <span className="rounded-full border border-pink-500/40 bg-pink-500/15 px-3 py-1 text-xs font-black uppercase text-pink-600 dark:text-pink-400">
                 Sponsor · ₹6
               </span>
             </div>
 
             <div>
-              <div className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+              <div className="text-[11px] font-bold uppercase tracking-wider text-pink-600 dark:text-pink-400">
                 Option 2
               </div>
-              <h2 className="mt-1 text-xl font-black text-foreground group-hover:text-amber-400 transition-colors">
+              <h2 className="mt-1 text-xl font-black text-foreground group-hover:text-pink-600 dark:group-hover:text-pink-400 transition-colors">
                 Sponsor
               </h2>
               <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
@@ -389,14 +398,14 @@ function FourOptionsSelectionView({
             {/* Sub-options pills */}
             <div className="rounded-2xl border border-border/80 bg-background/60 p-3 space-y-2">
               <div className="text-[11px] font-bold text-foreground flex items-center gap-1.5">
-                <CheckCircle2 className="h-3.5 w-3.5 text-amber-400" />
+                <CheckCircle2 className="h-3.5 w-3.5 text-pink-600 dark:text-pink-400" />
                 Supported Formats:
               </div>
               <div className="grid grid-cols-1 gap-1.5 text-xs font-semibold">
                 <button
                   type="button"
                   onClick={() => onSelect("premium", "short")}
-                  className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-left text-amber-300 hover:bg-amber-500/20 transition flex items-center justify-between"
+                  className="rounded-xl border border-pink-500/30 bg-pink-500/10 px-2.5 py-1.5 text-left text-pink-700 dark:text-pink-300 hover:bg-pink-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/50 transition flex items-center justify-between"
                 >
                   <span>Sponsor Short Video</span>
                   <ChevronRight className="h-3 w-3" />
@@ -404,7 +413,7 @@ function FourOptionsSelectionView({
                 <button
                   type="button"
                   onClick={() => onSelect("premium", "long")}
-                  className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-left text-amber-300 hover:bg-amber-500/20 transition flex items-center justify-between"
+                  className="rounded-xl border border-pink-500/30 bg-pink-500/10 px-2.5 py-1.5 text-left text-pink-700 dark:text-pink-300 hover:bg-pink-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/50 transition flex items-center justify-between"
                 >
                   <span>Sponsor Long Video</span>
                   <ChevronRight className="h-3 w-3" />
@@ -417,7 +426,7 @@ function FourOptionsSelectionView({
             <button
               type="button"
               onClick={() => onSelect("premium", "short")}
-              className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-amber-600 px-4 py-3 text-xs font-bold text-white shadow-sm hover:bg-amber-500 transition active:scale-95"
+              className="w-full inline-flex items-center justify-center gap-2 rounded-2xl bg-pink-600 px-4 py-3 text-xs font-bold text-white shadow-sm hover:bg-pink-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/60 transition active:scale-95"
             >
               <span>Upload Sponsor (₹6)</span>
               <ChevronRight className="h-4 w-4" />
@@ -1264,12 +1273,17 @@ export function BulkVideoUploadView({
                       disabled={item.status === "uploading" || item.status === "success"}
                       onChange={(e) => {
                         const f = e.target.files?.[0];
-                        if (f) {
-                          updateItem(item.id, {
-                            customThumbnailFile: f,
-                            customThumbnailPreview: URL.createObjectURL(f),
-                          });
+                        if (!f) return;
+                        const validation = validateOptionalThumbnailFile(f);
+                        if (!validation.valid) {
+                          toast.error(validation.error || "Invalid cover image file.");
+                          e.target.value = "";
+                          return;
                         }
+                        updateItem(item.id, {
+                          customThumbnailFile: f,
+                          customThumbnailPreview: URL.createObjectURL(f),
+                        });
                       }}
                       className="hidden"
                     />
@@ -1402,13 +1416,13 @@ export function BulkVideoUploadView({
                       type="button"
                       disabled={item.status === "uploading" || item.status === "success"}
                       onClick={() => updateItem(item.id, { videoType: "premium" })}
-                      className={`flex-1 rounded-lg py-1.5 font-bold transition text-xs flex items-center justify-center gap-1 ${
+                      className={`flex-1 rounded-lg py-1.5 font-bold transition text-xs flex items-center justify-center gap-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/50 disabled:opacity-50 disabled:cursor-not-allowed ${
                         item.videoType === "premium"
-                          ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm"
-                          : "text-muted-foreground hover:text-foreground"
+                          ? "bg-pink-500/20 text-pink-700 dark:text-pink-300 border border-pink-500/40 shadow-sm"
+                          : "text-muted-foreground hover:text-pink-600 dark:hover:text-pink-300"
                       }`}
                     >
-                      <Zap className="h-3 w-3 fill-amber-400 text-amber-400" />
+                      <Zap className="h-3 w-3 fill-pink-500 text-pink-500 dark:fill-pink-400 dark:text-pink-400" />
                       Sponsor (₹6)
                     </button>
                   </div>
@@ -1585,12 +1599,42 @@ function FreeVideoUploadView({
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [capturedThumbnail, setCapturedThumbnail] = useState<string>("");
+  const [customThumbnailFile, setCustomThumbnailFile] = useState<File | null>(null);
+  const [customThumbnailPreview, setCustomThumbnailPreview] = useState<string>("");
   const [detectedDuration, setDetectedDuration] = useState<string>("");
   const [uploading, setUploading] = useState(false);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [publishedVideo, setPublishedVideo] = useState<UploadedVideo | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const thumbnailInputRef = useRef<HTMLInputElement>(null);
+
+  const handleThumbnailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const validation = validateOptionalThumbnailFile(file);
+    if (!validation.valid) {
+      toast.error(validation.error || "Invalid cover image file.");
+      e.target.value = "";
+      return;
+    }
+    if (customThumbnailPreview.startsWith("blob:")) {
+      URL.revokeObjectURL(customThumbnailPreview);
+    }
+    setCustomThumbnailFile(file);
+    setCustomThumbnailPreview(URL.createObjectURL(file));
+  };
+
+  const clearCustomThumbnail = () => {
+    if (customThumbnailPreview.startsWith("blob:")) {
+      URL.revokeObjectURL(customThumbnailPreview);
+    }
+    setCustomThumbnailFile(null);
+    setCustomThumbnailPreview("");
+    if (thumbnailInputRef.current) {
+      thumbnailInputRef.current.value = "";
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -1721,12 +1765,26 @@ function FreeVideoUploadView({
         throw new Error(serverError);
       }
 
-      // 2. Persist video thumbnail to server storage or graceful category fallback
+      // 2. Upload optional custom thumbnail if selected, else auto-capture or graceful category fallback
       let posterUrl = "";
-      try {
-        posterUrl = await captureAndUploadThumbnail(videoFile, category);
-      } catch (_e) {
-        posterUrl = capturedThumbnail || getCategoryFallbackThumbnail(category);
+      if (customThumbnailFile) {
+        try {
+          const imgRes = await api.uploads.uploadImage(customThumbnailFile);
+          if (imgRes && imgRes.url) {
+            posterUrl = imgRes.url;
+          }
+        } catch (_thumbErr) {
+          posterUrl = "";
+        }
+      }
+      if (!posterUrl) {
+        try {
+          posterUrl = capturedThumbnail
+            ? await uploadThumbnailDataUrl(capturedThumbnail, category)
+            : await captureAndUploadThumbnail(videoFile, category);
+        } catch (_e) {
+          posterUrl = capturedThumbnail || getCategoryFallbackThumbnail(category);
+        }
       }
 
       // 3. Persist video metadata to database through server API
@@ -1812,6 +1870,8 @@ function FreeVideoUploadView({
               setDescription("");
               setVideoFile(null);
               setPreviewUrl("");
+              setCapturedThumbnail("");
+              clearCustomThumbnail();
               setPublishedVideo(null);
               setUploadSuccess(false);
             }}
@@ -2013,6 +2073,62 @@ function FreeVideoUploadView({
               className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-sky-500 focus:outline-none"
             />
           </div>
+
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Thumbnail (Cover Image){" "}
+              <span className="text-[11px] font-normal normal-case text-muted-foreground">
+                (Optional)
+              </span>
+            </label>
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 rounded-xl border border-border bg-secondary/20 p-3">
+              <div className="h-20 w-32 shrink-0 overflow-hidden rounded-lg border border-border bg-black/40 grid place-items-center">
+                {customThumbnailPreview || capturedThumbnail ? (
+                  <img
+                    src={customThumbnailPreview || capturedThumbnail}
+                    alt="Video thumbnail preview"
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <ImageIcon className="h-6 w-6 text-muted-foreground/60" />
+                )}
+              </div>
+              <div className="flex-1 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => thumbnailInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-secondary px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary/80 transition"
+                  >
+                    <ImageIcon className="h-3.5 w-3.5 text-sky-400" />
+                    <span>{customThumbnailFile ? "Change Cover" : "Choose Cover Image"}</span>
+                  </button>
+                  {customThumbnailFile && (
+                    <button
+                      type="button"
+                      onClick={clearCustomThumbnail}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border bg-secondary/40 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-rose-400 transition"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      <span>Remove</span>
+                    </button>
+                  )}
+                </div>
+                <input
+                  ref={thumbnailInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={handleThumbnailChange}
+                  className="hidden"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  {customThumbnailFile
+                    ? `Selected: ${customThumbnailFile.name}`
+                    : "Leave empty to auto-capture a frame or use a category cover."}
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* Action Buttons */}
@@ -2061,6 +2177,8 @@ function PremiumVideoUploadView({
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [capturedThumbnail, setCapturedThumbnail] = useState<string>("");
+  const [customThumbnailFile, setCustomThumbnailFile] = useState<File | null>(null);
+  const [customThumbnailPreview, setCustomThumbnailPreview] = useState<string>("");
   const [detectedDuration, setDetectedDuration] = useState<string>("");
   const [uploading, setUploading] = useState(false);
   const [paymentStageLabel, setPaymentStageLabel] = useState("");
@@ -2069,8 +2187,36 @@ function PremiumVideoUploadView({
   const [promotionConsent, setPromotionConsent] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const thumbnailInputRef = useRef<HTMLInputElement>(null);
   const isSubmittingRef = useRef(false);
   const notifiedSuccessIdsRef = useRef<Set<string>>(new Set());
+
+  const handleThumbnailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const validation = validateOptionalThumbnailFile(file);
+    if (!validation.valid) {
+      toast.error(validation.error || "Invalid cover image file.");
+      e.target.value = "";
+      return;
+    }
+    if (customThumbnailPreview.startsWith("blob:")) {
+      URL.revokeObjectURL(customThumbnailPreview);
+    }
+    setCustomThumbnailFile(file);
+    setCustomThumbnailPreview(URL.createObjectURL(file));
+  };
+
+  const clearCustomThumbnail = () => {
+    if (customThumbnailPreview.startsWith("blob:")) {
+      URL.revokeObjectURL(customThumbnailPreview);
+    }
+    setCustomThumbnailFile(null);
+    setCustomThumbnailPreview("");
+    if (thumbnailInputRef.current) {
+      thumbnailInputRef.current.value = "";
+    }
+  };
 
   useEffect(() => {
     preloadRazorpayScript();
@@ -2179,12 +2325,22 @@ function PremiumVideoUploadView({
     setPaymentStageLabel("Uploading video & preparing gateway...");
     preloadRazorpayScript();
     try {
-      // 1. Upload video file and prepare thumbnail concurrently (avoids sequential waterfall before gateway)
-      const thumbnailPromise = (
-        capturedThumbnail
+      // 1. Upload video file and optional thumbnail concurrently (avoids sequential waterfall before gateway)
+      const thumbnailPromise = (async () => {
+        if (customThumbnailFile) {
+          try {
+            const imgRes = await api.uploads.uploadImage(customThumbnailFile);
+            if (imgRes && imgRes.url) {
+              return imgRes.url;
+            }
+          } catch (_thumbErr) {
+            // Fall through to frame capture / category fallback
+          }
+        }
+        return capturedThumbnail
           ? uploadThumbnailDataUrl(capturedThumbnail, category)
-          : captureAndUploadThumbnail(videoFile, category)
-      ).catch(() => capturedThumbnail || getCategoryFallbackThumbnail(category));
+          : captureAndUploadThumbnail(videoFile, category);
+      })().catch(() => capturedThumbnail || getCategoryFallbackThumbnail(category));
 
       const [uploadRes, posterUrl] = await Promise.all([
         api.uploads.uploadVideo(videoFile),
@@ -2277,7 +2433,7 @@ function PremiumVideoUploadView({
   if (uploadSuccess) {
     return (
       <div className="mx-auto max-w-xl text-center py-12 space-y-6">
-        <div className="grid h-16 w-16 mx-auto place-items-center rounded-full bg-amber-500/20 text-amber-400">
+        <div className="grid h-16 w-16 mx-auto place-items-center rounded-full bg-pink-500/20 text-pink-600 dark:text-pink-400">
           <CheckCircle2 className="h-10 w-10" />
         </div>
         <div>
@@ -2297,10 +2453,12 @@ function PremiumVideoUploadView({
               setDescription("");
               setVideoFile(null);
               setPreviewUrl("");
+              setCapturedThumbnail("");
+              clearCustomThumbnail();
               setUploadError(null);
               setUploadSuccess(false);
             }}
-            className="rounded-xl bg-amber-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-amber-500 transition"
+            className="rounded-xl bg-pink-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-pink-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/60 transition"
           >
             Upload Another Sponsor Video
           </button>
@@ -2329,14 +2487,14 @@ function PremiumVideoUploadView({
             <ArrowLeft className="h-4 w-4" />
           </button>
           <div>
-            <div className="text-[11px] font-bold uppercase tracking-wider text-amber-400">
+            <div className="text-[11px] font-bold uppercase tracking-wider text-pink-600 dark:text-pink-400">
               Option 2 · Monetized Video
             </div>
             <h1 className="text-xl sm:text-2xl font-black text-foreground">Sponsor Video Upload</h1>
           </div>
         </div>
 
-        <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-3 py-1 text-xs font-bold text-amber-400">
+        <span className="rounded-full border border-pink-500/30 bg-pink-500/10 px-3 py-1 text-xs font-bold text-pink-600 dark:text-pink-400">
           Fee: ₹6 (Razorpay Verified)
         </span>
       </div>
@@ -2351,10 +2509,10 @@ function PremiumVideoUploadView({
             <button
               type="button"
               onClick={() => setFormat("short")}
-              className={`rounded-xl border p-3 text-left transition ${
+              className={`rounded-xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/50 ${
                 format === "short"
-                  ? "border-amber-500 bg-amber-500/10 ring-1 ring-amber-500/50"
-                  : "border-border bg-secondary/40 hover:bg-secondary/80"
+                  ? "border-pink-500 bg-pink-500/10 ring-1 ring-pink-500/50"
+                  : "border-border bg-secondary/40 hover:bg-secondary/80 hover:border-pink-500/40"
               }`}
             >
               <div className="text-sm font-bold text-foreground">Sponsor Short Video</div>
@@ -2365,10 +2523,10 @@ function PremiumVideoUploadView({
             <button
               type="button"
               onClick={() => setFormat("long")}
-              className={`rounded-xl border p-3 text-left transition ${
+              className={`rounded-xl border p-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/50 ${
                 format === "long"
-                  ? "border-amber-500 bg-amber-500/10 ring-1 ring-amber-500/50"
-                  : "border-border bg-secondary/40 hover:bg-secondary/80"
+                  ? "border-pink-500 bg-pink-500/10 ring-1 ring-pink-500/50"
+                  : "border-border bg-secondary/40 hover:bg-secondary/80 hover:border-pink-500/40"
               }`}
             >
               <div className="text-sm font-bold text-foreground">Sponsor Long Video</div>
@@ -2384,7 +2542,7 @@ function PremiumVideoUploadView({
           onDragOver={(e) => e.preventDefault()}
           onDrop={handleDrop}
           onClick={() => fileInputRef.current?.click()}
-          className="group relative cursor-pointer rounded-3xl border-2 border-dashed border-border bg-card p-8 text-center transition hover:border-amber-500/60 hover:bg-amber-500/5 shadow-card"
+          className="group relative cursor-pointer rounded-3xl border-2 border-dashed border-border bg-card p-8 text-center transition hover:border-pink-500/60 hover:bg-pink-500/5 shadow-card"
         >
           <input
             ref={fileInputRef}
@@ -2403,7 +2561,7 @@ function PremiumVideoUploadView({
                 className="mx-auto max-h-56 rounded-2xl bg-black object-contain border border-border shadow-sm"
                 src={previewUrl}
               />
-              <div className="flex items-center justify-center gap-2 text-xs font-bold text-amber-400">
+              <div className="flex items-center justify-center gap-2 text-xs font-bold text-pink-600 dark:text-pink-400">
                 <Check className="h-4 w-4 text-emerald-400" />
                 <span>{videoFile?.name}</span>
                 <span className="text-muted-foreground font-normal">
@@ -2417,7 +2575,7 @@ function PremiumVideoUploadView({
             </div>
           ) : (
             <div className="space-y-3">
-              <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-amber-500/10 text-amber-400 border border-amber-500/20 group-hover:scale-105 transition-transform">
+              <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-pink-500/10 text-pink-600 dark:text-pink-400 border border-pink-500/20 group-hover:scale-105 transition-transform">
                 <FileVideo className="h-7 w-7" />
               </div>
               <div>
@@ -2443,7 +2601,7 @@ function PremiumVideoUploadView({
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="e.g. Pro Monetization Secrets: High-CPM Niches Explained"
-              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-amber-500 focus:outline-none"
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-pink-500 focus:outline-none"
               required
             />
           </div>
@@ -2456,7 +2614,7 @@ function PremiumVideoUploadView({
             <select
               value={category}
               onChange={(e) => setCategory(e.target.value)}
-              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-amber-500 focus:outline-none"
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-pink-500 focus:outline-none"
             >
               {VIDEO_CATEGORIES.map((cat) => (
                 <option key={cat} value={cat}>
@@ -2475,14 +2633,70 @@ function PremiumVideoUploadView({
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Provide a detailed description of your monetized content..."
-              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-amber-500 focus:outline-none"
+              className="w-full rounded-xl border border-border bg-secondary/30 px-4 py-2.5 text-sm text-foreground focus:border-pink-500 focus:outline-none"
             />
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
+              Thumbnail (Cover Image){" "}
+              <span className="text-[11px] font-normal normal-case text-muted-foreground">
+                (Optional)
+              </span>
+            </label>
+            <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4 rounded-xl border border-border bg-secondary/20 p-3">
+              <div className="h-20 w-32 shrink-0 overflow-hidden rounded-lg border border-border bg-black/40 grid place-items-center">
+                {customThumbnailPreview || capturedThumbnail ? (
+                  <img
+                    src={customThumbnailPreview || capturedThumbnail}
+                    alt="Video thumbnail preview"
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <ImageIcon className="h-6 w-6 text-muted-foreground/60" />
+                )}
+              </div>
+              <div className="flex-1 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => thumbnailInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-secondary px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-secondary/80 transition"
+                  >
+                    <ImageIcon className="h-3.5 w-3.5 text-pink-600 dark:text-pink-400" />
+                    <span>{customThumbnailFile ? "Change Cover" : "Choose Cover Image"}</span>
+                  </button>
+                  {customThumbnailFile && (
+                    <button
+                      type="button"
+                      onClick={clearCustomThumbnail}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border bg-secondary/40 px-2.5 py-1.5 text-xs font-medium text-muted-foreground hover:text-rose-400 transition"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      <span>Remove</span>
+                    </button>
+                  )}
+                </div>
+                <input
+                  ref={thumbnailInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  onChange={handleThumbnailChange}
+                  className="hidden"
+                />
+                <p className="text-[11px] text-muted-foreground">
+                  {customThumbnailFile
+                    ? `Selected: ${customThumbnailFile.name}`
+                    : "Leave empty to auto-capture a frame or use a category cover."}
+                </p>
+              </div>
+            </div>
           </div>
         </div>
 
         {/* Monetization Verification Notice */}
-        <div className="rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 text-xs space-y-2">
-          <div className="font-bold text-amber-400 flex items-center gap-1.5">
+        <div className="rounded-2xl border border-pink-500/30 bg-pink-500/5 p-4 text-xs space-y-2">
+          <div className="font-bold text-pink-600 dark:text-pink-400 flex items-center gap-1.5">
             <Sparkles className="h-4 w-4" /> ₹6 Sponsor Upload Verification:
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-muted-foreground">
@@ -2502,12 +2716,12 @@ function PremiumVideoUploadView({
         </div>
 
         {/* Voluntary Video Promotion Consent */}
-        <label className="flex items-start gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 cursor-pointer select-none">
+        <label className="flex items-start gap-3 rounded-2xl border border-pink-500/30 bg-pink-500/5 p-4 cursor-pointer select-none">
           <input
             type="checkbox"
             checked={promotionConsent}
             onChange={(e) => setPromotionConsent(e.target.checked)}
-            className="mt-1 h-4 w-4 shrink-0 rounded border-border accent-amber-600 cursor-pointer"
+            className="mt-1 h-4 w-4 shrink-0 rounded border-border accent-pink-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/50 cursor-pointer"
           />
           <div className="space-y-1.5 text-xs leading-relaxed">
             <p className="font-semibold text-foreground">
@@ -2544,7 +2758,7 @@ function PremiumVideoUploadView({
             type="submit"
             disabled={uploading || !promotionConsent}
             aria-busy={uploading}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-600 px-8 py-3 text-xs font-bold text-white hover:bg-amber-500 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-pink-600 px-8 py-3 text-xs font-bold text-white hover:bg-pink-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/60 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {uploading ? (
               <>
@@ -2977,13 +3191,20 @@ function ImageUploadView({ onBack }: { onBack: () => void }) {
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [selectedFilter, setSelectedFilter] = useState<ImageFilterId>("original");
+  const [selectedMusicCategory, setSelectedMusicCategory] = useState<ImageMusicCategory | "All">(
+    "All",
+  );
   const [selectedMusic, setSelectedMusic] = useState<SelectedImageMusic | null>(null);
   const [playingTrackId, setPlayingTrackId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadedImage, setUploadedImage] = useState<UploadedImage | null>(null);
 
   useEffect(() => {
+    setMusicPreviewPlaybackListener((state) => {
+      setPlayingTrackId(state.playingTrackId);
+    });
     return () => {
+      setMusicPreviewPlaybackListener(null);
       stopMusicPreview();
     };
   }, []);
@@ -3144,6 +3365,22 @@ function ImageUploadView({ onBack }: { onBack: () => void }) {
               <div className="text-[10px] text-muted-foreground mt-0.5 font-mono uppercase">
                 {uploadedImage.format} · {uploadedImage.fileSize} · {uploadedImage.category}
               </div>
+              {uploadedImage.music && (
+                <div className="mt-1.5 text-[11px] text-muted-foreground">
+                  Music:{" "}
+                  <span className="font-semibold text-foreground">{uploadedImage.music.title}</span>{" "}
+                  — {uploadedImage.music.artist} (
+                  <a
+                    href={uploadedImage.music.licenseUrl || CC_BY_4_0_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:text-teal-400"
+                  >
+                    {uploadedImage.music.license || "CC BY 4.0"}
+                  </a>
+                  )
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -3152,10 +3389,15 @@ function ImageUploadView({ onBack }: { onBack: () => void }) {
           <button
             type="button"
             onClick={() => {
+              stopMusicPreview();
               setTitle("");
               setDescription("");
               setImageFile(null);
               setPreviewUrl("");
+              setSelectedFilter("original");
+              setSelectedMusicCategory("All");
+              setSelectedMusic(null);
+              setPlayingTrackId(null);
               setUploadedImage(null);
             }}
             className="rounded-xl bg-teal-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-teal-500 transition"
@@ -3293,9 +3535,13 @@ function ImageUploadView({ onBack }: { onBack: () => void }) {
         <div className="rounded-2xl border border-border bg-card p-4 sm:p-5 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div>
-              <h3 className="text-sm font-bold text-foreground">Background Music (Optional)</h3>
+              <h3 className="text-sm font-bold text-foreground flex items-center gap-1.5">
+                <Music className="h-4 w-4 text-teal-400" />
+                <span>Background Music (Optional)</span>
+              </h3>
               <p className="text-xs text-muted-foreground">
-                Royalty-free CC0 FaceTube Studio tracks. Image remains an image post.
+                Browse licensed, royalty-free music by mood or genre. Image remains a 9:16 image
+                post.
               </p>
             </div>
             {selectedMusic && (
@@ -3313,101 +3559,179 @@ function ImageUploadView({ onBack }: { onBack: () => void }) {
             )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {IMAGE_MUSIC_LIBRARY.map((track) => {
-              const isSelected = selectedMusic?.trackId === track.id;
-              const isPlaying = playingTrackId === track.id;
+          {/* Music Categories */}
+          <div className="flex flex-wrap gap-1.5" role="group" aria-label="Music categories">
+            {(["All", ...IMAGE_MUSIC_CATEGORIES] as const).map((cat) => {
+              const active = selectedMusicCategory === cat;
               return (
-                <div
-                  key={track.id}
-                  className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 transition ${
-                    isSelected ? "border-teal-500 bg-teal-500/10" : "border-border bg-secondary/40"
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setSelectedMusicCategory(cat)}
+                  className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold transition border ${
+                    active
+                      ? "border-teal-500 bg-teal-500/15 text-teal-400"
+                      : "border-border bg-secondary/50 text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setSelectedMusic({
-                        trackId: track.id,
-                        title: track.title,
-                        artist: track.artist,
-                        startTime:
-                          selectedMusic?.trackId === track.id ? selectedMusic.startTime : 0,
-                        volume: selectedMusic?.trackId === track.id ? selectedMusic.volume : 0.7,
-                      })
-                    }
-                    className="flex-1 text-left min-w-0"
-                  >
-                    <div className="text-xs font-bold text-foreground truncate">{track.title}</div>
-                    <div className="text-[11px] text-muted-foreground truncate">
-                      {track.genre} · {track.license}
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (isPlaying) {
-                        stopMusicPreview();
-                        setPlayingTrackId(null);
-                      } else {
-                        const ok = playMusicPreview(track.id, {
-                          startTime: isSelected ? selectedMusic.startTime : 0,
-                          volume: isSelected ? selectedMusic.volume : 0.7,
-                        });
-                        if (ok) setPlayingTrackId(track.id);
-                      }
-                    }}
-                    className="shrink-0 rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] font-semibold text-foreground hover:bg-secondary transition"
-                  >
-                    {isPlaying ? "Stop" : "Preview"}
-                  </button>
-                </div>
+                  {cat}
+                </button>
               );
             })}
           </div>
 
-          {selectedMusic && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-border">
-              <label className="space-y-1">
-                <div className="flex justify-between text-xs font-semibold text-foreground">
-                  <span>Start Position</span>
-                  <span className="text-muted-foreground">{selectedMusic.startTime}s</span>
+          {(() => {
+            const filteredTracks = getTracksByCategory(selectedMusicCategory, IMAGE_MUSIC_LIBRARY);
+            if (filteredTracks.length === 0) {
+              return (
+                <div className="rounded-xl border border-dashed border-border bg-secondary/20 p-4 text-xs text-muted-foreground space-y-1">
+                  <p className="font-semibold text-foreground">
+                    No licensed music tracks are currently installed
+                    {selectedMusicCategory === "All" ? "." : ` in "${selectedMusicCategory}".`}
+                  </p>
+                  <p>
+                    Synthesized ringtone sounds have been removed. Verified royalty-free audio files
+                    (MP3/OGG/WAV) must be configured in the FaceTube media library before music
+                    tracks can be previewed or attached. You can still upload your image normally
+                    without music.
+                  </p>
                 </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={25}
-                  step={1}
-                  value={selectedMusic.startTime}
-                  onChange={(e) =>
-                    setSelectedMusic({ ...selectedMusic, startTime: Number(e.target.value) })
-                  }
-                  className="w-full accent-teal-500"
-                />
-              </label>
-              <label className="space-y-1">
-                <div className="flex justify-between text-xs font-semibold text-foreground">
-                  <span>Volume</span>
-                  <span className="text-muted-foreground">
-                    {Math.round(selectedMusic.volume * 100)}%
-                  </span>
+              );
+            }
+
+            return (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {filteredTracks.map((track) => {
+                  const isSelected = selectedMusic?.trackId === track.id;
+                  const isPlaying = playingTrackId === track.id;
+                  return (
+                    <div
+                      key={track.id}
+                      className={`flex items-center justify-between gap-2 rounded-xl border p-2.5 transition ${
+                        isSelected
+                          ? "border-teal-500 bg-teal-500/10"
+                          : "border-border bg-secondary/40"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSelectedMusic(
+                            toSelectedImageMusic(track, {
+                              startTime:
+                                selectedMusic?.trackId === track.id ? selectedMusic.startTime : 0,
+                              volume:
+                                selectedMusic?.trackId === track.id ? selectedMusic.volume : 0.7,
+                            }),
+                          )
+                        }
+                        className="flex-1 text-left min-w-0"
+                      >
+                        <div className="text-xs font-bold text-foreground truncate">
+                          {track.title}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground truncate">
+                          {track.artist} · {track.category} · {Math.floor(track.durationSec / 60)}:
+                          {String(track.durationSec % 60).padStart(2, "0")} · {track.license}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={isPlaying ? `Pause ${track.title}` : `Play ${track.title}`}
+                        onClick={() => {
+                          const nowPlaying = toggleMusicPreview(track.id, {
+                            startTime: isSelected ? selectedMusic.startTime : 0,
+                            volume: isSelected ? selectedMusic.volume : 0.7,
+                          });
+                          setPlayingTrackId(nowPlaying ? track.id : null);
+                        }}
+                        className="inline-flex items-center gap-1 shrink-0 rounded-lg border border-border bg-background px-2.5 py-1 text-[11px] font-semibold text-foreground hover:bg-secondary transition"
+                      >
+                        {isPlaying ? (
+                          <>
+                            <Pause className="h-3 w-3" />
+                            <span>Pause</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="h-3 w-3" />
+                            <span>Play</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+
+          {selectedMusic &&
+            (() => {
+              const selectedTrack = IMAGE_MUSIC_LIBRARY.find((t) => t.id === selectedMusic.trackId);
+              const maxStartSec = Math.max(0, Math.min(60, (selectedTrack?.durationSec ?? 30) - 5));
+              const licenseUrl =
+                selectedMusic.licenseUrl || selectedTrack?.licenseUrl || CC_BY_4_0_URL;
+              return (
+                <div className="space-y-3 pt-2 border-t border-border">
+                  <div className="text-[11px] text-muted-foreground">
+                    Selected:{" "}
+                    <span className="font-semibold text-foreground">
+                      &quot;{selectedMusic.title}&quot;
+                    </span>{" "}
+                    {selectedMusic.artist} — Licensed under{" "}
+                    <a
+                      href={licenseUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-semibold text-teal-400 underline hover:text-teal-300"
+                    >
+                      {selectedMusic.license || "CC BY 4.0"}
+                    </a>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <label className="space-y-1">
+                      <div className="flex justify-between text-xs font-semibold text-foreground">
+                        <span>Start Position</span>
+                        <span className="text-muted-foreground">{selectedMusic.startTime}s</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={maxStartSec}
+                        step={1}
+                        value={Math.min(selectedMusic.startTime, maxStartSec)}
+                        onChange={(e) =>
+                          setSelectedMusic({ ...selectedMusic, startTime: Number(e.target.value) })
+                        }
+                        className="w-full accent-teal-500"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <div className="flex justify-between text-xs font-semibold text-foreground">
+                        <span>Volume</span>
+                        <span className="text-muted-foreground">
+                          {Math.round(selectedMusic.volume * 100)}%
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={selectedMusic.volume}
+                        onChange={(e) => {
+                          const vol = Number(e.target.value);
+                          setSelectedMusic({ ...selectedMusic, volume: vol });
+                          setMusicPreviewVolume(vol);
+                        }}
+                        className="w-full accent-teal-500"
+                      />
+                    </label>
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={selectedMusic.volume}
-                  onChange={(e) => {
-                    const vol = Number(e.target.value);
-                    setSelectedMusic({ ...selectedMusic, volume: vol });
-                    setMusicPreviewVolume(vol);
-                  }}
-                  className="w-full accent-teal-500"
-                />
-              </label>
-            </div>
-          )}
+              );
+            })()}
         </div>
 
         {/* Image Metadata Inputs */}

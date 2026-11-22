@@ -46,9 +46,9 @@ const UPLOAD_OPTIONS_LIST: UploadOptionItem[] = [
     icon: Sparkles,
     isPremium: true,
     accentClass:
-      "border-amber-500/50 hover:border-amber-400 bg-gradient-to-r from-amber-500/15 via-card to-card hover:from-amber-500/20 ring-1 ring-amber-500/30 shadow-[0_0_20px_rgba(245,158,11,0.1)]",
+      "border-pink-500/50 hover:border-pink-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/50 bg-gradient-to-r from-pink-500/15 via-card to-card hover:from-pink-500/20 ring-1 ring-pink-500/30 shadow-[0_0_20px_rgba(236,72,153,0.12)]",
     iconBgClass:
-      "bg-gradient-to-br from-amber-400 to-yellow-500 text-black ring-1 ring-amber-400/60 font-black",
+      "bg-gradient-to-br from-pink-500 to-pink-600 text-white ring-1 ring-pink-400/60 font-black",
     description:
       "Monetized video upload unlocking Direct Referral (₹1) and Global Income Pool (₹3).",
   },
@@ -250,7 +250,7 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
                       <span
                         className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${
                           opt.isPremium
-                            ? "border border-amber-400/40 bg-amber-400/15 text-amber-300"
+                            ? "border border-pink-500/40 bg-pink-500/15 text-pink-600 dark:text-pink-300"
                             : "bg-secondary/80 text-muted-foreground"
                         }`}
                       >
@@ -264,9 +264,9 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
                 <div className="flex items-center gap-2 shrink-0 ml-auto">
                   {opt.isPremium && (
                     <div className="relative flex items-center justify-center">
-                      <span className="absolute -inset-1 rounded-full bg-amber-400/35 blur-sm animate-pulse" />
-                      <div className="relative flex items-center gap-1 rounded-full border border-amber-400/60 bg-gradient-to-r from-amber-500/25 via-yellow-400/35 to-amber-500/25 px-2 py-0.5 text-[10px] font-black tracking-wide text-amber-300">
-                        <Zap className="h-3.5 w-3.5 fill-amber-400 text-amber-300 animate-pulse" />
+                      <span className="absolute -inset-1 rounded-full bg-pink-400/35 blur-sm animate-pulse" />
+                      <div className="relative flex items-center gap-1 rounded-full border border-pink-400/60 bg-gradient-to-r from-pink-500/25 via-pink-400/35 to-pink-500/25 px-2 py-0.5 text-[10px] font-black tracking-wide text-pink-600 dark:text-pink-300">
+                        <Zap className="h-3.5 w-3.5 fill-pink-500 text-pink-500 dark:fill-pink-400 dark:text-pink-300 animate-pulse" />
                         <span>SPONSOR</span>
                       </div>
                     </div>

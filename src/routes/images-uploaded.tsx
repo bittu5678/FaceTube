@@ -10,12 +10,23 @@ import {
   Calendar,
   Layers,
   RefreshCw,
+  Play,
+  Pause,
+  Music,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { fetchUploadedImages, type UploadedImage } from "@/lib/image-service";
 import { SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
+import {
+  CC_BY_4_0_URL,
+  pauseMusicPreview,
+  playMusicPreview,
+  resolveMusicTrack,
+  setMusicPreviewPlaybackListener,
+  stopMusicPreview,
+} from "@/lib/image-music-library";
 
 export const Route = createFileRoute("/images-uploaded")({
   head: () => ({
@@ -37,8 +48,11 @@ export function ImagesUploadedPage() {
 
   const [images, setImages] = useState<UploadedImage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [playingImageId, setPlayingImageId] = useState<string | null>(null);
 
   const loadImages = async () => {
+    stopMusicPreview();
+    setPlayingImageId(null);
     setLoading(true);
     try {
       const data = await fetchUploadedImages();
@@ -51,8 +65,35 @@ export function ImagesUploadedPage() {
   };
 
   useEffect(() => {
+    setMusicPreviewPlaybackListener((state) => {
+      if (!state.isPlaying) {
+        setPlayingImageId(null);
+      }
+    });
     loadImages();
+    return () => {
+      setMusicPreviewPlaybackListener(null);
+      stopMusicPreview();
+    };
   }, []);
+
+  const handleToggleImageMusic = (img: UploadedImage) => {
+    const resolvedTrack = resolveMusicTrack(img.music);
+    if (!resolvedTrack) return;
+
+    if (playingImageId === img.id) {
+      pauseMusicPreview();
+      setPlayingImageId(null);
+      return;
+    }
+
+    const started = playMusicPreview(resolvedTrack.id, {
+      startTime: img.music?.startTime ?? 0,
+      volume: img.music?.volume ?? 0.7,
+      forceRestart: playingImageId !== null && playingImageId !== img.id,
+    });
+    setPlayingImageId(started ? img.id : null);
+  };
 
   return (
     <VideoHubLayout>
@@ -122,6 +163,8 @@ export function ImagesUploadedPage() {
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
           {images.map((img, idx) => {
             const displayChannelName = img.channelName || img.creatorName || "FaceTube Creator";
+            const resolvedMusic = resolveMusicTrack(img.music);
+            const isMusicPlaying = playingImageId === img.id;
 
             return (
               <div
@@ -168,6 +211,51 @@ export function ImagesUploadedPage() {
                     <p className="text-[11px] text-muted-foreground line-clamp-1">
                       {img.description}
                     </p>
+                  )}
+                  {resolvedMusic && (
+                    <div className="rounded-lg border border-border/70 bg-secondary/40 p-2 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <Music className="h-3 w-3 shrink-0 text-teal-400" />
+                          <span className="truncate text-[11px] font-semibold text-foreground">
+                            {resolvedMusic.title}
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleImageMusic(img)}
+                          aria-label={
+                            isMusicPlaying
+                              ? `Pause music ${resolvedMusic.title}`
+                              : `Play music ${resolvedMusic.title}`
+                          }
+                          className="inline-flex items-center gap-1 shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[10px] font-semibold text-foreground hover:bg-secondary transition"
+                        >
+                          {isMusicPlaying ? (
+                            <>
+                              <Pause className="h-2.5 w-2.5" />
+                              <span>Pause</span>
+                            </>
+                          ) : (
+                            <>
+                              <Play className="h-2.5 w-2.5" />
+                              <span>Play</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                      <div className="truncate text-[10px] text-muted-foreground">
+                        {resolvedMusic.artist} ·{" "}
+                        <a
+                          href={resolvedMusic.licenseUrl || CC_BY_4_0_URL}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline hover:text-teal-400"
+                        >
+                          {resolvedMusic.license}
+                        </a>
+                      </div>
+                    </div>
                   )}
                   <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1 border-t border-border/50">
                     <span className="font-semibold text-teal-400">

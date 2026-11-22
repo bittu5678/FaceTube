@@ -23,7 +23,11 @@ $creatorName = trim($input['creator_name'] ?? ($input['creatorName'] ?? 'FaceTub
 $title = trim($input['title'] ?? '');
 $description = trim($input['description'] ?? '');
 $videoUrl = trim($input['video_url'] ?? ($input['videoUrl'] ?? ''));
-$thumbnailUrl = trim($input['thumbnail_url'] ?? ($input['thumbnailUrl'] ?? ''));
+$rawThumbnailUrl = $input['thumbnail_url'] ?? ($input['thumbnailUrl'] ?? '');
+$thumbnailUrl = is_string($rawThumbnailUrl) ? trim($rawThumbnailUrl) : '';
+if (in_array(strtolower($thumbnailUrl), ['null', 'undefined', 'nan'], true)) {
+    $thumbnailUrl = '';
+}
 $videoType = strtolower(trim($input['video_type'] ?? ($input['videoType'] ?? 'free')));
 if (!in_array($videoType, ['free', 'premium'], true)) {
     $videoType = 'free';

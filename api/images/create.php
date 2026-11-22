@@ -20,6 +20,19 @@ $description = trim($input['description'] ?? '');
 $imageUrl = trim($input['image_url'] ?? ($input['imageUrl'] ?? ''));
 $thumbnailUrl = trim($input['thumbnail_url'] ?? ($input['thumbnailUrl'] ?? $imageUrl));
 $category = trim($input['category'] ?? 'General');
+$rawMusic = $input['music'] ?? ($input['music_json'] ?? null);
+$musicData = null;
+$musicJson = null;
+if (is_string($rawMusic) && trim($rawMusic) !== '') {
+    $decoded = json_decode($rawMusic, true);
+    if (is_array($decoded) && !empty($decoded['trackId'])) {
+        $musicData = $decoded;
+        $musicJson = json_encode($decoded);
+    }
+} elseif (is_array($rawMusic) && !empty($rawMusic['trackId'])) {
+    $musicData = $rawMusic;
+    $musicJson = json_encode($rawMusic);
+}
 
 if (empty($imageUrl)) {
     jsonResponse(['success' => false, 'error' => 'Image URL is required.'], 400);
@@ -31,11 +44,27 @@ $thumbnailUrl = toAbsoluteMediaUrl($thumbnailUrl, 'images');
 $pdo = getDatabaseConnection();
 
 try {
-    $stmt = $pdo->prepare('
-        INSERT INTO uploaded_images (id, user_id, creator_name, title, description, image_url, thumbnail_url, category, views, likes, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NOW())
-    ');
-    $stmt->execute([$id, $userId, $creatorName, $title, $description, $imageUrl, $thumbnailUrl, $category]);
+    $hasMusicCol = false;
+    try {
+        $colStmt = $pdo->query("SHOW COLUMNS FROM uploaded_images LIKE 'music_json'");
+        $hasMusicCol = $colStmt && $colStmt->fetch() !== false;
+    } catch (PDOException $colErr) {
+        $hasMusicCol = false;
+    }
+
+    if ($hasMusicCol) {
+        $stmt = $pdo->prepare('
+            INSERT INTO uploaded_images (id, user_id, creator_name, title, description, image_url, thumbnail_url, category, music_json, views, likes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NOW())
+        ');
+        $stmt->execute([$id, $userId, $creatorName, $title, $description, $imageUrl, $thumbnailUrl, $category, $musicJson]);
+    } else {
+        $stmt = $pdo->prepare('
+            INSERT INTO uploaded_images (id, user_id, creator_name, title, description, image_url, thumbnail_url, category, views, likes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, NOW())
+        ');
+        $stmt->execute([$id, $userId, $creatorName, $title, $description, $imageUrl, $thumbnailUrl, $category]);
+    }
 
     jsonResponse([
         'success' => true,
@@ -48,6 +77,7 @@ try {
             'imageUrl' => $imageUrl,
             'thumbnailUrl' => $thumbnailUrl,
             'category' => $category,
+            'music' => $musicData,
             'createdAt' => date('c'),
         ]
     ], 201);

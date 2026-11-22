@@ -532,7 +532,7 @@ export async function recordNewVideoUpload(params: {
   title: string;
   description: string;
   videoUrl: string;
-  thumbnailUrl?: string;
+  thumbnailUrl?: string | null | undefined;
   videoType: VideoType; // "free" | "premium"
   contentType: ContentType; // "short" | "long"
   category?: string;
@@ -551,6 +551,11 @@ export async function recordNewVideoUpload(params: {
   }
 
   const videoId = params.id || `vid-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const resolvedCategory = params.category || "Entertainment";
+  const resolvedThumbnailUrl = resolveVideoThumbnail({
+    thumbnailUrl: params.thumbnailUrl,
+    category: resolvedCategory,
+  });
 
   const newVideo: UploadedVideo = {
     id: videoId,
@@ -559,12 +564,10 @@ export async function recordNewVideoUpload(params: {
     title: params.title.trim(),
     description: params.description.trim(),
     videoUrl: params.videoUrl.trim(),
-    thumbnailUrl:
-      params.thumbnailUrl ||
-      "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=60",
+    thumbnailUrl: resolvedThumbnailUrl,
     videoType: params.videoType,
     contentType: params.contentType,
-    category: params.category || "Entertainment",
+    category: resolvedCategory,
     duration: params.duration || (params.contentType === "short" ? "0:45" : "12:30"),
     views: 0,
     likes: 0,

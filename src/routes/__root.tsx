@@ -13,7 +13,7 @@ import { useEffect, type ReactNode } from "react";
 import appCss from "../styles.css?url";
 import { reportLovableError } from "../lib/lovable-error-reporting";
 import { AuthProvider } from "../lib/auth-context";
-import { ThemeProvider } from "../lib/theme-context";
+import { ThemeProvider, DARK_THEME_COLOR, PRE_HYDRATION_THEME_SCRIPT } from "../lib/theme-context";
 import { Toaster } from "@/components/ui/sonner";
 import { SplashScreen } from "@/components/videohub/SplashScreen";
 import { AdSenseScript } from "@/components/adsense/AdSenseScript";
@@ -102,9 +102,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@Lovable" },
-      { name: "theme-color", content: "#0b0c11" },
-      { name: "theme-color", media: "(prefers-color-scheme: dark)", content: "#0b0c11" },
-      { name: "theme-color", media: "(prefers-color-scheme: light)", content: "#ffffff" },
+      { name: "theme-color", content: DARK_THEME_COLOR },
       { name: "apple-mobile-web-app-capable", content: "yes" },
       { name: "apple-mobile-web-app-status-bar-style", content: "black-translucent" },
     ],
@@ -145,7 +143,7 @@ function RootShell({ children }: { children: ReactNode }) {
   const adsenseClientId = adsense.clientId || "ca-pub-9404076664639786";
 
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="en" className="dark" style={{ colorScheme: "dark" }} suppressHydrationWarning>
       <head>
         <HeadContent />
         {adsenseClientId && (
@@ -158,7 +156,7 @@ function RootShell({ children }: { children: ReactNode }) {
         )}
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){try{var t=localStorage.getItem('facetube-theme')||'system';var d=t==='dark'||(t==='system'&&window.matchMedia('(prefers-color-scheme: dark)').matches);if(d){document.documentElement.classList.add('dark');document.documentElement.style.colorScheme='dark';}else{document.documentElement.classList.remove('dark');document.documentElement.style.colorScheme='light';}}catch(e){}})();`,
+            __html: PRE_HYDRATION_THEME_SCRIPT,
           }}
         />
       </head>
