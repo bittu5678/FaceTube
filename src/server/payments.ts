@@ -213,7 +213,8 @@ export function isSpecialGlobalTransaction(_txNumber: number): boolean {
 
 export type GlobalPoolStatus = "not_applicable" | "settled" | "partial_reserve" | "pending_reserve";
 
-export type GlobalPoolReserveReason = "no_eligible_videos" | "rounding_residual";
+export type GlobalPoolReserveReason =
+  "no_eligible_videos" | "rounding_residual" | "insufficient_distributable_paise";
 
 /**
  * Calculates creator pool payouts weighted by each creator's actual video ad earnings.
@@ -376,12 +377,19 @@ export function evaluatePremiumDistribution(
     perMemberShare = perCreatorPaise / 100;
   }
 
+  const effectiveEligibleCount = creatorEarnings ? creatorEarnings.length : eligibleCreatorsCount;
   const globalPoolDistributedAmount = distributedPaise / 100;
   const globalPoolReserveAmount = reservePaise / 100;
   const globalPoolStatus: GlobalPoolStatus =
     reservePaise === 0 ? "settled" : distributedPaise === 0 ? "pending_reserve" : "partial_reserve";
   const reserveReason: GlobalPoolReserveReason | null =
-    reservePaise === 0 ? null : distributedPaise === 0 ? "no_eligible_videos" : "rounding_residual";
+    reservePaise === 0
+      ? null
+      : effectiveEligibleCount <= 0
+        ? "no_eligible_videos"
+        : distributedPaise === 0
+          ? "insufficient_distributable_paise"
+          : "rounding_residual";
 
   const result: {
     txNumber: number;
@@ -551,9 +559,15 @@ interface PersistentPremiumState {
   refundRequests?: RefundRequestRecord[];
 }
 
-// Persistent Storage Configuration
-const DATA_DIR = path.resolve(process.cwd(), "data");
-const STATE_FILE = path.join(DATA_DIR, "premium_transactions.json");
+// Persistent Storage Configuration (supports FACETUBE_DATA_DIR override for isolated tests)
+function getDataDir(): string {
+  const override = process.env["FACETUBE_DATA_DIR"]?.trim();
+  return override ? path.resolve(override) : path.resolve(process.cwd(), "data");
+}
+
+function getStateFile(): string {
+  return path.join(getDataDir(), "premium_transactions.json");
+}
 
 // Mutex lock for atomic sequence generation and duplicate prevention
 let sequenceMutex = Promise.resolve();
@@ -572,13 +586,15 @@ function withLock<T>(fn: () => Promise<T> | T): Promise<T> {
  * Ensures the sequence starts with historical records 1..10, so the next transaction is #11.
  */
 function loadPersistentState(): PersistentPremiumState {
+  const dataDir = getDataDir();
+  const stateFile = getStateFile();
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
     }
 
-    if (fs.existsSync(STATE_FILE)) {
-      const raw = fs.readFileSync(STATE_FILE, "utf-8");
+    if (fs.existsSync(stateFile)) {
+      const raw = fs.readFileSync(stateFile, "utf-8");
       const parsed = JSON.parse(raw);
       if (typeof parsed?.lastTxNumber === "number" && Array.isArray(parsed?.transactions)) {
         return parsed as PersistentPremiumState;
@@ -619,10 +635,10 @@ function loadPersistentState(): PersistentPremiumState {
   };
 
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
     }
-    fs.writeFileSync(STATE_FILE, JSON.stringify(defaultState, null, 2), "utf-8");
+    fs.writeFileSync(stateFile, JSON.stringify(defaultState, null, 2), "utf-8");
   } catch (err) {
     console.warn("[Payments Server] Could not write initial state file:", err);
   }
@@ -631,13 +647,15 @@ function loadPersistentState(): PersistentPremiumState {
 }
 
 function savePersistentState(state: PersistentPremiumState): void {
+  const dataDir = getDataDir();
+  const stateFile = getStateFile();
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
     }
-    const tempFile = `${STATE_FILE}.tmp.${Date.now()}`;
+    const tempFile = `${stateFile}.tmp.${Date.now()}`;
     fs.writeFileSync(tempFile, JSON.stringify(state, null, 2), "utf-8");
-    fs.renameSync(tempFile, STATE_FILE);
+    fs.renameSync(tempFile, stateFile);
   } catch (err) {
     console.error("[Payments Server] Error saving persistent state:", err);
   }
@@ -693,6 +711,9 @@ export async function settlePersistentGlobalPoolReserves(params: {
   duplicate: boolean;
   settledCount: number;
   remainingPendingCount: number;
+  skippedInsufficientPaiseCount?: number;
+  reason?: "no_pending_reserves" | "no_eligible_videos" | "insufficient_distributable_paise";
+  message?: string;
   settlement: GlobalPoolSettlementRecord | null;
   carryForwardReserve: GlobalPoolReserveRecord | null;
 }> {
@@ -726,6 +747,8 @@ export async function settlePersistentGlobalPoolReserves(params: {
         duplicate: false,
         settledCount: 0,
         remainingPendingCount: 0,
+        reason: "no_pending_reserves" as const,
+        message: "No pending Global Pool reserves available to settle.",
         settlement: null,
         carryForwardReserve: null,
       };
@@ -742,6 +765,8 @@ export async function settlePersistentGlobalPoolReserves(params: {
     let totalReservePaiseProcessed = 0;
     let totalDistributedPaise = 0;
     let totalCarryForwardPaise = 0;
+    let skippedNoEligibleCount = 0;
+    let skippedInsufficientPaiseCount = 0;
 
     for (const r of pendingReserves) {
       const sourceNorm = (r.sourceUserId || "").trim().toUpperCase();
@@ -755,6 +780,7 @@ export async function settlePersistentGlobalPoolReserves(params: {
       });
 
       if (eligibleForReserve.length === 0) {
+        skippedNoEligibleCount += 1;
         continue;
       }
 
@@ -767,12 +793,20 @@ export async function settlePersistentGlobalPoolReserves(params: {
       }
 
       const weighted = calculateWeightedPoolPayouts(reservePaise, eligibleForReserve);
+      if (weighted.distributedPaise <= 0 || !weighted.payouts.some((p) => p.amountPaise > 0)) {
+        // Eligible videos exist, but every calculated payout rounded to 0 paise.
+        // Keep the original reserve row pending — never mark settled, never create 0-payout batch or duplicate carry-forward.
+        skippedInsufficientPaiseCount += 1;
+        continue;
+      }
+
       totalReservePaiseProcessed += reservePaise;
       totalDistributedPaise += weighted.distributedPaise;
       totalCarryForwardPaise += weighted.residualPaise;
       settledReserveIds.push(r.id);
 
       for (const p of weighted.payouts) {
+        if (p.amountPaise <= 0) continue;
         const key = `${p.userId.toUpperCase()}:${p.videoId || ""}`;
         rewardedVideoKeys.add(key);
         const existing = payoutsByKey.get(key);
@@ -798,11 +832,22 @@ export async function settlePersistentGlobalPoolReserves(params: {
     }
 
     if (settledReserveIds.length === 0) {
+      const insufficientOnly = skippedInsufficientPaiseCount > 0;
+      const reason = insufficientOnly
+        ? ("insufficient_distributable_paise" as const)
+        : ("no_eligible_videos" as const);
       return {
         duplicate: false,
         settledCount: 0,
         remainingPendingCount: state.globalPoolReserves.filter((r) => r.status === "pending")
           .length,
+        ...(insufficientOnly ? { skippedInsufficientPaiseCount } : {}),
+        reason,
+        message: insufficientOnly
+          ? "Pending reserves remain in reserve due to insufficient_distributable_paise across eligible videos."
+          : skippedNoEligibleCount > 0
+            ? "Pending reserves remain in reserve because no eligible third-party creator videos exist yet."
+            : "Pending reserves could not be settled yet.",
         settlement: null,
         carryForwardReserve: null,
       };
@@ -864,6 +909,7 @@ export async function settlePersistentGlobalPoolReserves(params: {
       duplicate: false,
       settledCount: settledReserveIds.length,
       remainingPendingCount: state.globalPoolReserves.filter((r) => r.status === "pending").length,
+      ...(skippedInsufficientPaiseCount > 0 ? { skippedInsufficientPaiseCount } : {}),
       settlement,
       carryForwardReserve,
     };
@@ -936,6 +982,31 @@ export async function updatePersistentRefundRequest(
   });
 }
 
+export function resolveRazorpayRemotePolicy(env?: Record<string, string | undefined>): {
+  isProduction: boolean;
+  skipRemote: boolean;
+} {
+  const rawAppEnv = String(env?.["APP_ENV"] ?? process.env["APP_ENV"] ?? "")
+    .trim()
+    .toLowerCase();
+  const appEnv = /^v?\d+(?:\.\d+)+$/i.test(rawAppEnv) ? "" : rawAppEnv;
+  const nodeEnv = String(env?.["NODE_ENV"] ?? process.env["NODE_ENV"] ?? "")
+    .trim()
+    .toLowerCase();
+  const nonProdEnvs = new Set(["development", "dev", "local", "test"]);
+  const presentEnvs = [appEnv, nodeEnv].filter((v) => v !== "");
+  const isProduction =
+    appEnv === "production" ||
+    nodeEnv === "production" ||
+    presentEnvs.length === 0 ||
+    presentEnvs.some((v) => !nonProdEnvs.has(v));
+  const rawSkip = String(
+    env?.["RAZORPAY_SKIP_REMOTE_CHECK"] ?? process.env["RAZORPAY_SKIP_REMOTE_CHECK"] ?? "",
+  ).trim();
+  const skipRemote = !isProduction && rawSkip === "true";
+  return { isProduction, skipRemote };
+}
+
 /**
  * Executes a server-side refund call against Razorpay Payments Refund API.
  * Rules:
@@ -969,9 +1040,7 @@ export async function executeRazorpayRefund(
     };
   }
 
-  const skipRemote = Boolean(
-    env?.["RAZORPAY_SKIP_REMOTE_CHECK"] || process.env["RAZORPAY_SKIP_REMOTE_CHECK"],
-  );
+  const { skipRemote } = resolveRazorpayRemotePolicy(env);
 
   if (skipRemote) {
     return {
@@ -1172,10 +1241,8 @@ export async function createServerPaymentOrder(
 
   const amountInSubunits = Math.round(amount * 100);
 
-  // If running in a test suite where live calls are bypassed
-  const skipRemote = Boolean(
-    env?.["RAZORPAY_SKIP_REMOTE_CHECK"] || process.env["RAZORPAY_SKIP_REMOTE_CHECK"],
-  );
+  // If running in an explicitly permitted non-production test env where live calls are skipped
+  const { skipRemote } = resolveRazorpayRemotePolicy(env);
 
   let orderId: string;
   if (skipRemote) {
@@ -1263,9 +1330,10 @@ export async function verifyServerPayment(
   const secretKey = sanitizeSecret(
     env?.["RAZORPAY_KEY_SECRET"] || process.env["RAZORPAY_KEY_SECRET"],
   );
+  const { isProduction, skipRemote } = resolveRazorpayRemotePolicy(env);
 
-  // Strictly fail closed if secret key is missing
-  if (!secretKey) {
+  // Strictly fail closed if required credentials are missing
+  if (!secretKey || ((isProduction || !skipRemote) && !keyId)) {
     return {
       verified: false,
       paymentId: req.paymentId,
@@ -1273,7 +1341,7 @@ export async function verifyServerPayment(
       amount: 0,
       purpose: req.purpose,
       error:
-        "Payment verification failed closed: RAZORPAY_KEY_SECRET is not configured on the server",
+        "Payment verification failed closed: RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET credentials are missing on the server",
     };
   }
 
@@ -1341,12 +1409,8 @@ export async function verifyServerPayment(
   }
   const expectedPaise = Math.round(expectedAmount * 100);
 
-  // 2. Real Razorpay API Confirmation
-  const skipRemote = Boolean(
-    env?.["RAZORPAY_SKIP_REMOTE_CHECK"] || process.env["RAZORPAY_SKIP_REMOTE_CHECK"],
-  );
-
-  if (keyId && !skipRemote) {
+  // 2. Real Razorpay API Confirmation (required in production and whenever not explicitly skipped in dev/test)
+  if (!skipRemote) {
     try {
       const authHeader = `Basic ${Buffer.from(`${keyId}:${secretKey}`).toString("base64")}`;
       const rzpRes = await fetch(`https://api.razorpay.com/v1/payments/${req.paymentId}`, {
@@ -1374,14 +1438,25 @@ export async function verifyServerPayment(
         currency: string;
       };
 
-      if (pData.order_id && pData.order_id !== req.orderId) {
+      if (!pData.id || pData.id !== req.paymentId) {
         return {
           verified: false,
           paymentId: req.paymentId,
           orderId: req.orderId,
           amount: 0,
           purpose: req.purpose,
-          error: `Razorpay payment order mismatch (expected ${req.orderId}, received ${pData.order_id})`,
+          error: `Razorpay payment ID mismatch (expected ${req.paymentId}, received ${pData.id || "missing"})`,
+        };
+      }
+
+      if (!pData.order_id || pData.order_id !== req.orderId) {
+        return {
+          verified: false,
+          paymentId: req.paymentId,
+          orderId: req.orderId,
+          amount: 0,
+          purpose: req.purpose,
+          error: `Razorpay payment order mismatch (expected ${req.orderId}, received ${pData.order_id || "missing"})`,
         };
       }
 
@@ -1396,7 +1471,7 @@ export async function verifyServerPayment(
         };
       }
 
-      if (pData.currency !== "INR") {
+      if (String(pData.currency || "").toUpperCase() !== "INR") {
         return {
           verified: false,
           paymentId: req.paymentId,
@@ -1459,9 +1534,36 @@ export async function verifyServerPayment(
   return withLock(async () => {
     const state = loadPersistentState();
 
-    // 1. DUPLICATE CHECK: Prevent duplicate processing of the same Razorpay payment
+    // 1. DUPLICATE CHECK: Prevent duplicate processing & reject identity conflicts
     const existingTx = state.transactions.find((t) => t.paymentId === req.paymentId);
     if (existingTx) {
+      const expectedTxType =
+        req.purpose === "premium_video_upload" ? "premium_upload" : req.purpose;
+      const orderMismatch = Boolean(existingTx.orderId) && existingTx.orderId !== req.orderId;
+      const userMismatch =
+        String(existingTx.userId || "")
+          .trim()
+          .toUpperCase() !== req.userId.trim().toUpperCase();
+      const existingVideoId = String(existingTx.videoId || "").trim();
+      const reqVideoId = String(req.videoId || req.metadata?.["videoId"] || "").trim();
+      const vidMismatch = existingVideoId !== "" && existingVideoId !== reqVideoId;
+      if (
+        orderMismatch ||
+        userMismatch ||
+        vidMismatch ||
+        existingTx.transactionType !== expectedTxType
+      ) {
+        return {
+          verified: false,
+          paymentId: req.paymentId,
+          orderId: req.orderId,
+          amount: 0,
+          purpose: req.purpose,
+          error:
+            "Conflict: Payment ID has already been used for a different order, video, or user.",
+        };
+      }
+
       if (
         existingTx.specialTag === "PAID_SUBSCRIPTION" ||
         existingTx.transactionType === "paid_subscription" ||
@@ -1647,12 +1749,13 @@ export async function verifyServerPayment(
       const globalPoolReserveReason: GlobalPoolReserveReason | null =
         reservePaise === 0
           ? null
-          : distributedPaise === 0
+          : eligibleCount === 0
             ? "no_eligible_videos"
-            : "rounding_residual";
+            : distributedPaise === 0
+              ? "insufficient_distributable_paise"
+              : "rounding_residual";
 
-      const resolvedVideoId =
-        req.videoId || req.metadata?.["videoId"]?.toString() || `vid_${Date.now()}`;
+      const resolvedVideoId = req.videoId || req.metadata?.["videoId"]?.toString() || "";
       const nowIso = new Date().toISOString();
       let reserveId: string | null = null;
 
@@ -1671,7 +1774,7 @@ export async function verifyServerPayment(
             orderId: req.orderId,
             txNumber: currentTxNumber,
             sourceUserId: uploaderNorm,
-            sourceVideoId: resolvedVideoId,
+            sourceVideoId: resolvedVideoId || null,
             reserveAmount: globalPoolReserve,
             reservePaise,
             reserveReason: globalPoolReserveReason,
@@ -1682,7 +1785,9 @@ export async function verifyServerPayment(
             notes:
               globalPoolReserveReason === "no_eligible_videos"
                 ? `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool reserve (0 eligible previous videos at TX #${currentTxNumber})`
-                : `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool rounding residual at TX #${currentTxNumber}`,
+                : globalPoolReserveReason === "insufficient_distributable_paise"
+                  ? `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool reserve (insufficient distributable paise across ${eligibleCount} eligible videos at TX #${currentTxNumber})`
+                  : `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool rounding residual at TX #${currentTxNumber}`,
             createdAt: nowIso,
             updatedAt: nowIso,
           });

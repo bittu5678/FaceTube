@@ -107,12 +107,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $reserves = $stmtRes->fetchAll(PDO::FETCH_ASSOC);
         }
     } catch (Throwable $e) {
-        if (!$isMissingOptionalTable($e)) {
-            if ($isConnectionUnavailable($e)) {
-                jsonResponse(['success' => false, 'error' => 'Database connection unavailable while loading Global Pool reserves.'], 503);
-            }
-            jsonResponse(['success' => false, 'error' => 'Database error loading Global Pool reserves.'], 500);
+        if ($isMissingOptionalTable($e)) {
+            jsonResponse(['success' => false, 'error' => 'Global Pool reserve schema migration has not been applied yet.'], 503);
         }
+        if ($isConnectionUnavailable($e)) {
+            jsonResponse(['success' => false, 'error' => 'Database connection unavailable while loading Global Pool reserves.'], 503);
+        }
+        jsonResponse(['success' => false, 'error' => 'Database error loading Global Pool reserves.'], 500);
     }
 
     try {
@@ -126,12 +127,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
             $settlements = $stmtSet->fetchAll(PDO::FETCH_ASSOC);
         }
     } catch (Throwable $e) {
-        if (!$isMissingOptionalTable($e)) {
-            if ($isConnectionUnavailable($e)) {
-                jsonResponse(['success' => false, 'error' => 'Database connection unavailable while loading Global Pool settlements.'], 503);
-            }
-            jsonResponse(['success' => false, 'error' => 'Database error loading Global Pool settlements.'], 500);
+        if ($isMissingOptionalTable($e)) {
+            jsonResponse(['success' => false, 'error' => 'Global Pool reserve schema migration has not been applied yet.'], 503);
         }
+        if ($isConnectionUnavailable($e)) {
+            jsonResponse(['success' => false, 'error' => 'Database connection unavailable while loading Global Pool settlements.'], 503);
+        }
+        jsonResponse(['success' => false, 'error' => 'Database error loading Global Pool settlements.'], 500);
     }
 
     $pendingCount = 0;
@@ -250,6 +252,7 @@ try {
             'settledCount' => 0,
             'remainingPendingCount' => 0,
             'totalSettledAmount' => 0,
+            'reason' => 'no_pending_reserves',
             'settlement' => null,
             'message' => 'No pending Global Pool reserves available to settle.'
         ]);
@@ -273,6 +276,8 @@ try {
     $totalReservePaiseProcessed = 0;
     $totalDistributedPaise = 0;
     $totalCarryForwardPaise = 0;
+    $skippedNoEligibleCount = 0;
+    $skippedInsufficientPaiseCount = 0;
 
     $stmtMarkSettled = $pdo->prepare("
         UPDATE global_pool_reserves
@@ -302,6 +307,7 @@ try {
         }
 
         if (empty($eligibleForReserve)) {
+            $skippedNoEligibleCount++;
             continue;
         }
 
@@ -322,32 +328,48 @@ try {
         }
 
         $distributedForReserve = 0;
+        $reservePayouts = [];
         if ($totalUnits > 0) {
             foreach ($eligibleForReserve as $idx => $ev) {
                 $amountPaise = intdiv($scaledUnits[$idx] * $reservePaise, $totalUnits);
-                $distributedForReserve += $amountPaise;
-                $vUser = strtoupper(trim((string)$ev['user_id']));
-                $vId = trim((string)($ev['video_id'] ?? ''));
-                $key = "{$vUser}:{$vId}";
-                $rewardedVideoKeys[$key] = true;
-                if (!isset($payoutsByKey[$key])) {
-                    $payoutsByKey[$key] = ['userId' => $vUser, 'videoId' => $vId, 'amountPaise' => 0];
+                if ($amountPaise <= 0) {
+                    continue;
                 }
-                $payoutsByKey[$key]['amountPaise'] += $amountPaise;
+                $distributedForReserve += $amountPaise;
+                $reservePayouts[] = [
+                    'userId' => strtoupper(trim((string)$ev['user_id'])),
+                    'videoId' => trim((string)($ev['video_id'] ?? '')),
+                    'amountPaise' => $amountPaise,
+                ];
             }
         } else {
             $perVideoPaise = intdiv($reservePaise, count($eligibleForReserve));
-            $distributedForReserve = $perVideoPaise * count($eligibleForReserve);
-            foreach ($eligibleForReserve as $ev) {
-                $vUser = strtoupper(trim((string)$ev['user_id']));
-                $vId = trim((string)($ev['video_id'] ?? ''));
-                $key = "{$vUser}:{$vId}";
-                $rewardedVideoKeys[$key] = true;
-                if (!isset($payoutsByKey[$key])) {
-                    $payoutsByKey[$key] = ['userId' => $vUser, 'videoId' => $vId, 'amountPaise' => 0];
+            if ($perVideoPaise > 0) {
+                $distributedForReserve = $perVideoPaise * count($eligibleForReserve);
+                foreach ($eligibleForReserve as $ev) {
+                    $reservePayouts[] = [
+                        'userId' => strtoupper(trim((string)$ev['user_id'])),
+                        'videoId' => trim((string)($ev['video_id'] ?? '')),
+                        'amountPaise' => $perVideoPaise,
+                    ];
                 }
-                $payoutsByKey[$key]['amountPaise'] += $perVideoPaise;
             }
+        }
+
+        if ($distributedForReserve <= 0 || empty($reservePayouts)) {
+            // Eligible videos exist, but every payout rounded to 0 paise.
+            // Keep original reserve pending — never mark settled, never create 0-payout batch or carry-forward.
+            $skippedInsufficientPaiseCount++;
+            continue;
+        }
+
+        foreach ($reservePayouts as $rp) {
+            $key = "{$rp['userId']}:{$rp['videoId']}";
+            $rewardedVideoKeys[$key] = true;
+            if (!isset($payoutsByKey[$key])) {
+                $payoutsByKey[$key] = ['userId' => $rp['userId'], 'videoId' => $rp['videoId'], 'amountPaise' => 0];
+            }
+            $payoutsByKey[$key]['amountPaise'] += $rp['amountPaise'];
         }
 
         $carryForReserve = max(0, $reservePaise - $distributedForReserve);
@@ -362,14 +384,50 @@ try {
 
     if (empty($settledReserveRows)) {
         $safeRollback($pdo);
+        $insufficientOnly = $skippedInsufficientPaiseCount > 0;
+        $resp = [
+            'success' => true,
+            'duplicate' => false,
+            'settledCount' => 0,
+            'remainingPendingCount' => count($pendingReserves),
+            'totalSettledAmount' => 0,
+            'reason' => $insufficientOnly ? 'insufficient_distributable_paise' : 'no_eligible_videos',
+            'settlement' => null,
+            'message' => $insufficientOnly
+                ? 'Pending reserves remain in reserve due to insufficient_distributable_paise across eligible videos.'
+                : ($skippedNoEligibleCount > 0
+                    ? 'Pending reserves remain in reserve because no eligible third-party creator videos exist yet.'
+                    : 'Pending reserves could not be settled yet.'),
+        ];
+        if ($insufficientOnly) {
+            $resp['skippedInsufficientPaiseCount'] = $skippedInsufficientPaiseCount;
+        }
+        jsonResponse($resp);
+    }
+
+    $payouts = [];
+    foreach ($payoutsByKey as $p) {
+        if ($p['amountPaise'] > 0) {
+            $payouts[] = [
+                'userId' => $p['userId'],
+                'videoId' => $p['videoId'],
+                'amountPaise' => $p['amountPaise'],
+                'amount' => $p['amountPaise'] / 100,
+            ];
+        }
+    }
+
+    if (empty($payouts) || $totalDistributedPaise <= 0) {
+        $safeRollback($pdo);
         jsonResponse([
             'success' => true,
             'duplicate' => false,
             'settledCount' => 0,
             'remainingPendingCount' => count($pendingReserves),
             'totalSettledAmount' => 0,
+            'reason' => 'insufficient_distributable_paise',
             'settlement' => null,
-            'message' => 'Pending reserves remain in reserve because no eligible third-party creator videos exist yet.'
+            'message' => 'Pending reserves remain in reserve due to insufficient_distributable_paise across eligible videos.'
         ]);
     }
 
@@ -396,18 +454,6 @@ try {
                 'global_income', ?, 'pending', 'GLOBAL_POOL_PENDING_RESERVE', ?, NOW())
         ");
         $stmtCarryLedger->execute([$makeUuid(), 'TX_GLB_RESERVE_' . $carryPayId, $carryAmt, $carryDesc]);
-    }
-
-    $payouts = [];
-    foreach ($payoutsByKey as $p) {
-        if ($p['amountPaise'] > 0) {
-            $payouts[] = [
-                'userId' => $p['userId'],
-                'videoId' => $p['videoId'],
-                'amountPaise' => $p['amountPaise'],
-                'amount' => $p['amountPaise'] / 100,
-            ];
-        }
     }
 
     $totalReserveAmount = $totalReservePaiseProcessed / 100;
@@ -500,15 +546,48 @@ try {
 } catch (Throwable $e) {
     $safeRollback($pdo);
 
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
     if (
         !$isConnectionUnavailable($e) &&
-        ((string)$e->getCode() === '23000' || str_contains($e->getMessage(), 'uniq_gps_idempotency') || str_contains($e->getMessage(), 'Duplicate entry'))
+        ((string)$e->getCode() === '23000' || $driverCode === 1062)
     ) {
+        try {
+            $stmtExistingBatch = $pdo->prepare('
+                SELECT id, idempotency_key, total_reserve_amount, distributed_amount, carry_forward_amount,
+                       reserve_count, eligible_video_count, payout_count, settled_by, notes, created_at
+                FROM global_pool_settlements WHERE idempotency_key = ? LIMIT 1
+            ');
+            $stmtExistingBatch->execute([$idempotencyKey]);
+            $existingBatch = $stmtExistingBatch->fetch(PDO::FETCH_ASSOC);
+            if ($existingBatch) {
+                jsonResponse([
+                    'success' => true,
+                    'duplicate' => true,
+                    'settledCount' => intval($existingBatch['reserve_count'] ?? 0),
+                    'settlement' => [
+                        'id' => $existingBatch['id'],
+                        'idempotencyKey' => $existingBatch['idempotency_key'],
+                        'totalReserveAmount' => floatval($existingBatch['total_reserve_amount']),
+                        'distributedAmount' => floatval($existingBatch['distributed_amount']),
+                        'carryForwardAmount' => floatval($existingBatch['carry_forward_amount']),
+                        'reserveCount' => intval($existingBatch['reserve_count']),
+                        'eligibleVideoCount' => intval($existingBatch['eligible_video_count']),
+                        'payoutCount' => intval($existingBatch['payout_count']),
+                        'settledBy' => $existingBatch['settled_by'],
+                        'notes' => $existingBatch['notes'],
+                        'createdAt' => $existingBatch['created_at'],
+                    ],
+                    'message' => 'Settlement batch already processed (idempotent replay).'
+                ]);
+            }
+        } catch (Throwable $_dupErr) {
+            error_log('[global-pool-settle.php] Idempotency replay lookup failed: ' . $_dupErr->getMessage());
+        }
+
         jsonResponse([
-            'success' => true,
-            'duplicate' => true,
-            'message' => 'Settlement batch already processed (idempotent replay).'
-        ]);
+            'success' => false,
+            'error' => 'Conflict: Duplicate accounting key encountered on ledger or reserve during settlement. Transaction safely rolled back.'
+        ], 409);
     }
 
     if ($isMissingOptionalTable($e)) {

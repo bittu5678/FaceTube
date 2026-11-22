@@ -47,6 +47,15 @@ $isConnectionUnavailable = static function (Throwable $e): bool {
         || preg_match('/server has gone away|lost connection|connection refused|connection timed out|too many connections|max_user_connections|too many user connections|server shutdown in progress|host .* is blocked|broken pipe|could not translate host|unknown mysql server host|getaddrinfo/i', $msg) === 1;
 };
 
+$isMissingOptionalTable = static function (Throwable $e): bool {
+    $sqlState = $e instanceof PDOException ? (string)$e->getCode() : '';
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+    return $sqlState === '42S02'
+        || $driverCode === 1146
+        || stripos($e->getMessage(), 'Base table or view not found') !== false
+        || stripos($e->getMessage(), "doesn't exist") !== false;
+};
+
 // -----------------------------------------------------------------------------
 // 1. CRYPTOGRAPHIC SIGNATURE & AUTHENTICATION CHECKS (Fail-Closed)
 // -----------------------------------------------------------------------------
@@ -54,13 +63,13 @@ $rzpConfig = getRazorpayConfig();
 $keyId = $rzpConfig['keyId'];
 $secret = $rzpConfig['keySecret'];
 
-if (empty($secret)) {
-    error_log('[verify.php] Error: RAZORPAY_KEY_SECRET is not configured on server.');
+if (empty($keyId) || empty($secret)) {
+    error_log('[verify.php] Error: RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET is not configured on server.');
     jsonResponse([
         'verified' => false,
         'paymentId' => $paymentId,
         'orderId' => $orderId,
-        'error' => 'Payment gateway verification is unavailable on server. Please configure RAZORPAY_KEY_SECRET.'
+        'error' => 'Payment gateway verification is unavailable on server. Please configure RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.'
     ], 500);
 }
 
@@ -114,9 +123,175 @@ if (!hash_equals($expectedSignature, $signature)) {
     ], 400);
 }
 
-// Pre-gateway order ownership check (authoritative lock happens inside transaction below)
+$resolveDuplicateReferrerId = static function (PDO $conn, array $existingTx): ?string {
+    $dupIsPremium = ($existingTx['purpose'] ?? '') === 'premium_video_upload';
+    $dupRefStatus = !empty($existingTx['referral_status']) && $existingTx['referral_status'] !== 'not_applicable'
+        ? (string)$existingTx['referral_status']
+        : (floatval($existingTx['referral_commission'] ?? 0) > 0 ? 'credited' : 'unassigned_pending');
+    if ($dupIsPremium && $dupRefStatus === 'unassigned_pending') {
+        return null;
+    }
+    $payId = (string)($existingTx['payment_id'] ?? '');
+    try {
+        $stmtPt = $conn->prepare('SELECT referrer_id FROM premium_transactions WHERE payment_id = ? LIMIT 1');
+        $stmtPt->execute([$payId]);
+        $ptRow = $stmtPt->fetch(PDO::FETCH_ASSOC);
+        $ptRef = trim((string)($ptRow['referrer_id'] ?? ''));
+        if ($ptRef !== '') {
+            return strtoupper($ptRef);
+        }
+    } catch (Throwable $_ePtRef) {
+        // optional table
+    }
+    try {
+        $txLookupId = (($existingTx['purpose'] ?? '') === 'ads_promotion')
+            ? ('TX_ADS_L1_' . $payId)
+            : ('TX_REF_' . $payId);
+        $stmtLed = $conn->prepare("SELECT user_id FROM income_ledger WHERE transaction_id = ? AND user_id != 'UNASSIGNED_REFERRAL' LIMIT 1");
+        $stmtLed->execute([$txLookupId]);
+        $ledRow = $stmtLed->fetch(PDO::FETCH_ASSOC);
+        $ledRef = trim((string)($ledRow['user_id'] ?? ''));
+        if ($ledRef !== '') {
+            return strtoupper($ledRef);
+        }
+    } catch (Throwable $_eLedRef) {
+        // ignore
+    }
+    return null;
+};
+
+$buildDuplicateVerifyResponse = static function (
+    PDO $conn,
+    array $existingTx,
+    string $orderId,
+    string $paymentId,
+    string $uploaderId,
+    string $videoId,
+    string $purpose,
+    string $message
+) use ($resolveDuplicateReferrerId): array {
+    $txOrderMismatch = !empty($existingTx['order_id']) && (string)$existingTx['order_id'] !== $orderId;
+    $txUserMismatch = strcasecmp((string)$existingTx['user_id'], $uploaderId) !== 0;
+    $existingTxVideoId = trim((string)($existingTx['video_id'] ?? ''));
+    $resolvedVideoId = trim($videoId);
+    $txVideoMismatch = $existingTxVideoId !== '' && $existingTxVideoId !== $resolvedVideoId;
+    if ($txOrderMismatch || $txUserMismatch || $txVideoMismatch || (string)$existingTx['purpose'] !== $purpose) {
+        return [
+            409,
+            [
+                'verified' => false,
+                'paymentId' => $paymentId,
+                'orderId' => $orderId,
+                'error' => 'Conflict: Payment ID has already been used for a different order, video, or user.'
+            ]
+        ];
+    }
+
+    if ($existingTx['purpose'] === 'paid_subscription') {
+        $existingSub = null;
+        try {
+            $stmtSub = $conn->prepare('SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1');
+            $stmtSub->execute([$paymentId, $orderId]);
+            $subRow = $stmtSub->fetch();
+            if ($subRow) {
+                $existingSub = [
+                    'subscriptionId' => $subRow['subscription_id'],
+                    'userId' => $subRow['user_id'],
+                    'planId' => $subRow['plan_id'],
+                    'orderId' => $subRow['order_id'],
+                    'paymentId' => $subRow['payment_id'],
+                    'amount' => floatval($subRow['amount']),
+                    'currency' => $subRow['currency'],
+                    'status' => $subRow['status'],
+                    'startsAt' => $subRow['starts_at'],
+                    'expiresAt' => $subRow['expires_at'],
+                ];
+            }
+        } catch (Exception $eSub) {
+            // ignore
+        }
+        $resp = [
+            'verified' => true,
+            'paymentId' => $existingTx['payment_id'],
+            'orderId' => $existingTx['order_id'],
+            'amount' => floatval($existingTx['amount']),
+            'purpose' => 'paid_subscription',
+            'txNumber' => 0,
+            'isSpecialTransaction' => false,
+            'specialTag' => 'PAID_SUBSCRIPTION',
+            'duplicate' => true,
+            'message' => $message,
+        ];
+        if ($existingSub) {
+            $resp['subscription'] = $existingSub;
+        }
+        return [200, $resp];
+    }
+
+    $dupIsPremium = ($existingTx['purpose'] === 'premium_video_upload');
+    $dupGst = $dupIsPremium
+        ? (isset($existingTx['gst_amount']) && floatval($existingTx['gst_amount']) > 0 ? floatval($existingTx['gst_amount']) : 0.90)
+        : 0.00;
+    $dupPg = $dupIsPremium
+        ? (isset($existingTx['pg_fee']) && floatval($existingTx['pg_fee']) > 0 ? floatval($existingTx['pg_fee']) : 0.10)
+        : 0.00;
+    $dupRefStatus = $dupIsPremium
+        ? (!empty($existingTx['referral_status']) && $existingTx['referral_status'] !== 'not_applicable'
+            ? (string)$existingTx['referral_status']
+            : (floatval($existingTx['referral_commission'] ?? 0) > 0 ? 'credited' : 'unassigned_pending'))
+        : 'not_applicable';
+    $dupPoolAllocated = floatval($existingTx['global_pool_allocation']);
+    $dupPoolDistributed = $dupIsPremium
+        ? (isset($existingTx['global_pool_distributed']) ? floatval($existingTx['global_pool_distributed']) : $dupPoolAllocated)
+        : 0.00;
+    $dupPoolReserve = $dupIsPremium
+        ? (isset($existingTx['global_pool_reserve']) ? floatval($existingTx['global_pool_reserve']) : max(0.0, round($dupPoolAllocated - $dupPoolDistributed, 2)))
+        : 0.00;
+    $dupPoolStatus = $dupIsPremium
+        ? (!empty($existingTx['global_pool_status']) && $existingTx['global_pool_status'] !== 'not_applicable'
+            ? (string)$existingTx['global_pool_status']
+            : ($dupPoolReserve <= 0 ? 'settled' : ($dupPoolDistributed <= 0 ? 'pending_reserve' : 'partial_reserve')))
+        : 'not_applicable';
+    $dupReferrerId = $resolveDuplicateReferrerId($conn, $existingTx);
+
+    $dist = [
+        'directReferralAmount' => floatval($existingTx['referral_commission']),
+        'referrerId' => $dupReferrerId,
+        'referralStatus' => $dupRefStatus,
+        'adminAmount' => floatval($existingTx['admin_allocation']),
+        'globalPoolAmount' => $dupPoolAllocated,
+    ];
+    if ($dupIsPremium) {
+        $dist['globalPoolDistributedAmount'] = $dupPoolDistributed;
+        $dist['globalPoolReserveAmount'] = $dupPoolReserve;
+        $dist['globalPoolStatus'] = $dupPoolStatus;
+        $dist['gstAmount'] = $dupGst;
+        $dist['pgFeeAmount'] = $dupPg;
+        $dist['taxAndFees'] = round($dupGst + $dupPg, 2);
+        $dist['totalAmount'] = floatval($existingTx['amount']);
+    }
+
+    return [
+        200,
+        [
+            'verified' => true,
+            'paymentId' => $existingTx['payment_id'],
+            'orderId' => $existingTx['order_id'],
+            'amount' => floatval($existingTx['amount']),
+            'purpose' => $existingTx['purpose'],
+            'txNumber' => intval($existingTx['tx_number']),
+            'isSpecialTransaction' => (bool)$existingTx['is_special'],
+            'specialTag' => $existingTx['special_tag'],
+            'distribution' => $dist,
+            'duplicate' => true,
+            'message' => $message,
+        ]
+    ];
+};
+
+// Pre-gateway order ownership, metadata, and paid-order fast-path check (authoritative lock happens inside transaction below)
 try {
-    $stmtPreOrder = $pdo->prepare('SELECT order_id, user_id, video_id, purpose, plan_id, amount, currency FROM payment_orders WHERE order_id = ? LIMIT 1');
+    $stmtPreOrder = $pdo->prepare('SELECT * FROM payment_orders WHERE order_id = ? LIMIT 1');
     $stmtPreOrder->execute([$orderId]);
     $preOrder = $stmtPreOrder->fetch();
 } catch (Throwable $preOrderErr) {
@@ -144,6 +319,117 @@ if (strcasecmp((string)$preOrder['user_id'], (string)$authUser['user_id']) !== 0
         'orderId' => $orderId,
         'error' => 'Unauthorized: Payment order does not belong to the authenticated user.'
     ], 403);
+}
+
+$preRequestedUserId = trim($input['userId'] ?? ($input['user_id'] ?? ''));
+if (!empty($preRequestedUserId) && strcasecmp((string)$preOrder['user_id'], $preRequestedUserId) !== 0 && !$isAuthAdmin) {
+    jsonResponse(['verified' => false, 'error' => 'Unauthorized: Payment order does not belong to the requested user.'], 403);
+}
+
+if (strtoupper((string)($preOrder['currency'] ?? 'INR')) !== 'INR') {
+    jsonResponse(['verified' => false, 'error' => 'Payment order currency mismatch: expected INR.'], 400);
+}
+
+$preRequestedPurpose = trim($input['purpose'] ?? '');
+$prePurpose = (string)$preOrder['purpose'];
+if (!empty($preRequestedPurpose) && $preRequestedPurpose !== $prePurpose) {
+    jsonResponse(['verified' => false, 'error' => 'Payment purpose does not match the server order record.'], 400);
+}
+
+$preRequestedVideoId = trim($input['videoId'] ?? ($input['video_id'] ?? ''));
+$preOrderVideoId = trim((string)($preOrder['video_id'] ?? ''));
+if (!empty($preOrderVideoId) && !empty($preRequestedVideoId) && $preOrderVideoId !== $preRequestedVideoId) {
+    jsonResponse(['verified' => false, 'error' => 'Video ID does not match the server payment order record.'], 400);
+}
+$preResolvedVideoId = !empty($preOrderVideoId) ? $preOrderVideoId : $preRequestedVideoId;
+$prePlanId = trim((string)($preOrder['plan_id'] ?? ''));
+$preOrderAmount = floatval($preOrder['amount']);
+
+$preAuthoritativeAmount = 6.00;
+if ($prePurpose === 'ads_promotion') {
+    $prePricing = ['plan-7-days' => 100.0, 'plan-15-days' => 200.0, 'plan-monthly' => 300.0, 'plan-yearly' => 3000.0];
+    if (empty($prePlanId)) {
+        $prePlanId = 'plan-monthly';
+    }
+    if (!isset($prePricing[$prePlanId])) {
+        jsonResponse(['verified' => false, 'error' => 'Invalid ads promotion plan in order record.'], 400);
+    }
+    $preAuthoritativeAmount = $prePricing[$prePlanId];
+} elseif ($prePurpose === 'paid_subscription') {
+    $preBaselinePlanPricing = [
+        'member-monthly' => ['price' => 49.00, 'duration' => 30],
+        'member-vip-monthly' => ['price' => 149.00, 'duration' => 30],
+        'member-annual' => ['price' => 999.00, 'duration' => 365],
+    ];
+    $prePlanFound = false;
+    try {
+        $stmtPrePlan = $pdo->prepare('SELECT price FROM subscriber_plans WHERE plan_id = ? LIMIT 1');
+        $stmtPrePlan->execute([$prePlanId]);
+        $prePlanRow = $stmtPrePlan->fetch();
+        if ($prePlanRow) {
+            $preAuthoritativeAmount = floatval($prePlanRow['price']);
+            $prePlanFound = true;
+        }
+    } catch (Throwable $_ePrePlan) {
+        if (!$isMissingOptionalTable($_ePrePlan)) {
+            error_log('[verify.php] subscriber_plans pre-lookup error: ' . $_ePrePlan->getMessage());
+            if ($isConnectionUnavailable($_ePrePlan)) {
+                jsonResponse(['verified' => false, 'paymentId' => $paymentId, 'orderId' => $orderId, 'error' => 'Database connection unavailable verifying subscriber plan.'], 503);
+            }
+            jsonResponse(['verified' => false, 'paymentId' => $paymentId, 'orderId' => $orderId, 'error' => 'Database error verifying subscriber plan.'], 500);
+        }
+    }
+    if (!$prePlanFound) {
+        if (!isset($preBaselinePlanPricing[$prePlanId])) {
+            jsonResponse(['verified' => false, 'error' => 'Invalid subscriber plan in order record.'], 400);
+        }
+        $preAuthoritativeAmount = $preBaselinePlanPricing[$prePlanId]['price'];
+    }
+} elseif ($prePurpose !== 'premium_video_upload') {
+    jsonResponse(['verified' => false, 'error' => 'Unsupported payment purpose in order record.'], 400);
+}
+
+if (abs($preOrderAmount - $preAuthoritativeAmount) > 0.01) {
+    jsonResponse(['verified' => false, 'error' => 'Payment order amount does not match authoritative pricing.'], 400);
+}
+
+if (isset($input['amount']) && is_numeric($input['amount']) && abs(floatval($input['amount']) - $preOrderAmount) > 0.01) {
+    jsonResponse([
+        'verified' => false,
+        'error' => "Payment amount ₹{$input['amount']} does not match expected fee of ₹" . number_format($preOrderAmount, 2, '.', '') . "."
+    ], 400);
+}
+
+// Fast-path idempotency before hitting remote Razorpay API: order already paid with verified transaction
+if (($preOrder['status'] ?? '') === 'paid') {
+    if (!empty($preOrder['payment_id']) && (string)$preOrder['payment_id'] !== $paymentId) {
+        jsonResponse([
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'error' => 'Conflict: Payment order was already settled with a different payment ID.'
+        ], 409);
+    }
+    try {
+        $stmtFastTx = $pdo->prepare('SELECT * FROM payment_transactions WHERE payment_id = ? LIMIT 1');
+        $stmtFastTx->execute([$paymentId]);
+        $fastTx = $stmtFastTx->fetch();
+        if ($fastTx) {
+            [$fastStatus, $fastBody] = $buildDuplicateVerifyResponse(
+                $pdo,
+                $fastTx,
+                $orderId,
+                $paymentId,
+                (string)$preOrder['user_id'],
+                $preResolvedVideoId,
+                $prePurpose,
+                'Payment already verified and credited previously (idempotent duplicate).'
+            );
+            jsonResponse($fastBody, $fastStatus);
+        }
+    } catch (Throwable $_eFastTx) {
+        // Fall through to normal verification/transaction path
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -178,33 +464,47 @@ if (empty($pData) || !is_array($pData)) {
     ], 400);
 }
 
-// Verify gateway payment belongs to the expected order
-if (!empty($pData['order_id']) && $pData['order_id'] !== $orderId) {
+// Verify gateway payment ID, order ID, amount in paise, INR currency, and status
+if (empty($pData['id']) || (string)$pData['id'] !== $paymentId) {
     jsonResponse([
         'verified' => false,
-        'error' => "Razorpay payment order mismatch (expected {$orderId}, received {$pData['order_id']})"
+        'error' => "Razorpay payment ID mismatch (expected {$paymentId}, received " . ($pData['id'] ?? 'missing') . ')'
     ], 400);
 }
 
-// Verify payment currency is strictly INR
-if (($pData['currency'] ?? '') !== 'INR') {
+if (empty($pData['order_id']) || (string)$pData['order_id'] !== $orderId) {
+    jsonResponse([
+        'verified' => false,
+        'error' => "Razorpay payment order mismatch (expected {$orderId}, received " . ($pData['order_id'] ?? 'missing') . ')'
+    ], 400);
+}
+
+$preExpectedSubunits = (int)round($preOrderAmount * 100);
+$gatewayAmountSubunits = (int)($pData['amount'] ?? 0);
+if ($gatewayAmountSubunits !== $preExpectedSubunits) {
+    jsonResponse([
+        'verified' => false,
+        'error' => "Razorpay payment amount mismatch: expected ₹" . number_format($preOrderAmount, 2, '.', '') . ", received ₹" . ($gatewayAmountSubunits / 100)
+    ], 400);
+}
+
+if (strtoupper((string)($pData['currency'] ?? '')) !== 'INR') {
     jsonResponse([
         'verified' => false,
         'error' => 'Razorpay payment currency mismatch: expected INR.'
     ], 400);
 }
 
-// Verify payment status is successful
-if ($pData['status'] !== 'captured' && $pData['status'] !== 'authorized') {
+if (($pData['status'] ?? '') !== 'captured' && ($pData['status'] ?? '') !== 'authorized') {
     jsonResponse([
         'verified' => false,
-        'error' => "Razorpay payment status is not successful (status: {$pData['status']})."
+        'error' => "Razorpay payment status is not successful (status: " . ($pData['status'] ?? 'unknown') . ').'
     ], 400);
 }
 
-// If authorized, auto-capture with gateway
+// If authorized, auto-capture with gateway using authoritative expected subunits
 if ($pData['status'] === 'authorized') {
-    $capAmount = intval($pData['amount']);
+    $capAmount = $preExpectedSubunits;
     $capCh = curl_init("https://api.razorpay.com/v1/payments/{$paymentId}/capture");
     curl_setopt_array($capCh, [
         CURLOPT_RETURNTRANSFER => true,
@@ -247,14 +547,16 @@ $hasPremPoolDistCol = false;
 $hasPremPoolResCol = false;
 $hasPremPoolStatusCol = false;
 $hasGlobalPoolReservesTable = false;
+$hasReserveReasonInsufficientEnum = false;
 try {
     $colStmt = $pdo->query("
-        SELECT TABLE_NAME, COLUMN_NAME
+        SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE
         FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE()
           AND (
             (TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME IN ('ad_earnings', 'is_blocked', 'promotion_payment_id'))
             OR (TABLE_NAME = 'payment_orders' AND COLUMN_NAME = 'promotion_applied_at')
+            OR (TABLE_NAME = 'global_pool_reserves' AND COLUMN_NAME = 'reserve_reason')
             OR (TABLE_NAME = 'payment_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status'))
             OR (TABLE_NAME = 'premium_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status'))
           )
@@ -263,6 +565,7 @@ try {
         foreach ($colStmt->fetchAll(PDO::FETCH_ASSOC) as $colRow) {
             $tbl = strtolower((string)($colRow['TABLE_NAME'] ?? ''));
             $normalizedCol = strtolower((string)($colRow['COLUMN_NAME'] ?? ''));
+            $colType = strtolower((string)($colRow['COLUMN_TYPE'] ?? ''));
             if ($tbl === 'uploaded_videos') {
                 if ($normalizedCol === 'ad_earnings') {
                     $hasAdEarningsCol = true;
@@ -273,6 +576,10 @@ try {
                 }
             } elseif ($tbl === 'payment_orders' && $normalizedCol === 'promotion_applied_at') {
                 $hasPromoAppliedAtCol = true;
+            } elseif ($tbl === 'global_pool_reserves' && $normalizedCol === 'reserve_reason') {
+                if (str_contains($colType, 'insufficient_distributable_paise')) {
+                    $hasReserveReasonInsufficientEnum = true;
+                }
             } elseif ($tbl === 'payment_transactions') {
                 if ($normalizedCol === 'gst_amount') {
                     $hasPtGstCol = true;
@@ -386,7 +693,7 @@ try {
         jsonResponse(['verified' => false, 'error' => 'Video ID does not match the server payment order record.'], 400);
     }
 
-    // Fast-path duplicate check: Order is already marked paid
+    // Fast-path duplicate check: Order is already marked paid — ONLY succeed with persisted, identity-verified payment_transactions proof
     if ($orderRecord['status'] === 'paid') {
         if (!empty($orderRecord['payment_id']) && (string)$orderRecord['payment_id'] !== $paymentId) {
             $safeRollback($pdo);
@@ -398,45 +705,31 @@ try {
             ], 409);
         }
 
-        $existingSub = null;
-        if ($orderRecord['purpose'] === 'paid_subscription') {
-            try {
-                $stmtSub = $pdo->prepare('SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1');
-                $stmtSub->execute([$paymentId, $orderId]);
-                $subRow = $stmtSub->fetch();
-                if ($subRow) {
-                    $existingSub = [
-                        'subscriptionId' => $subRow['subscription_id'],
-                        'userId' => $subRow['user_id'],
-                        'planId' => $subRow['plan_id'],
-                        'orderId' => $subRow['order_id'],
-                        'paymentId' => $subRow['payment_id'],
-                        'amount' => floatval($subRow['amount']),
-                        'currency' => $subRow['currency'],
-                        'status' => $subRow['status'],
-                        'startsAt' => $subRow['starts_at'],
-                        'expiresAt' => $subRow['expires_at'],
-                    ];
-                }
-            } catch (Exception $eSub) {
-                // ignore
-            }
+        $stmtLockedDupTx = $pdo->prepare('SELECT * FROM payment_transactions WHERE payment_id = ? FOR UPDATE');
+        $stmtLockedDupTx->execute([$paymentId]);
+        $lockedDupTx = $stmtLockedDupTx->fetch();
+        if ($lockedDupTx) {
+            [$dupStatus, $dupResp] = $buildDuplicateVerifyResponse(
+                $pdo,
+                $lockedDupTx,
+                $orderId,
+                $paymentId,
+                (string)$orderRecord['user_id'],
+                !empty($orderVideoId) ? $orderVideoId : $requestedVideoId,
+                (string)$orderRecord['purpose'],
+                'Payment already verified and credited previously (idempotent duplicate).'
+            );
+            $safeRollback($pdo);
+            jsonResponse($dupResp, $dupStatus);
         }
+
         $safeRollback($pdo);
-        $duplicateResp = [
-            'verified' => true,
+        jsonResponse([
+            'verified' => false,
             'paymentId' => $paymentId,
             'orderId' => $orderId,
-            'amount' => floatval($orderRecord['amount']),
-            'purpose' => $orderRecord['purpose'],
-            'duplicate' => true,
-            'message' => 'Payment already verified and credited previously (idempotent duplicate).'
-        ];
-        if ($existingSub) {
-            $duplicateResp['subscription'] = $existingSub;
-        }
-        jsonResponse($duplicateResp);
-        exit;
+            'error' => 'Conflict: Payment order is marked paid without a matching verified payment transaction record.'
+        ], 409);
     }
 
     // Authoritative parameters locked from server-stored order
@@ -474,8 +767,10 @@ try {
                 $authoritativeAmount = floatval($planRow['price']);
                 $planFound = true;
             }
-        } catch (Exception $ePlan) {
-            // fallback
+        } catch (Throwable $ePlan) {
+            if (!$isMissingOptionalTable($ePlan)) {
+                throw $ePlan;
+            }
         }
         if (!$planFound) {
             if (!isset($baselinePlanPricing[$planId])) {
@@ -517,91 +812,18 @@ try {
     $stmtExisting->execute([$paymentId]);
     $existingTx = $stmtExisting->fetch();
     if ($existingTx) {
-        $txOrderMismatch = !empty($existingTx['order_id']) && (string)$existingTx['order_id'] !== $orderId;
-        $txUserMismatch = strcasecmp((string)$existingTx['user_id'], $userId) !== 0;
-        $txVideoMismatch = !empty($videoId) && !empty($existingTx['video_id']) && (string)$existingTx['video_id'] !== $videoId;
-        if ($txOrderMismatch || $txUserMismatch || $txVideoMismatch || (string)$existingTx['purpose'] !== $purpose) {
-            $safeRollback($pdo);
-            jsonResponse([
-                'verified' => false,
-                'paymentId' => $paymentId,
-                'orderId' => $orderId,
-                'error' => 'Conflict: Payment ID has already been used for a different order, video, or user.'
-            ], 409);
-        }
-
-        $existingSub = null;
-        if ($existingTx['purpose'] === 'paid_subscription') {
-            try {
-                $stmtSub = $pdo->prepare('SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1');
-                $stmtSub->execute([$paymentId, $orderId]);
-                $subRow = $stmtSub->fetch();
-                if ($subRow) {
-                    $existingSub = [
-                        'subscriptionId' => $subRow['subscription_id'],
-                        'userId' => $subRow['user_id'],
-                        'planId' => $subRow['plan_id'],
-                        'orderId' => $subRow['order_id'],
-                        'paymentId' => $subRow['payment_id'],
-                        'amount' => floatval($subRow['amount']),
-                        'currency' => $subRow['currency'],
-                        'status' => $subRow['status'],
-                        'startsAt' => $subRow['starts_at'],
-                        'expiresAt' => $subRow['expires_at'],
-                    ];
-                }
-            } catch (Exception $eSub) {
-                // ignore
-            }
-        }
+        [$dupStatus, $dupResp] = $buildDuplicateVerifyResponse(
+            $pdo,
+            $existingTx,
+            $orderId,
+            $paymentId,
+            $userId,
+            $videoId,
+            $purpose,
+            'Payment already verified and credited previously (idempotent duplicate).'
+        );
         $safeRollback($pdo);
-        $duplicateResp = [
-            'verified' => true,
-            'paymentId' => $existingTx['payment_id'],
-            'orderId' => $existingTx['order_id'],
-            'amount' => floatval($existingTx['amount']),
-            'purpose' => $existingTx['purpose'],
-            'txNumber' => intval($existingTx['tx_number']),
-            'isSpecialTransaction' => (bool)$existingTx['is_special'],
-            'specialTag' => $existingTx['special_tag'],
-            'duplicate' => true,
-            'message' => 'Payment already verified and credited previously (idempotent duplicate).'
-        ];
-        if ($existingTx['purpose'] === 'premium_video_upload') {
-            $dupGst = isset($existingTx['gst_amount']) && floatval($existingTx['gst_amount']) > 0 ? floatval($existingTx['gst_amount']) : 0.90;
-            $dupPg = isset($existingTx['pg_fee']) && floatval($existingTx['pg_fee']) > 0 ? floatval($existingTx['pg_fee']) : 0.10;
-            $dupRefStatus = !empty($existingTx['referral_status']) && $existingTx['referral_status'] !== 'not_applicable'
-                ? (string)$existingTx['referral_status']
-                : (floatval($existingTx['referral_commission'] ?? 0) > 0 ? 'credited' : 'unassigned_pending');
-            $dupPoolAllocated = floatval($existingTx['global_pool_allocation']);
-            $dupPoolDistributed = isset($existingTx['global_pool_distributed'])
-                ? floatval($existingTx['global_pool_distributed'])
-                : $dupPoolAllocated;
-            $dupPoolReserve = isset($existingTx['global_pool_reserve'])
-                ? floatval($existingTx['global_pool_reserve'])
-                : max(0.0, round($dupPoolAllocated - $dupPoolDistributed, 2));
-            $dupPoolStatus = !empty($existingTx['global_pool_status']) && $existingTx['global_pool_status'] !== 'not_applicable'
-                ? (string)$existingTx['global_pool_status']
-                : ($dupPoolReserve <= 0 ? 'settled' : ($dupPoolDistributed <= 0 ? 'pending_reserve' : 'partial_reserve'));
-            $duplicateResp['distribution'] = [
-                'directReferralAmount' => floatval($existingTx['referral_commission']),
-                'referralStatus' => $dupRefStatus,
-                'adminAmount' => floatval($existingTx['admin_allocation']),
-                'globalPoolAmount' => $dupPoolAllocated,
-                'globalPoolDistributedAmount' => $dupPoolDistributed,
-                'globalPoolReserveAmount' => $dupPoolReserve,
-                'globalPoolStatus' => $dupPoolStatus,
-                'gstAmount' => $dupGst,
-                'pgFeeAmount' => $dupPg,
-                'taxAndFees' => round($dupGst + $dupPg, 2),
-                'totalAmount' => floatval($existingTx['amount']),
-            ];
-        }
-        if ($existingSub) {
-            $duplicateResp['subscription'] = $existingSub;
-        }
-        jsonResponse($duplicateResp);
-        exit;
+        jsonResponse($dupResp, $dupStatus);
     }
 
     // Video ownership & anti-reuse verification under row lock
@@ -797,7 +1019,20 @@ try {
             : (($distributedPaise === 0) ? 'pending_reserve' : 'partial_reserve');
         $globalPoolReserveReason = ($reservePaise === 0)
             ? null
-            : (($distributedPaise === 0) ? 'no_eligible_videos' : 'rounding_residual');
+            : (($eligibleVideoCount === 0)
+                ? 'no_eligible_videos'
+                : (($distributedPaise === 0) ? 'insufficient_distributable_paise' : 'rounding_residual'));
+
+        // Fail closed before writing any transaction, ledger, or wallet entries if reserve table is missing
+        if ($reservePaise > 0 && !$hasGlobalPoolReservesTable) {
+            $safeRollback($pdo);
+            jsonResponse([
+                'verified' => false,
+                'paymentId' => $paymentId,
+                'orderId' => $orderId,
+                'error' => 'Global Pool reserve schema migration has not been applied yet. Transaction safely rolled back.'
+            ], 503);
+        }
 
         // Insert into payment_transactions (protected by UNIQUE key on payment_id)
         if ($hasPtAccountingCols && $hasPtPoolBreakdownCols) {
@@ -916,8 +1151,10 @@ try {
                     $adminAllocation, $globalPoolAllocation
                 ]);
             }
-        } catch (Exception $ePt) {
-            // Table optional
+        } catch (Throwable $ePt) {
+            if (!$isMissingOptionalTable($ePt)) {
+                throw $ePt;
+            }
         }
 
         // 1. Direct referral commission (₹1.00)
@@ -1089,7 +1326,9 @@ try {
                 mt_rand(0, 0xffff), mt_rand(0, 0xffff), mt_rand(0, 0xffff));
             $reserveDesc = ($globalPoolReserveReason === 'no_eligible_videos')
                 ? "Global Pool pending reserve (₹{$globalPoolReserve} — 0 eligible previous videos for Premium Video #{$txNumber})"
-                : "Global Pool pending reserve (₹{$globalPoolReserve} — integer-paise rounding residual for Premium Video #{$txNumber})";
+                : (($globalPoolReserveReason === 'insufficient_distributable_paise')
+                    ? "Global Pool pending reserve (₹{$globalPoolReserve} — insufficient distributable paise across {$eligibleCreatorCount} eligible videos for Premium Video #{$txNumber})"
+                    : "Global Pool pending reserve (₹{$globalPoolReserve} — integer-paise rounding residual for Premium Video #{$txNumber})");
 
             $stmtGlbResLedger = $pdo->prepare('
                 INSERT INTO income_ledger (
@@ -1110,30 +1349,31 @@ try {
                 $reserveDesc
             ]);
 
-            if ($hasGlobalPoolReservesTable) {
-                $globalPoolReserveId = 'gpr_' . round(microtime(true) * 1000) . '_' . substr(bin2hex(random_bytes(4)), 0, 8);
-                $stmtReserve = $pdo->prepare('
-                    INSERT INTO global_pool_reserves (
-                        id, payment_id, order_id, tx_number, source_user_id, source_video_id,
-                        reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
-                    ) VALUES (
-                        ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, "pending", ?, NOW(), NOW()
-                    )
-                ');
-                $stmtReserve->execute([
-                    $globalPoolReserveId,
-                    $paymentId,
-                    $orderId,
-                    $txNumber,
-                    strtoupper($userId),
-                    $videoId ?: null,
-                    $globalPoolReserve,
-                    $reservePaise,
-                    $globalPoolReserveReason,
-                    $reserveDesc
-                ]);
-            }
+            $globalPoolReserveId = 'gpr_' . round(microtime(true) * 1000) . '_' . substr(bin2hex(random_bytes(4)), 0, 8);
+            $sqlReserveReason = ($globalPoolReserveReason === 'insufficient_distributable_paise' && !$hasReserveReasonInsufficientEnum)
+                ? 'rounding_residual'
+                : $globalPoolReserveReason;
+            $stmtReserve = $pdo->prepare('
+                INSERT INTO global_pool_reserves (
+                    id, payment_id, order_id, tx_number, source_user_id, source_video_id,
+                    reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, "pending", ?, NOW(), NOW()
+                )
+            ');
+            $stmtReserve->execute([
+                $globalPoolReserveId,
+                $paymentId,
+                $orderId,
+                $txNumber,
+                strtoupper($userId),
+                $videoId ?: null,
+                $globalPoolReserve,
+                $reservePaise,
+                $sqlReserveReason,
+                $reserveDesc
+            ]);
         }
 
         $levelPayouts = [];
@@ -1160,8 +1400,10 @@ try {
                 $durationDays = intval($planRow['duration_days'] ?: 30);
                 $planFound = true;
             }
-        } catch (Exception $ePlan) {
-            // fallback if table unmigrated
+        } catch (Throwable $ePlan) {
+            if (!$isMissingOptionalTable($ePlan)) {
+                throw $ePlan;
+            }
         }
         if (!$planFound) {
             $baselinePlanPricing = [
@@ -1236,16 +1478,12 @@ try {
         // Do NOT add Admin allocation or commission calculations.
         // Do NOT decide or implement subscription renewal/extension policy yet.
 
-        // Update payment_orders status to "paid"
-        try {
-            $pdo->prepare('
-                UPDATE payment_orders 
-                SET status = "paid", payment_id = ?, updated_at = NOW() 
-                WHERE order_id = ?
-            ')->execute([$paymentId, $orderId]);
-        } catch (Exception $ePoUpdate) {
-            // Optional
-        }
+        // Update payment_orders status to "paid" atomically within transaction
+        $pdo->prepare('
+            UPDATE payment_orders 
+            SET status = "paid", payment_id = ?, updated_at = NOW() 
+            WHERE order_id = ?
+        ')->execute([$paymentId, $orderId]);
 
         $pdo->commit();
 
@@ -1436,8 +1674,10 @@ try {
                     $uplineIncomeType = 'marketing_income';
                 }
             }
-        } catch (Exception $eCol) {
-            // Table inspection fallback
+        } catch (Throwable $eCol) {
+            if (!$isMissingOptionalTable($eCol)) {
+                throw $eCol;
+            }
         }
 
         // Insert atomic ledger entries and credit wallet balances for each valid upline sponsor
@@ -1579,23 +1819,19 @@ try {
         }
     }
 
-    // 3.8 Update payment_orders status to 'paid' (and promotion_applied_at when ads_promotion was activated)
-    try {
-        if ($purpose === 'ads_promotion' && $hasPromoAppliedAtCol && $promotionAppliedNow) {
-            $pdo->prepare('
-                UPDATE payment_orders 
-                SET status = "paid", payment_id = ?, promotion_applied_at = NOW(), updated_at = NOW() 
-                WHERE order_id = ?
-            ')->execute([$paymentId, $orderId]);
-        } else {
-            $pdo->prepare('
-                UPDATE payment_orders 
-                SET status = "paid", payment_id = ?, updated_at = NOW() 
-                WHERE order_id = ?
-            ')->execute([$paymentId, $orderId]);
-        }
-    } catch (Exception $ePoUpdate) {
-        // Optional
+    // 3.8 Update payment_orders status to 'paid' atomically (and promotion_applied_at when ads_promotion was activated)
+    if ($purpose === 'ads_promotion' && $hasPromoAppliedAtCol && $promotionAppliedNow) {
+        $pdo->prepare('
+            UPDATE payment_orders 
+            SET status = "paid", payment_id = ?, promotion_applied_at = NOW(), updated_at = NOW() 
+            WHERE order_id = ?
+        ')->execute([$paymentId, $orderId]);
+    } else {
+        $pdo->prepare('
+            UPDATE payment_orders 
+            SET status = "paid", payment_id = ?, updated_at = NOW() 
+            WHERE order_id = ?
+        ')->execute([$paymentId, $orderId]);
     }
 
     // Commit all operations atomically
@@ -1641,90 +1877,38 @@ try {
     $isConnUnavailable = $isConnectionUnavailable($e);
 
     // Check for duplicate key conflict (error code 23000 / 1062)
+    $driverCode = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
     if (
         !$isConnUnavailable &&
-        ((string)$e->getCode() === '23000' || str_contains($e->getMessage(), '1062') || str_contains($e->getMessage(), 'Duplicate entry'))
+        ((string)$e->getCode() === '23000' || $driverCode === 1062)
     ) {
         try {
             $stmtExisting = $pdo->prepare('SELECT * FROM payment_transactions WHERE payment_id = ? LIMIT 1');
             $stmtExisting->execute([$paymentId]);
             $existingTx = $stmtExisting->fetch();
             if ($existingTx) {
-                $existingSub = null;
-                if ($existingTx['purpose'] === 'paid_subscription') {
-                    try {
-                        $stmtSub = $pdo->prepare('SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1');
-                        $stmtSub->execute([$paymentId, $orderId]);
-                        $subRow = $stmtSub->fetch();
-                        if ($subRow) {
-                            $existingSub = [
-                                'subscriptionId' => $subRow['subscription_id'],
-                                'userId' => $subRow['user_id'],
-                                'planId' => $subRow['plan_id'],
-                                'orderId' => $subRow['order_id'],
-                                'paymentId' => $subRow['payment_id'],
-                                'amount' => floatval($subRow['amount']),
-                                'currency' => $subRow['currency'],
-                                'status' => $subRow['status'],
-                                'startsAt' => $subRow['starts_at'],
-                                'expiresAt' => $subRow['expires_at'],
-                            ];
-                        }
-                    } catch (Exception $eSub) {
-                        // ignore
-                    }
-                }
-                $duplicateResp = [
-                    'verified' => true,
-                    'paymentId' => $existingTx['payment_id'],
-                    'orderId' => $existingTx['order_id'],
-                    'amount' => floatval($existingTx['amount']),
-                    'purpose' => $existingTx['purpose'],
-                    'txNumber' => intval($existingTx['tx_number']),
-                    'isSpecialTransaction' => (bool)$existingTx['is_special'],
-                    'specialTag' => $existingTx['special_tag'],
-                    'duplicate' => true,
-                    'message' => 'Concurrent duplicate detected and resolved safely without double crediting.'
-                ];
-                if ($existingTx['purpose'] === 'premium_video_upload') {
-                    $dupGst = isset($existingTx['gst_amount']) && floatval($existingTx['gst_amount']) > 0 ? floatval($existingTx['gst_amount']) : 0.90;
-                    $dupPg = isset($existingTx['pg_fee']) && floatval($existingTx['pg_fee']) > 0 ? floatval($existingTx['pg_fee']) : 0.10;
-                    $dupRefStatus = !empty($existingTx['referral_status']) && $existingTx['referral_status'] !== 'not_applicable'
-                        ? (string)$existingTx['referral_status']
-                        : (floatval($existingTx['referral_commission'] ?? 0) > 0 ? 'credited' : 'unassigned_pending');
-                    $dupPoolAllocated = floatval($existingTx['global_pool_allocation']);
-                    $dupPoolDistributed = isset($existingTx['global_pool_distributed'])
-                        ? floatval($existingTx['global_pool_distributed'])
-                        : $dupPoolAllocated;
-                    $dupPoolReserve = isset($existingTx['global_pool_reserve'])
-                        ? floatval($existingTx['global_pool_reserve'])
-                        : max(0.0, round($dupPoolAllocated - $dupPoolDistributed, 2));
-                    $dupPoolStatus = !empty($existingTx['global_pool_status']) && $existingTx['global_pool_status'] !== 'not_applicable'
-                        ? (string)$existingTx['global_pool_status']
-                        : ($dupPoolReserve <= 0 ? 'settled' : ($dupPoolDistributed <= 0 ? 'pending_reserve' : 'partial_reserve'));
-                    $duplicateResp['distribution'] = [
-                        'directReferralAmount' => floatval($existingTx['referral_commission']),
-                        'referralStatus' => $dupRefStatus,
-                        'adminAmount' => floatval($existingTx['admin_allocation']),
-                        'globalPoolAmount' => $dupPoolAllocated,
-                        'globalPoolDistributedAmount' => $dupPoolDistributed,
-                        'globalPoolReserveAmount' => $dupPoolReserve,
-                        'globalPoolStatus' => $dupPoolStatus,
-                        'gstAmount' => $dupGst,
-                        'pgFeeAmount' => $dupPg,
-                        'taxAndFees' => round($dupGst + $dupPg, 2),
-                        'totalAmount' => floatval($existingTx['amount']),
-                    ];
-                }
-                if ($existingSub) {
-                    $duplicateResp['subscription'] = $existingSub;
-                }
-                jsonResponse($duplicateResp);
-                exit;
+                [$dupStatus, $dupResp] = $buildDuplicateVerifyResponse(
+                    $pdo,
+                    $existingTx,
+                    $orderId,
+                    $paymentId,
+                    (string)$orderRecord['user_id'],
+                    (string)($videoId ?? ''),
+                    (string)$orderRecord['purpose'],
+                    'Concurrent duplicate detected and resolved safely without double crediting.'
+                );
+                jsonResponse($dupResp, $dupStatus);
             }
         } catch (Throwable $_dupLookupErr) {
             error_log('[verify.php] Duplicate lookup fallback failed: ' . $_dupLookupErr->getMessage());
         }
+
+        jsonResponse([
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'error' => 'Conflict: Duplicate accounting entry prevented transaction recording. Transaction safely rolled back.'
+        ], 409);
     }
 
     // Safe error message without exposing database tables or SQL traces

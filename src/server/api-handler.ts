@@ -25,6 +25,7 @@ import {
   savePersistentRefundRequest,
   updatePersistentRefundRequest,
   type RefundRequestRecord,
+  resolveRazorpayRemotePolicy,
 } from "./payments.ts";
 import {
   sendWelcomeEmailServer,
@@ -38,8 +39,14 @@ import {
   sanitizeOptionalThumbnailUrl,
 } from "../lib/thumbnail-service.ts";
 
-const DATA_DIR = path.resolve(process.cwd(), "data");
-const STORE_FILE = path.join(DATA_DIR, "facetube_store.json");
+function getStoreDataDir(): string {
+  const override = process.env["FACETUBE_DATA_DIR"]?.trim();
+  return override ? path.resolve(override) : path.resolve(process.cwd(), "data");
+}
+
+function getStoreFilePath(): string {
+  return path.join(getStoreDataDir(), "facetube_store.json");
+}
 
 /**
  * Safely evaluates whether an ad promotion is currently active.
@@ -213,6 +220,200 @@ export function isMysqlMissingTableError(err: unknown): boolean {
     Number(e.errno ?? 0) === 1146 ||
     String(e.sqlState ?? "") === "42S02"
   );
+}
+
+async function resolveMysqlDuplicateReferrerId(
+  qConn: { query: (sql: string, params?: any[]) => Promise<any> },
+  existingTx: any,
+): Promise<string | null> {
+  const dupRefStatus =
+    existingTx.referral_status && existingTx.referral_status !== "not_applicable"
+      ? String(existingTx.referral_status)
+      : Number(existingTx.referral_commission) > 0
+        ? "credited"
+        : "unassigned_pending";
+  if (existingTx.purpose === "premium_video_upload" && dupRefStatus === "unassigned_pending") {
+    return null;
+  }
+  try {
+    const [ptRows]: any = await qConn.query(
+      `SELECT referrer_id FROM premium_transactions WHERE payment_id = ? LIMIT 1`,
+      [existingTx.payment_id],
+    );
+    const ptRef = String(ptRows?.[0]?.referrer_id || "").trim();
+    if (ptRef) return ptRef.toUpperCase();
+  } catch {
+    // premium_transactions optional
+  }
+  try {
+    const txLookupId =
+      existingTx.purpose === "ads_promotion"
+        ? `TX_ADS_L1_${existingTx.payment_id}`
+        : `TX_REF_${existingTx.payment_id}`;
+    const [ledRows]: any = await qConn.query(
+      `SELECT user_id FROM income_ledger WHERE transaction_id = ? AND user_id != 'UNASSIGNED_REFERRAL' LIMIT 1`,
+      [txLookupId],
+    );
+    const ledRef = String(ledRows?.[0]?.user_id || "").trim();
+    if (ledRef) return ledRef.toUpperCase();
+  } catch {
+    // ignore ledger lookup failure
+  }
+  return null;
+}
+
+async function buildMysqlDuplicateVerifyResult(
+  qConn: { query: (sql: string, params?: any[]) => Promise<any> },
+  existingTx: any,
+  orderId: string,
+  paymentId: string,
+  uploaderId: string,
+  videoId: string,
+  purpose: string,
+  message: string,
+): Promise<{ status: number; body: Record<string, any> }> {
+  const txOrderMismatch = Boolean(existingTx.order_id) && String(existingTx.order_id) !== orderId;
+  const txUserMismatch =
+    String(existingTx.user_id || "")
+      .trim()
+      .toUpperCase() !== uploaderId;
+  const existingVideoId = String(existingTx.video_id || "").trim();
+  const resolvedVideoId = String(videoId || "").trim();
+  const txVideoMismatch = existingVideoId !== "" && existingVideoId !== resolvedVideoId;
+  if (
+    txOrderMismatch ||
+    txUserMismatch ||
+    txVideoMismatch ||
+    String(existingTx.purpose) !== purpose
+  ) {
+    return {
+      status: 409,
+      body: {
+        verified: false,
+        paymentId,
+        orderId,
+        error: "Conflict: Payment ID has already been used for a different order, video, or user.",
+      },
+    };
+  }
+
+  if (existingTx.purpose === "paid_subscription") {
+    let existingSub: any = null;
+    try {
+      const [subRows]: any = await qConn.query(
+        `SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1`,
+        [paymentId, orderId],
+      );
+      if (subRows && subRows.length > 0) {
+        const s = subRows[0];
+        existingSub = {
+          subscriptionId: s.subscription_id,
+          userId: s.user_id,
+          planId: s.plan_id,
+          orderId: s.order_id,
+          paymentId: s.payment_id,
+          amount: Number(s.amount),
+          currency: s.currency,
+          status: s.status,
+          startsAt: s.starts_at,
+          expiresAt: s.expires_at,
+        };
+      }
+    } catch {
+      // Ignore if user_subscriptions table is not yet migrated
+    }
+    return {
+      status: 200,
+      body: {
+        verified: true,
+        paymentId: existingTx.payment_id,
+        orderId: existingTx.order_id,
+        amount: Number(existingTx.amount),
+        purpose: "paid_subscription",
+        txNumber: 0,
+        isSpecialTransaction: false,
+        specialTag: "PAID_SUBSCRIPTION",
+        subscription: existingSub,
+        duplicate: true,
+        message,
+      },
+    };
+  }
+
+  const dupIsPremium = existingTx.purpose === "premium_video_upload";
+  const dupGst = dupIsPremium
+    ? Number(existingTx.gst_amount) > 0
+      ? Number(existingTx.gst_amount)
+      : 0.9
+    : 0;
+  const dupPg = dupIsPremium
+    ? Number(existingTx.pg_fee) > 0
+      ? Number(existingTx.pg_fee)
+      : 0.1
+    : 0;
+  const dupRefStatus = dupIsPremium
+    ? existingTx.referral_status && existingTx.referral_status !== "not_applicable"
+      ? String(existingTx.referral_status)
+      : Number(existingTx.referral_commission) > 0
+        ? "credited"
+        : "unassigned_pending"
+    : "not_applicable";
+  const dupPoolAllocated = Number(existingTx.global_pool_allocation);
+  const dupPoolDistributed = dupIsPremium
+    ? existingTx.global_pool_distributed !== undefined &&
+      existingTx.global_pool_distributed !== null
+      ? Number(existingTx.global_pool_distributed)
+      : dupPoolAllocated
+    : 0;
+  const dupPoolReserve = dupIsPremium
+    ? existingTx.global_pool_reserve !== undefined && existingTx.global_pool_reserve !== null
+      ? Number(existingTx.global_pool_reserve)
+      : Math.max(0, Number((dupPoolAllocated - dupPoolDistributed).toFixed(2)))
+    : 0;
+  const dupPoolStatus = dupIsPremium
+    ? existingTx.global_pool_status && existingTx.global_pool_status !== "not_applicable"
+      ? String(existingTx.global_pool_status)
+      : dupPoolReserve <= 0
+        ? "settled"
+        : dupPoolDistributed <= 0
+          ? "pending_reserve"
+          : "partial_reserve"
+    : "not_applicable";
+  const resolvedDupReferrerId = await resolveMysqlDuplicateReferrerId(qConn, existingTx);
+
+  return {
+    status: 200,
+    body: {
+      verified: true,
+      paymentId: existingTx.payment_id,
+      orderId: existingTx.order_id,
+      amount: Number(existingTx.amount),
+      purpose: existingTx.purpose,
+      txNumber: Number(existingTx.tx_number),
+      isSpecialTransaction: Boolean(existingTx.is_special),
+      specialTag: existingTx.special_tag,
+      distribution: {
+        directReferralAmount: Number(existingTx.referral_commission),
+        referrerId: resolvedDupReferrerId,
+        referralStatus: dupRefStatus,
+        adminAmount: Number(existingTx.admin_allocation),
+        globalPoolAmount: dupPoolAllocated,
+        ...(dupIsPremium
+          ? {
+              globalPoolDistributedAmount: dupPoolDistributed,
+              globalPoolReserveAmount: dupPoolReserve,
+              globalPoolStatus: dupPoolStatus,
+              gstAmount: dupGst,
+              pgFeeAmount: dupPg,
+              taxAndFees: Number((dupGst + dupPg).toFixed(2)),
+              totalAmount: Number(existingTx.amount),
+            }
+          : {}),
+      },
+      duplicate: true,
+      message,
+    },
+  };
 }
 
 const MAX_WALLET_CURRENCY_AMOUNT = 999999999999.99;
@@ -1389,13 +1590,14 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
   if (isProductionStoreBlocked(env)) {
     return createEmptyProductionStore();
   }
+  const storeFile = getStoreFilePath();
   try {
-    if (fs.existsSync(STORE_FILE)) {
-      const stats = fs.statSync(STORE_FILE);
+    if (fs.existsSync(storeFile)) {
+      const stats = fs.statSync(storeFile);
       if (inMemoryStore && stats.mtimeMs <= lastLoadedMtime) {
         return inMemoryStore;
       }
-      const content = fs.readFileSync(STORE_FILE, "utf-8");
+      const content = fs.readFileSync(storeFile, "utf-8");
       inMemoryStore = JSON.parse(content);
       lastLoadedMtime = stats.mtimeMs;
       if (inMemoryStore) {
@@ -1484,11 +1686,13 @@ function saveStore(store: ServerStore, env?: Record<string, string | undefined>)
     return;
   }
   inMemoryStore = store;
+  const dataDir = getStoreDataDir();
+  const storeFile = getStoreFilePath();
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
     }
-    fs.writeFileSync(STORE_FILE, JSON.stringify(store, null, 2), "utf-8");
+    fs.writeFileSync(storeFile, JSON.stringify(store, null, 2), "utf-8");
     lastLoadedMtime = Date.now();
   } catch (err) {
     console.warn("[FaceTube Store] Could not persist store file", err);
@@ -2314,7 +2518,21 @@ async function dispatchApiRequest(
                 planValidated = true;
               }
             } catch (_ePlan) {
-              // Fall back to baseline plans if subscriber_plans table is absent
+              if (!isMysqlMissingTableError(_ePlan)) {
+                if (isMysqlConnectionUnavailableError(_ePlan)) {
+                  return jsonResponse(
+                    {
+                      success: false,
+                      error: "Database connection unavailable verifying subscriber plan.",
+                    },
+                    503,
+                  );
+                }
+                return jsonResponse(
+                  { success: false, error: "Database error verifying subscriber plan." },
+                  500,
+                );
+              }
             }
           }
           if (!planValidated) {
@@ -2564,14 +2782,19 @@ async function dispatchApiRequest(
         const sanitizeKey = (val: string) => val.replace(/^["']|["']$/g, "").trim();
         const keyId = sanitizeKey(readEnv("RAZORPAY_KEY_ID"));
         const secretKey = sanitizeKey(readEnv("RAZORPAY_KEY_SECRET"));
-        if (!secretKey) {
+        const { isProduction: isRzpProd, skipRemote } = resolveRazorpayRemotePolicy({
+          APP_ENV: readEnv("APP_ENV"),
+          NODE_ENV: readEnv("NODE_ENV"),
+          RAZORPAY_SKIP_REMOTE_CHECK: readEnv("RAZORPAY_SKIP_REMOTE_CHECK"),
+        });
+        if (!secretKey || ((isRzpProd || !skipRemote) && !keyId)) {
           return jsonResponse(
             {
               verified: false,
               paymentId,
               orderId,
               error:
-                "Payment verification configuration unavailable on server (RAZORPAY_KEY_SECRET missing). Failed closed.",
+                "Payment verification configuration unavailable on server (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET missing). Failed closed.",
             },
             500,
           );
@@ -2792,7 +3015,21 @@ async function dispatchApiRequest(
                 planFound = true;
               }
             } catch (_e) {
-              // Ignore if subscriber_plans table is not yet migrated
+              if (!isMysqlMissingTableError(_e)) {
+                if (isMysqlConnectionUnavailableError(_e)) {
+                  return jsonResponse(
+                    {
+                      verified: false,
+                      error: "Database connection unavailable verifying subscriber plan.",
+                    },
+                    503,
+                  );
+                }
+                return jsonResponse(
+                  { verified: false, error: "Database error verifying subscriber plan." },
+                  500,
+                );
+              }
             }
           }
           if (!planFound) {
@@ -2889,10 +3126,10 @@ async function dispatchApiRequest(
               String(existingPersistentTx.userId || "")
                 .trim()
                 .toUpperCase() !== uploaderId;
+            const existingPersistentVideoId = String(existingPersistentTx.videoId || "").trim();
+            const resolvedReqVideoId = String(videoId || "").trim();
             const vidMismatch =
-              Boolean(videoId) &&
-              Boolean(existingPersistentTx.videoId) &&
-              existingPersistentTx.videoId !== videoId;
+              existingPersistentVideoId !== "" && existingPersistentVideoId !== resolvedReqVideoId;
             if (
               orderMismatch ||
               userMismatch ||
@@ -3017,10 +3254,139 @@ async function dispatchApiRequest(
 
         const expectedPaise = Math.round(expectedAmount * 100);
 
-        // Remote Razorpay API confirmation (status, order_id, amount in paise)
-        const skipRemote = Boolean(readEnv("RAZORPAY_SKIP_REMOTE_CHECK"));
+        // Paid-order fast-path idempotency after all auth, HMAC, ownership, metadata, and video checks:
+        // returns full recorded duplicate response without making an unnecessary remote Razorpay API call.
+        if (
+          orderRecord.status === "paid" &&
+          (!orderRecord.payment_id || String(orderRecord.payment_id) === paymentId)
+        ) {
+          if (pool) {
+            try {
+              const [fastTxRows]: any = await pool.query(
+                `SELECT * FROM payment_transactions WHERE payment_id = ? LIMIT 1`,
+                [paymentId],
+              );
+              if (fastTxRows && fastTxRows.length > 0) {
+                const fastDup = await buildMysqlDuplicateVerifyResult(
+                  pool,
+                  fastTxRows[0],
+                  orderId,
+                  paymentId,
+                  uploaderId,
+                  videoId,
+                  purpose,
+                  "Payment already verified and credited previously (idempotent duplicate).",
+                );
+                return jsonResponse(fastDup.body, fastDup.status);
+              }
+            } catch {
+              // Fall through to transaction-locked verification if fast-path lookup fails
+            }
+          } else {
+            const existingTxs = await getPersistentTransactions();
+            const existingPersistentTx = existingTxs.find((t) => t.paymentId === paymentId);
+            if (existingPersistentTx) {
+              if (
+                existingPersistentTx.specialTag === "PAID_SUBSCRIPTION" ||
+                existingPersistentTx.transactionType === "paid_subscription" ||
+                purpose === "paid_subscription"
+              ) {
+                const sub = (store.userSubscriptions || []).find(
+                  (s) => s.payment_id === paymentId || s.order_id === orderId,
+                );
+                return jsonResponse({
+                  verified: true,
+                  paymentId: existingPersistentTx.paymentId,
+                  orderId: existingPersistentTx.orderId,
+                  amount: existingPersistentTx.amount,
+                  purpose: "paid_subscription",
+                  txNumber: 0,
+                  isSpecialTransaction: false,
+                  specialTag: "PAID_SUBSCRIPTION",
+                  ...(sub
+                    ? {
+                        subscription: {
+                          subscriptionId: sub.subscription_id,
+                          userId: sub.user_id,
+                          planId: sub.plan_id,
+                          orderId: sub.order_id,
+                          paymentId: sub.payment_id,
+                          amount: sub.amount,
+                          currency: sub.currency,
+                          status: sub.status,
+                          startsAt: sub.starts_at,
+                          expiresAt: sub.expires_at,
+                        },
+                      }
+                    : {}),
+                  duplicate: true,
+                  message:
+                    "Payment already verified and credited previously (idempotent duplicate).",
+                });
+              }
 
-        if (keyId && !skipRemote) {
+              const isAds =
+                existingPersistentTx.specialTag === "ADS_PROMOTION" ||
+                existingPersistentTx.transactionType === "ads_promotion" ||
+                purpose === "ads_promotion";
+              const dupPoolDist = isAds
+                ? 0
+                : (existingPersistentTx.globalPoolDistributed ??
+                  existingPersistentTx.globalPoolAllocation);
+              const dupPoolRes = isAds
+                ? 0
+                : (existingPersistentTx.globalPoolReserve ??
+                  Math.max(
+                    0,
+                    Number((existingPersistentTx.globalPoolAllocation - dupPoolDist).toFixed(2)),
+                  ));
+              const dupPoolStatus: GlobalPoolStatus = isAds
+                ? "not_applicable"
+                : (existingPersistentTx.globalPoolStatus ??
+                  (dupPoolRes <= 0
+                    ? "settled"
+                    : dupPoolDist <= 0
+                      ? "pending_reserve"
+                      : "partial_reserve"));
+              const dupGst = isAds ? 0 : (existingPersistentTx.gstAmount ?? 0.9);
+              const dupPg = isAds ? 0 : (existingPersistentTx.pgFee ?? 0.1);
+              const dupRefStatus = isAds
+                ? "not_applicable"
+                : (existingPersistentTx.referralStatus ??
+                  (existingPersistentTx.referrerId ? "credited" : "unassigned_pending"));
+
+              return jsonResponse({
+                verified: true,
+                paymentId: existingPersistentTx.paymentId,
+                orderId: existingPersistentTx.orderId,
+                amount: existingPersistentTx.amount,
+                purpose: isAds ? "ads_promotion" : existingPersistentTx.transactionType,
+                txNumber: isAds ? 0 : existingPersistentTx.txNumber,
+                isSpecialTransaction: Boolean(existingPersistentTx.isSpecial),
+                specialTag: existingPersistentTx.specialTag,
+                distribution: {
+                  directReferralAmount: existingPersistentTx.referralCommission,
+                  referrerId: existingPersistentTx.referrerId,
+                  referralStatus: dupRefStatus,
+                  adminAmount: existingPersistentTx.adminAllocation,
+                  globalPoolAmount: existingPersistentTx.globalPoolAllocation,
+                  globalPoolDistributedAmount: dupPoolDist,
+                  globalPoolReserveAmount: dupPoolRes,
+                  globalPoolStatus: dupPoolStatus,
+                  gstAmount: dupGst,
+                  pgFeeAmount: dupPg,
+                  taxAndFees: Number((dupGst + dupPg).toFixed(2)),
+                  totalAmount: existingPersistentTx.amount,
+                },
+                duplicate: true,
+                message: "Payment already verified and credited previously (idempotent duplicate).",
+              });
+            }
+          }
+        }
+
+        // Remote Razorpay API confirmation (status, payment_id, order_id, currency, amount in paise)
+        if (!skipRemote) {
           try {
             const authHeader = `Basic ${Buffer.from(`${keyId}:${secretKey}`).toString("base64")}`;
             const rzpRes = await fetch(`https://api.razorpay.com/v1/payments/${paymentId}`, {
@@ -3049,13 +3415,25 @@ async function dispatchApiRequest(
               currency: string;
             };
 
-            if (pData.order_id && pData.order_id !== orderId) {
+            if (!pData.id || pData.id !== paymentId) {
               return jsonResponse(
                 {
                   verified: false,
                   paymentId,
                   orderId,
-                  error: `Razorpay payment order mismatch: expected ${orderId}, got ${pData.order_id}`,
+                  error: `Razorpay payment ID mismatch: expected ${paymentId}, got ${pData.id || "missing"}`,
+                },
+                400,
+              );
+            }
+
+            if (!pData.order_id || pData.order_id !== orderId) {
+              return jsonResponse(
+                {
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  error: `Razorpay payment order mismatch: expected ${orderId}, got ${pData.order_id || "missing"}`,
                 },
                 400,
               );
@@ -3073,7 +3451,7 @@ async function dispatchApiRequest(
               );
             }
 
-            if (pData.currency !== "INR") {
+            if (String(pData.currency || "").toUpperCase() !== "INR") {
               return jsonResponse(
                 {
                   verified: false,
@@ -3140,6 +3518,8 @@ async function dispatchApiRequest(
 
         // 6. ATOMIC RECORDING & DEDUPLICATION (MySQL or Fallback Store)
         if (pool) {
+          let hasAdEarningsCol = false;
+          let hasIsBlockedCol = false;
           let hasPromoPaymentIdCol = false;
           let hasPromoAppliedAtCol = false;
           let hasPtGstCol = false;
@@ -3155,22 +3535,31 @@ async function dispatchApiRequest(
           let hasPremPoolResCol = false;
           let hasPremPoolStatusCol = false;
           let hasGlobalPoolReservesTable = false;
+          let hasReserveReasonInsufficientEnum = false;
           try {
             const [colRows]: any = await pool.query(
-              `SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+              `SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
                WHERE TABLE_SCHEMA = DATABASE()
-                 AND ((TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME = 'promotion_payment_id')
+                 AND ((TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME IN ('ad_earnings', 'is_blocked', 'promotion_payment_id'))
                    OR (TABLE_NAME = 'payment_orders' AND COLUMN_NAME = 'promotion_applied_at')
+                   OR (TABLE_NAME = 'global_pool_reserves' AND COLUMN_NAME = 'reserve_reason')
                    OR (TABLE_NAME = 'payment_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status'))
                    OR (TABLE_NAME = 'premium_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status')))`,
             );
             for (const colRow of colRows || []) {
               const tbl = String(colRow.TABLE_NAME || "").toLowerCase();
               const col = String(colRow.COLUMN_NAME || "").toLowerCase();
-              if (tbl === "uploaded_videos" && col === "promotion_payment_id") {
-                hasPromoPaymentIdCol = true;
+              const colType = String(colRow.COLUMN_TYPE || "").toLowerCase();
+              if (tbl === "uploaded_videos") {
+                if (col === "ad_earnings") hasAdEarningsCol = true;
+                else if (col === "is_blocked") hasIsBlockedCol = true;
+                else if (col === "promotion_payment_id") hasPromoPaymentIdCol = true;
               } else if (tbl === "payment_orders" && col === "promotion_applied_at") {
                 hasPromoAppliedAtCol = true;
+              } else if (tbl === "global_pool_reserves" && col === "reserve_reason") {
+                if (colType.includes("insufficient_distributable_paise")) {
+                  hasReserveReasonInsufficientEnum = true;
+                }
               } else if (tbl === "payment_transactions") {
                 if (col === "gst_amount") hasPtGstCol = true;
                 else if (col === "pg_fee") hasPtPgFeeCol = true;
@@ -3193,10 +3582,14 @@ async function dispatchApiRequest(
           try {
             const [tblRows]: any = await pool.query(
               `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-               WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'global_pool_reserves'`,
+               WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('global_pool_reserves', 'global_pool_settlements')`,
             );
-            if (Array.isArray(tblRows) && tblRows.length > 0) {
-              hasGlobalPoolReservesTable = true;
+            if (Array.isArray(tblRows)) {
+              for (const tRow of tblRows) {
+                if (String(tRow.TABLE_NAME || "").toLowerCase() === "global_pool_reserves") {
+                  hasGlobalPoolReservesTable = true;
+                }
+              }
             }
           } catch (_eTbl) {
             // Keep false if table check fails
@@ -3253,148 +3646,20 @@ async function dispatchApiRequest(
               [paymentId],
             );
             if (existingRows && existingRows.length > 0) {
-              const existingTx = existingRows[0];
-              const txOrderMismatch =
-                Boolean(existingTx.order_id) && String(existingTx.order_id) !== orderId;
-              const txUserMismatch =
-                String(existingTx.user_id || "")
-                  .trim()
-                  .toUpperCase() !== uploaderId;
-              const txVideoMismatch =
-                Boolean(videoId) &&
-                Boolean(existingTx.video_id) &&
-                String(existingTx.video_id) !== videoId;
-              if (
-                txOrderMismatch ||
-                txUserMismatch ||
-                txVideoMismatch ||
-                String(existingTx.purpose) !== purpose
-              ) {
-                await conn.rollback();
-                return jsonResponse(
-                  {
-                    verified: false,
-                    paymentId,
-                    orderId,
-                    error:
-                      "Conflict: Payment ID has already been used for a different order, video, or user.",
-                  },
-                  409,
-                );
-              }
-
+              const lockedResolvedVideoId =
+                String(lockedOrder.video_id || "").trim() || requestedVideoId;
+              const dupRes = await buildMysqlDuplicateVerifyResult(
+                conn,
+                existingRows[0],
+                orderId,
+                paymentId,
+                uploaderId,
+                lockedResolvedVideoId,
+                purpose,
+                "Payment already verified and credited previously (idempotent duplicate).",
+              );
               await conn.rollback();
-              if (existingTx.purpose === "paid_subscription") {
-                let existingSub: any = null;
-                try {
-                  const [subRows]: any = await conn.query(
-                    `SELECT * FROM user_subscriptions WHERE payment_id = ? OR order_id = ? LIMIT 1`,
-                    [paymentId, orderId],
-                  );
-                  if (subRows && subRows.length > 0) {
-                    const s = subRows[0];
-                    existingSub = {
-                      subscriptionId: s.subscription_id,
-                      userId: s.user_id,
-                      planId: s.plan_id,
-                      orderId: s.order_id,
-                      paymentId: s.payment_id,
-                      amount: Number(s.amount),
-                      currency: s.currency,
-                      status: s.status,
-                      startsAt: s.starts_at,
-                      expiresAt: s.expires_at,
-                    };
-                  }
-                } catch (_e) {
-                  // Ignore if user_subscriptions table is not yet migrated
-                }
-                return jsonResponse({
-                  verified: true,
-                  paymentId: existingTx.payment_id,
-                  orderId: existingTx.order_id,
-                  amount: Number(existingTx.amount),
-                  purpose: "paid_subscription",
-                  txNumber: 0,
-                  isSpecialTransaction: false,
-                  specialTag: "PAID_SUBSCRIPTION",
-                  subscription: existingSub,
-                  duplicate: true,
-                  message:
-                    "Payment already verified and credited previously (idempotent duplicate).",
-                });
-              }
-              const dupIsPremium = existingTx.purpose === "premium_video_upload";
-              const dupGst = dupIsPremium
-                ? Number(existingTx.gst_amount) > 0
-                  ? Number(existingTx.gst_amount)
-                  : 0.9
-                : 0;
-              const dupPg = dupIsPremium
-                ? Number(existingTx.pg_fee) > 0
-                  ? Number(existingTx.pg_fee)
-                  : 0.1
-                : 0;
-              const dupRefStatus = dupIsPremium
-                ? existingTx.referral_status && existingTx.referral_status !== "not_applicable"
-                  ? String(existingTx.referral_status)
-                  : Number(existingTx.referral_commission) > 0
-                    ? "credited"
-                    : "unassigned_pending"
-                : "not_applicable";
-              const dupPoolAllocated = Number(existingTx.global_pool_allocation);
-              const dupPoolDistributed = dupIsPremium
-                ? existingTx.global_pool_distributed !== undefined &&
-                  existingTx.global_pool_distributed !== null
-                  ? Number(existingTx.global_pool_distributed)
-                  : dupPoolAllocated
-                : 0;
-              const dupPoolReserve = dupIsPremium
-                ? existingTx.global_pool_reserve !== undefined &&
-                  existingTx.global_pool_reserve !== null
-                  ? Number(existingTx.global_pool_reserve)
-                  : Math.max(0, Number((dupPoolAllocated - dupPoolDistributed).toFixed(2)))
-                : 0;
-              const dupPoolStatus = dupIsPremium
-                ? existingTx.global_pool_status &&
-                  existingTx.global_pool_status !== "not_applicable"
-                  ? String(existingTx.global_pool_status)
-                  : dupPoolReserve <= 0
-                    ? "settled"
-                    : dupPoolDistributed <= 0
-                      ? "pending_reserve"
-                      : "partial_reserve"
-                : "not_applicable";
-              return jsonResponse({
-                verified: true,
-                paymentId: existingTx.payment_id,
-                orderId: existingTx.order_id,
-                amount: Number(existingTx.amount),
-                purpose: existingTx.purpose,
-                txNumber: Number(existingTx.tx_number),
-                isSpecialTransaction: Boolean(existingTx.is_special),
-                specialTag: existingTx.special_tag,
-                distribution: {
-                  directReferralAmount: Number(existingTx.referral_commission),
-                  referrerId: existingTx.user_id,
-                  referralStatus: dupRefStatus,
-                  adminAmount: Number(existingTx.admin_allocation),
-                  globalPoolAmount: dupPoolAllocated,
-                  ...(dupIsPremium
-                    ? {
-                        globalPoolDistributedAmount: dupPoolDistributed,
-                        globalPoolReserveAmount: dupPoolReserve,
-                        globalPoolStatus: dupPoolStatus,
-                        gstAmount: dupGst,
-                        pgFeeAmount: dupPg,
-                        taxAndFees: Number((dupGst + dupPg).toFixed(2)),
-                        totalAmount: Number(existingTx.amount),
-                      }
-                    : {}),
-                },
-                duplicate: true,
-                message: "Payment already verified and credited previously (idempotent duplicate).",
-              });
+              return jsonResponse(dupRes.body, dupRes.status);
             }
 
             let lockedVideoRow: any = null;
@@ -3485,14 +3750,10 @@ async function dispatchApiRequest(
                 [orderId, paymentId, uploaderId, userName, amount],
               );
 
-              try {
-                await conn.query(
-                  `UPDATE payment_orders SET status = 'paid', payment_id = ?, updated_at = NOW() WHERE order_id = ?`,
-                  [paymentId, orderId],
-                );
-              } catch (_ePo) {
-                // Ignore order update error
-              }
+              await conn.query(
+                `UPDATE payment_orders SET status = 'paid', payment_id = ?, updated_at = NOW() WHERE order_id = ?`,
+                [paymentId, orderId],
+              );
 
               await conn.commit();
 
@@ -3602,12 +3863,17 @@ async function dispatchApiRequest(
               totalReferralAmount = referralCommission;
 
               // Query eligible previous Premium videos, strictly excluding current uploader:
+              const adEarningsExpr = hasAdEarningsCol
+                ? "COALESCE(ad_earnings, 0.00) AS ad_earnings"
+                : "0.00 AS ad_earnings";
+              const blockedFilter = hasIsBlockedCol
+                ? "\n                   AND (is_blocked = 0 OR is_blocked IS NULL)"
+                : "";
               const [eligibleRows]: any = await conn.query(
-                `SELECT id AS video_id, user_id, COALESCE(ad_earnings, 0.00) AS ad_earnings
+                `SELECT id AS video_id, user_id, ${adEarningsExpr}
                  FROM uploaded_videos
                  WHERE (video_type = 'premium' OR payment_status = 'paid')
-                   AND UPPER(user_id) != UPPER(?)
-                   AND (is_blocked = 0 OR is_blocked IS NULL)
+                   AND UPPER(user_id) != UPPER(?)${blockedFilter}
                  ORDER BY created_at ASC, id ASC`,
                 [uploaderId],
               );
@@ -3659,9 +3925,26 @@ async function dispatchApiRequest(
               globalPoolReserveReason =
                 reservePaise === 0
                   ? null
-                  : distributedPaise === 0
+                  : eligibleCreatorCount === 0
                     ? "no_eligible_videos"
-                    : "rounding_residual";
+                    : distributedPaise === 0
+                      ? "insufficient_distributable_paise"
+                      : "rounding_residual";
+
+              // Fail closed before any transaction/ledger writes if reserve table is required but missing
+              if (reservePaise > 0 && !hasGlobalPoolReservesTable) {
+                await conn.rollback();
+                return jsonResponse(
+                  {
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    error:
+                      "Global Pool reserve schema migration has not been applied yet. Transaction safely rolled back.",
+                  },
+                  503,
+                );
+              }
 
               adminPercent = Math.round((adminAllocation / amount) * 100);
 
@@ -3823,7 +4106,9 @@ async function dispatchApiRequest(
                   );
                 }
               } catch (_ePt) {
-                // Audit table optional
+                if (!isMysqlMissingTableError(_ePt)) {
+                  throw _ePt;
+                }
               }
 
               // 3. Insert into income_ledger & credit wallet_balances for Referrer (or preserve unassigned_pending)
@@ -3954,7 +4239,9 @@ async function dispatchApiRequest(
                 const reserveDesc =
                   globalPoolReserveReason === "no_eligible_videos"
                     ? `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — 0 eligible previous videos for Premium Video #${txNumber})`
-                    : `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — integer-paise rounding residual for Premium Video #${txNumber})`;
+                    : globalPoolReserveReason === "insufficient_distributable_paise"
+                      ? `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — insufficient distributable paise across ${eligibleCreatorCount} eligible videos for Premium Video #${txNumber})`
+                      : `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — integer-paise rounding residual for Premium Video #${txNumber})`;
 
                 await conn.query(
                   `INSERT INTO income_ledger (
@@ -3972,27 +4259,30 @@ async function dispatchApiRequest(
                   ],
                 );
 
-                if (hasGlobalPoolReservesTable) {
-                  globalPoolReserveId = `gpr_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
-                  await conn.query(
-                    `INSERT INTO global_pool_reserves (
-                      id, payment_id, order_id, tx_number, source_user_id, source_video_id,
-                      reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NOW(), NOW())`,
-                    [
-                      globalPoolReserveId,
-                      paymentId,
-                      orderId,
-                      txNumber,
-                      uploaderId,
-                      videoId || null,
-                      globalPoolReserve,
-                      reservePaise,
-                      globalPoolReserveReason,
-                      reserveDesc,
-                    ],
-                  );
-                }
+                globalPoolReserveId = `gpr_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+                const sqlReserveReason =
+                  globalPoolReserveReason === "insufficient_distributable_paise" &&
+                  !hasReserveReasonInsufficientEnum
+                    ? "rounding_residual"
+                    : globalPoolReserveReason;
+                await conn.query(
+                  `INSERT INTO global_pool_reserves (
+                    id, payment_id, order_id, tx_number, source_user_id, source_video_id,
+                    reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NOW(), NOW())`,
+                  [
+                    globalPoolReserveId,
+                    paymentId,
+                    orderId,
+                    txNumber,
+                    uploaderId,
+                    videoId || null,
+                    globalPoolReserve,
+                    reservePaise,
+                    sqlReserveReason,
+                    reserveDesc,
+                  ],
+                );
               }
             } else {
               // Task 33: 7-Level Ads Promotion Referral Distribution
@@ -4160,20 +4450,16 @@ async function dispatchApiRequest(
               }
             }
 
-            try {
-              if (purpose === "ads_promotion" && hasPromoAppliedAtCol && promotionAppliedNow) {
-                await conn.query(
-                  `UPDATE payment_orders SET status = 'paid', payment_id = ?, promotion_applied_at = NOW(), updated_at = NOW() WHERE order_id = ?`,
-                  [paymentId, orderId],
-                );
-              } else {
-                await conn.query(
-                  `UPDATE payment_orders SET status = 'paid', payment_id = ?, updated_at = NOW() WHERE order_id = ?`,
-                  [paymentId, orderId],
-                );
-              }
-            } catch (_ePoUpd) {
-              // Ignore optional order update error
+            if (purpose === "ads_promotion" && hasPromoAppliedAtCol && promotionAppliedNow) {
+              await conn.query(
+                `UPDATE payment_orders SET status = 'paid', payment_id = ?, promotion_applied_at = NOW(), updated_at = NOW() WHERE order_id = ?`,
+                [paymentId, orderId],
+              );
+            } else {
+              await conn.query(
+                `UPDATE payment_orders SET status = 'paid', payment_id = ?, updated_at = NOW() WHERE order_id = ?`,
+                [paymentId, orderId],
+              );
             }
 
             await conn.commit();
@@ -4222,15 +4508,50 @@ async function dispatchApiRequest(
             });
           } catch (txErr: any) {
             await conn.rollback();
-            if (txErr.code === "ER_DUP_ENTRY" || String(txErr).includes("uniq_pt_payment_id")) {
-              return jsonResponse({
-                verified: true,
-                paymentId,
-                orderId,
-                amount,
-                duplicate: true,
-                message: "Payment already verified and credited previously (idempotent duplicate).",
-              });
+            if (!isMysqlConnectionUnavailableError(txErr) && isMysqlDuplicateKeyError(txErr)) {
+              try {
+                const [existingRows]: any = await pool.query(
+                  `SELECT * FROM payment_transactions WHERE payment_id = ? LIMIT 1`,
+                  [paymentId],
+                );
+                if (existingRows && existingRows.length > 0) {
+                  const dupRes = await buildMysqlDuplicateVerifyResult(
+                    pool,
+                    existingRows[0],
+                    orderId,
+                    paymentId,
+                    uploaderId,
+                    videoId,
+                    purpose,
+                    "Concurrent duplicate detected and resolved safely without double crediting.",
+                  );
+                  return jsonResponse(dupRes.body, dupRes.status);
+                }
+              } catch {
+                // Fall through to fail-closed 409/500 below
+              }
+              return jsonResponse(
+                {
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  error:
+                    "Conflict: Duplicate accounting entry prevented transaction recording. Transaction safely rolled back.",
+                },
+                409,
+              );
+            }
+            if (isMysqlConnectionUnavailableError(txErr)) {
+              return jsonResponse(
+                {
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  error:
+                    "Database connection unavailable during payment verification. Transaction was safely rolled back.",
+                },
+                503,
+              );
             }
             throw txErr;
           } finally {
@@ -4272,12 +4593,12 @@ async function dispatchApiRequest(
               ? resolveUplineSponsors(uploaderId, store.users)
               : undefined;
 
-          // Find all eligible videos for weighted Ads Earnings Share, strictly excluding current uploader
+          // Shared eligible-video filter matching PHP verify.php & global-pool-settle.php:
+          // (video_type === 'premium' || payment_status === 'paid') && uploader excluded && !is_blocked
           const storeEligibleVideos = (store.videos || [])
             .filter(
               (v) =>
-                v.video_type === "premium" &&
-                v.payment_status === "paid" &&
+                (v.video_type === "premium" || v.payment_status === "paid") &&
                 v.user_id.toUpperCase() !== uploaderId &&
                 !v.is_blocked,
             )
@@ -4463,9 +4784,11 @@ async function dispatchApiRequest(
                 });
               }
 
-              // 3. Credit each eligible creator from creatorPayouts
+              // 3. Credit each eligible creator from creatorPayouts (skip <= 0 payouts before touching store.wallets)
               const payouts = result.distribution.creatorPayouts || [];
               for (const payout of payouts) {
+                if (payout.amount <= 0) continue;
+
                 let w = store.wallets[payout.userId];
                 if (!w) {
                   w = {
@@ -4484,8 +4807,6 @@ async function dispatchApiRequest(
                 w.total_earned += payout.amount;
                 w.global_income += payout.amount;
                 w.updated_at = new Date().toISOString();
-
-                if (payout.amount <= 0) continue;
                 const txGlbId = `TX_GLB_${result.paymentId}_${payout.videoId || payout.userId}`;
                 const glbDesc = payout.videoId
                   ? `Per-Video Ads Earnings Share for video #${payout.videoId} (₹${payout.amount.toFixed(2)} share of ₹3 pool for Premium Video #${result.txNumber || 0})`
@@ -4521,7 +4842,10 @@ async function dispatchApiRequest(
                 const reserveDesc =
                   result.distribution.globalPoolReserveReason === "no_eligible_videos"
                     ? `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — 0 eligible previous videos for Premium Video #${result.txNumber || 0})`
-                    : `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — integer-paise rounding residual for Premium Video #${result.txNumber || 0})`;
+                    : result.distribution.globalPoolReserveReason ===
+                        "insufficient_distributable_paise"
+                      ? `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — insufficient distributable paise across eligible videos for Premium Video #${result.txNumber || 0})`
+                      : `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — integer-paise rounding residual for Premium Video #${result.txNumber || 0})`;
 
                 store.walletTransactions.unshift({
                   id: `tx-glb-reserve-${Date.now()}`,
@@ -4733,6 +5057,60 @@ async function dispatchApiRequest(
 
   if (route === "payments/transactions" || route === "payment/transactions") {
     if (method === "GET") {
+      const isProduction = isFailClosedProductionEnv(
+        readEnvValue(env, "APP_ENV"),
+        readEnvValue(env, "NODE_ENV"),
+      );
+      const pool = getMysqlPool();
+      if ((isProduction || process.env["NODE_ENV"] === "production") && !pool) {
+        return jsonResponse(
+          {
+            status: "error",
+            error:
+              "Database connection unavailable. Persistent database storage is required in production.",
+          },
+          503,
+        );
+      }
+
+      if (pool) {
+        try {
+          const [rows]: any = await pool.query(
+            `SELECT * FROM payment_transactions
+             ORDER BY tx_number DESC
+             LIMIT 50`,
+          );
+          const list = Array.isArray(rows) ? rows : [];
+          const lastTxNumber = list.length > 0 ? Number(list[0].tx_number || 10) : 10;
+          return jsonResponse({
+            status: "ok",
+            lastTxNumber,
+            totalTransactions: list.length,
+            transactions: list,
+          });
+        } catch (dbErr: unknown) {
+          if (isMysqlConnectionUnavailableError(dbErr)) {
+            return jsonResponse(
+              {
+                status: "error",
+                error: "Database connection unavailable while loading transactions.",
+              },
+              503,
+            );
+          }
+          if (isMysqlMissingTableError(dbErr)) {
+            return jsonResponse(
+              {
+                status: "error",
+                error: "Payment transactions schema migration has not been applied yet.",
+              },
+              503,
+            );
+          }
+          return jsonResponse({ status: "error", error: "Failed to load transactions" }, 500);
+        }
+      }
+
       try {
         const [lastTxNumber, transactions] = await Promise.all([
           getPersistentPremiumTxNumber(),
@@ -15743,7 +16121,7 @@ async function dispatchApiRequest(
         401,
       );
     }
-    if (authUser.role !== "admin") {
+    if (String(authUser.role || "").toLowerCase() !== "admin") {
       return jsonResponse(
         {
           success: false,
@@ -15764,20 +16142,13 @@ async function dispatchApiRequest(
              FROM global_pool_reserves
              ORDER BY tx_number ASC, created_at ASC`,
           );
-          let settlementRows: any[] = [];
-          try {
-            const [sRows]: any = await pool.query(
-              `SELECT id, idempotency_key, total_reserve_amount, distributed_amount, carry_forward_amount,
-                      reserve_count, eligible_video_count, payout_count, settled_by, notes, created_at
-               FROM global_pool_settlements
-               ORDER BY created_at DESC`,
-            );
-            settlementRows = sRows || [];
-          } catch (sErr: unknown) {
-            if (!isMysqlMissingTableError(sErr)) {
-              throw sErr;
-            }
-          }
+          const [sRows]: any = await pool.query(
+            `SELECT id, idempotency_key, total_reserve_amount, distributed_amount, carry_forward_amount,
+                    reserve_count, eligible_video_count, payout_count, settled_by, notes, created_at
+             FROM global_pool_settlements
+             ORDER BY created_at DESC`,
+          );
+          const settlementRows = sRows || [];
           const reserves = Array.isArray(reserveRows) ? reserveRows : [];
           const pendingReserves = reserves.filter((r: any) => r.status === "pending");
           const totalPendingAmount = Number(
@@ -15794,13 +16165,13 @@ async function dispatchApiRequest(
           });
         } catch (dbErr: unknown) {
           if (isMysqlMissingTableError(dbErr)) {
-            return jsonResponse({
-              success: true,
-              pendingCount: 0,
-              totalPendingAmount: 0,
-              reserves: [],
-              settlements: [],
-            });
+            return jsonResponse(
+              {
+                success: false,
+                error: "Global Pool reserve schema migration has not been applied yet.",
+              },
+              503,
+            );
           }
           if (isMysqlConnectionUnavailableError(dbErr)) {
             return jsonResponse(
@@ -15860,6 +16231,30 @@ async function dispatchApiRequest(
         .toUpperCase();
 
       if (pool) {
+        // Detect optional columns on uploaded_videos before starting transaction
+        let hasAdEarningsCol = false;
+        let hasIsBlockedCol = false;
+        try {
+          const [colRows]: any = await pool.query(
+            `SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'uploaded_videos'
+               AND COLUMN_NAME IN ('ad_earnings', 'is_blocked')`,
+          );
+          for (const colRow of colRows || []) {
+            const cName = String(colRow.COLUMN_NAME || "").toLowerCase();
+            if (cName === "ad_earnings") hasAdEarningsCol = true;
+            else if (cName === "is_blocked") hasIsBlockedCol = true;
+          }
+        } catch {
+          // Keep safe false defaults
+        }
+        const adEarningsExpr = hasAdEarningsCol
+          ? "COALESCE(ad_earnings, 0.00) AS ad_earnings"
+          : "0.00 AS ad_earnings";
+        const blockedFilter = hasIsBlockedCol
+          ? "\n               AND (is_blocked = 0 OR is_blocked IS NULL)"
+          : "";
+
         const conn = await pool.getConnection();
         try {
           await conn.beginTransaction();
@@ -15913,17 +16308,17 @@ async function dispatchApiRequest(
               settledCount: 0,
               remainingPendingCount: 0,
               totalSettledAmount: 0,
+              reason: "no_pending_reserves",
               settlement: null,
               message: "No pending Global Pool reserves available to settle.",
             });
           }
 
-          // 3. Query eligible Sponsor/Premium videos
+          // 3. Query eligible Sponsor/Premium videos using detected schema columns
           const [videoRows]: any = await conn.query(
-            `SELECT id AS video_id, user_id, COALESCE(ad_earnings, 0.00) AS ad_earnings
+            `SELECT id AS video_id, user_id, ${adEarningsExpr}
              FROM uploaded_videos
-             WHERE (video_type = 'premium' OR payment_status = 'paid')
-               AND (is_blocked = 0 OR is_blocked IS NULL)
+             WHERE (video_type = 'premium' OR payment_status = 'paid')${blockedFilter}
              ORDER BY created_at ASC, id ASC`,
           );
           const candidateVideos: Array<{
@@ -15950,6 +16345,8 @@ async function dispatchApiRequest(
           let totalReservePaiseProcessed = 0;
           let totalDistributedPaise = 0;
           let totalCarryForwardPaise = 0;
+          let skippedNoEligibleCount = 0;
+          let skippedInsufficientPaiseCount = 0;
 
           for (const r of pendingReserves) {
             const sourceNorm = String(r.source_user_id || "")
@@ -15968,6 +16365,7 @@ async function dispatchApiRequest(
             });
 
             if (eligibleForReserve.length === 0) {
+              skippedNoEligibleCount += 1;
               continue;
             }
 
@@ -15980,12 +16378,23 @@ async function dispatchApiRequest(
             }
 
             const weighted = calculateWeightedPoolPayouts(reservePaise, eligibleForReserve);
+            if (
+              weighted.distributedPaise <= 0 ||
+              !weighted.payouts.some((p) => p.amountPaise > 0)
+            ) {
+              // Eligible videos exist, but every payout rounded to 0 paise.
+              // Keep original reserve pending — never mark settled, never emit zero-payout batch or duplicate carry-forward.
+              skippedInsufficientPaiseCount += 1;
+              continue;
+            }
+
             totalReservePaiseProcessed += reservePaise;
             totalDistributedPaise += weighted.distributedPaise;
             totalCarryForwardPaise += weighted.residualPaise;
             settledReserveRows.push(r);
 
             for (const p of weighted.payouts) {
+              if (p.amountPaise <= 0) continue;
               const vId = p.videoId || "";
               const key = `${p.userId.toUpperCase()}:${vId}`;
               rewardedVideoKeys.add(key);
@@ -16020,15 +16429,45 @@ async function dispatchApiRequest(
 
           if (settledReserveRows.length === 0) {
             await conn.rollback();
+            const insufficientOnly = skippedInsufficientPaiseCount > 0;
             return jsonResponse({
               success: true,
               duplicate: false,
               settledCount: 0,
               remainingPendingCount: pendingReserves.length,
               totalSettledAmount: 0,
+              ...(insufficientOnly ? { skippedInsufficientPaiseCount } : {}),
+              reason: insufficientOnly ? "insufficient_distributable_paise" : "no_eligible_videos",
+              settlement: null,
+              message: insufficientOnly
+                ? "Pending reserves remain in reserve due to insufficient_distributable_paise across eligible videos."
+                : skippedNoEligibleCount > 0
+                  ? "Pending reserves remain in reserve because no eligible third-party creator videos exist yet."
+                  : "Pending reserves could not be settled yet.",
+            });
+          }
+
+          const payouts = Array.from(payoutsByKey.values())
+            .filter((p) => p.amountPaise > 0)
+            .map((p) => ({
+              userId: p.userId,
+              videoId: p.videoId,
+              amountPaise: p.amountPaise,
+              amount: p.amountPaise / 100,
+            }));
+
+          if (payouts.length === 0 || totalDistributedPaise <= 0) {
+            await conn.rollback();
+            return jsonResponse({
+              success: true,
+              duplicate: false,
+              settledCount: 0,
+              remainingPendingCount: pendingReserves.length,
+              totalSettledAmount: 0,
+              reason: "insufficient_distributable_paise",
               settlement: null,
               message:
-                "Pending reserves remain in reserve because no eligible third-party creator videos exist yet.",
+                "Pending reserves remain in reserve due to insufficient_distributable_paise across eligible videos.",
             });
           }
 
@@ -16056,15 +16495,6 @@ async function dispatchApiRequest(
               [crypto.randomUUID(), `TX_GLB_RESERVE_${carryPayId}`, carryAmt, carryDesc],
             );
           }
-
-          const payouts = Array.from(payoutsByKey.values())
-            .filter((p) => p.amountPaise > 0)
-            .map((p) => ({
-              userId: p.userId,
-              videoId: p.videoId,
-              amountPaise: p.amountPaise,
-              amount: p.amountPaise / 100,
-            }));
 
           const totalReserveAmount = totalReservePaiseProcessed / 100;
           const distributedAmount = totalDistributedPaise / 100;
@@ -16131,6 +16561,7 @@ async function dispatchApiRequest(
             settledCount: settledReserveRows.length,
             remainingPendingCount: pendingReserves.length - settledReserveRows.length,
             totalSettledAmount: distributedAmount,
+            ...(skippedInsufficientPaiseCount > 0 ? { skippedInsufficientPaiseCount } : {}),
             settlement: {
               id: batchId,
               idempotencyKey: rawKey,
@@ -16148,15 +16579,56 @@ async function dispatchApiRequest(
           });
         } catch (dbErr: unknown) {
           await conn.rollback();
-          if (
-            (dbErr as any)?.code === "ER_DUP_ENTRY" ||
-            String(dbErr).includes("uniq_gps_idempotency")
-          ) {
-            return jsonResponse({
-              success: true,
-              duplicate: true,
-              message: "Settlement batch already processed (idempotent replay).",
-            });
+          if (!isMysqlConnectionUnavailableError(dbErr) && isMysqlDuplicateKeyError(dbErr)) {
+            try {
+              const [existingBatches]: any = await pool.query(
+                `SELECT id, idempotency_key, total_reserve_amount, distributed_amount, carry_forward_amount,
+                        reserve_count, eligible_video_count, payout_count, settled_by, notes, created_at
+                 FROM global_pool_settlements WHERE idempotency_key = ? LIMIT 1`,
+                [rawKey],
+              );
+              if (existingBatches && existingBatches.length > 0) {
+                const existing = existingBatches[0];
+                return jsonResponse({
+                  success: true,
+                  duplicate: true,
+                  settledCount: Number(existing.reserve_count || 0),
+                  settlement: {
+                    id: existing.id,
+                    idempotencyKey: existing.idempotency_key,
+                    totalReserveAmount: Number(existing.total_reserve_amount),
+                    distributedAmount: Number(existing.distributed_amount),
+                    carryForwardAmount: Number(existing.carry_forward_amount),
+                    reserveCount: Number(existing.reserve_count),
+                    eligibleVideoCount: Number(existing.eligible_video_count),
+                    payoutCount: Number(existing.payout_count),
+                    settledBy: existing.settled_by,
+                    notes: existing.notes,
+                    createdAt: existing.created_at,
+                  },
+                  message: "Settlement batch already processed (idempotent replay).",
+                });
+              }
+            } catch {
+              // Fall through to 409 conflict
+            }
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  "Conflict: Duplicate accounting key encountered on ledger or reserve during settlement. Transaction safely rolled back.",
+              },
+              409,
+            );
+          }
+          if (isMysqlMissingTableError(dbErr)) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Global Pool reserve schema migration has not been applied yet.",
+              },
+              503,
+            );
           }
           if (isMysqlConnectionUnavailableError(dbErr)) {
             return jsonResponse(
@@ -16246,6 +16718,8 @@ async function dispatchApiRequest(
         }
 
         for (const payout of settledRes.settlement.payouts) {
+          if (payout.amount <= 0) continue;
+
           let w = store.wallets[payout.userId];
           if (!w) {
             w = {
@@ -16300,6 +16774,11 @@ async function dispatchApiRequest(
         settledCount: settledRes.settledCount,
         remainingPendingCount: settledRes.remainingPendingCount,
         totalSettledAmount: settledRes.settlement?.distributedAmount ?? 0,
+        ...(settledRes.skippedInsufficientPaiseCount
+          ? { skippedInsufficientPaiseCount: settledRes.skippedInsufficientPaiseCount }
+          : {}),
+        ...(settledRes.reason ? { reason: settledRes.reason } : {}),
+        ...(settledRes.message ? { message: settledRes.message } : {}),
         settlement: settledRes.settlement,
         carryForwardReserve: settledRes.carryForwardReserve,
       });
