@@ -6,10 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import {
   handleApiRequest,
+  resetInMemoryStore,
   resetStoreForTests,
   resolveTrustedRequestCountryCode,
   isTrustedCloudflareIp,
 } from "./api-handler";
+import serverEntry, { extractTrustedPeerRemoteAddress } from "../server";
 import { setMysqlPoolForTesting } from "./mysql";
 import { normalizeCountryCode, getCountryName, UNKNOWN_COUNTRY_CODE } from "../lib/countries";
 
@@ -191,6 +193,7 @@ describe("Admin Country-wise Video Counts & Trusted Country Capture", () => {
     tempDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "facetube-country-test-"));
     process.env["FACETUBE_DATA_DIR"] = tempDataDir;
     setMysqlPoolForTesting(null);
+    resetInMemoryStore();
     resetStoreForTests();
   });
 
@@ -745,7 +748,11 @@ describe("Admin Country-wise Video Counts & Trusted Country Capture", () => {
           ];
         }
         if (sql.includes("INFORMATION_SCHEMA.COLUMNS")) {
-          return [hasCountryCol ? [{ "1": 1 }] : []];
+          return [
+            hasCountryCol
+              ? [{ COLUMN_NAME: "country_code" }, { COLUMN_NAME: "is_blocked" }]
+              : [{ COLUMN_NAME: "is_blocked" }],
+          ];
         }
         if (sql.includes("FROM uploaded_videos") && sql.includes("GROUP BY")) {
           if (!hasCountryCol) {
@@ -958,5 +965,216 @@ describe("Admin Country-wise Video Counts & Trusted Country Capture", () => {
         assert.equal(sqlErrRes.status, 500);
       },
     );
+  });
+
+  it("16. Guards missing is_blocked column in Node MySQL and PHP endpoints (returns blockedVideos=0 without SQL error)", async () => {
+    const capturedQueries: string[] = [];
+    const buildSchemaMockPool = (columnsPresent: string[]) => ({
+      query: async (sql: string) => {
+        capturedQueries.push(sql);
+        if (sql.includes("FROM sessions s")) {
+          return [
+            [
+              {
+                id: "a0000000-0000-0000-0000-000000000001",
+                user_id: "FT102857",
+                name: "FaceTube Administrator",
+                mobile: "+1 555-019-2834",
+                email: "admin@facetube.com",
+                role: "admin",
+                referral_code: "FTVIP",
+                created_at: "2026-01-01T00:00:00.000Z",
+              },
+            ],
+          ];
+        }
+        if (sql.includes("INFORMATION_SCHEMA.COLUMNS")) {
+          return [columnsPresent.map((name) => ({ COLUMN_NAME: name }))];
+        }
+        if (sql.includes("FROM uploaded_videos") && sql.includes("GROUP BY")) {
+          if (/COALESCE\s*\(\s*is_blocked\b/i.test(sql) && !columnsPresent.includes("is_blocked")) {
+            const err: any = new Error("Unknown column 'is_blocked' in 'field list'");
+            err.code = "ER_BAD_FIELD_ERROR";
+            err.errno = 1054;
+            throw err;
+          }
+          if (
+            /TRIM\s*\(\s*country_code\s*\)/i.test(sql) &&
+            !columnsPresent.includes("country_code")
+          ) {
+            const err: any = new Error("Unknown column 'country_code' in 'field list'");
+            err.code = "ER_BAD_FIELD_ERROR";
+            err.errno = 1054;
+            throw err;
+          }
+          return [
+            columnsPresent.includes("country_code")
+              ? [
+                  {
+                    country_code: "IN",
+                    total_videos: 2,
+                    free_videos: 2,
+                    premium_videos: 0,
+                    active_ads_videos: 0,
+                    blocked_videos: 0,
+                  },
+                ]
+              : [
+                  {
+                    country_code: "UNKNOWN",
+                    total_videos: 2,
+                    free_videos: 2,
+                    premium_videos: 0,
+                    active_ads_videos: 0,
+                    blocked_videos: 0,
+                  },
+                ],
+          ];
+        }
+        return [[]];
+      },
+    });
+
+    // 16a. country_code present, is_blocked missing
+    await withMockMysqlPool(buildSchemaMockPool(["country_code"]), async () => {
+      const res = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/video-country-counts.php", {
+          method: "GET",
+          headers: { Authorization: "Bearer prod-admin-token" },
+        }),
+        { APP_ENV: "production", NODE_ENV: "production" },
+      );
+      assert.ok(res);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.success, true);
+      assert.equal(body.migrationPending, false);
+      assert.equal(body.summary.blockedVideos, 0);
+      assert.equal(body.countries[0].blockedVideos, 0);
+
+      const aggSql = capturedQueries.find((q) => q.includes("GROUP BY")) || "";
+      assert.equal(/COALESCE\s*\(\s*is_blocked\b/i.test(aggSql), false);
+    });
+
+    // 16b. Neither country_code nor is_blocked present
+    capturedQueries.length = 0;
+    await withMockMysqlPool(buildSchemaMockPool([]), async () => {
+      const res = await handleApiRequest(
+        new Request("http://localhost:3000/api/admin/video-country-counts.php", {
+          method: "GET",
+          headers: { Authorization: "Bearer prod-admin-token" },
+        }),
+        { APP_ENV: "production", NODE_ENV: "production" },
+      );
+      assert.ok(res);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.success, true);
+      assert.equal(body.migrationPending, true);
+      assert.equal(body.summary.blockedVideos, 0);
+      assert.equal(body.summary.unknownVideos, 2);
+
+      const aggSql = capturedQueries.find((q) => q.includes("GROUP BY")) || "";
+      assert.equal(/COALESCE\s*\(\s*is_blocked\b/i.test(aggSql), false);
+      assert.equal(/TRIM\s*\(\s*country_code\s*\)/i.test(aggSql), false);
+    });
+
+    // 16c. Verify PHP endpoint parity checks INFORMATION_SCHEMA.COLUMNS for is_blocked
+    const phpSource = fs.readFileSync(
+      path.resolve(process.cwd(), "api/admin/video-country-counts.php"),
+      "utf8",
+    );
+    assert.match(phpSource, /COLUMN_NAME IN \('country_code', 'is_blocked'\)/);
+    assert.match(phpSource, /\$hasIsBlockedCol\s*=\s*false/);
+    assert.match(phpSource, /\{\$blockedExpr\}\s+AS\s+blocked_videos/);
+  });
+
+  it("17. Node server entry safely forwards raw socket remoteAddress without trusting forwarding headers", async () => {
+    const alex = await loginAs("alex@facetube.com", "password");
+
+    // 17a. Direct Cloudflare peer socket via Nitro/srvx runtime.node.req.socket.remoteAddress
+    const cfRuntimeReq = new Request("http://localhost:3000/api/videos/create.php", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${alex.token}`,
+        "CF-IPCountry": "IN",
+      },
+      body: JSON.stringify({
+        id: "vid-server-cf-peer",
+        user_id: alex.userId,
+        title: "Nitro CF Peer",
+        video_url: "https://cdn.example.com/cf-peer.mp4",
+        video_type: "free",
+        content_type: "long",
+      }),
+    });
+    Object.defineProperty(cfRuntimeReq, "runtime", {
+      value: {
+        name: "node",
+        node: { req: { socket: { remoteAddress: "::ffff:104.16.12.34" } } },
+      },
+    });
+    assert.equal(extractTrustedPeerRemoteAddress(cfRuntimeReq), "::ffff:104.16.12.34");
+    const cfRes = await serverEntry.fetch(cfRuntimeReq, DEV_ENV, undefined);
+    assert.equal(cfRes.status, 201);
+    const cfBody = await cfRes.json();
+    assert.equal(cfBody.video.countryCode, "IN");
+
+    // 17b. Spoofed X-Forwarded-For / ip getter with untrusted peer socket must NOT trust CF-IPCountry
+    const spoofedReq = new Request("http://localhost:3000/api/videos/create.php", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${alex.token}`,
+        "CF-IPCountry": "US",
+        "X-Forwarded-For": "104.16.12.34",
+        "X-Real-IP": "104.16.12.34",
+      },
+      body: JSON.stringify({
+        id: "vid-server-spoofed-xff",
+        user_id: alex.userId,
+        title: "Spoofed XFF",
+        video_url: "https://cdn.example.com/spoofed.mp4",
+        video_type: "free",
+        content_type: "long",
+      }),
+    });
+    Object.defineProperty(spoofedReq, "ip", { value: "104.16.12.34" });
+    Object.defineProperty(spoofedReq, "runtime", {
+      value: {
+        name: "node",
+        node: { req: { socket: { remoteAddress: "203.0.113.50" } } },
+      },
+    });
+    assert.equal(extractTrustedPeerRemoteAddress(spoofedReq), "203.0.113.50");
+    const spoofedRes = await serverEntry.fetch(spoofedReq, DEV_ENV, undefined);
+    assert.equal(spoofedRes.status, 201);
+    const spoofedBody = await spoofedRes.json();
+    assert.equal(spoofedBody.video.countryCode, "UNKNOWN");
+
+    // 17c. Unavailable socket must return undefined (never invent IP) and resolve to UNKNOWN
+    const noSocketReq = new Request("http://localhost:3000/api/videos/create.php", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${alex.token}`,
+        "CF-IPCountry": "GB",
+        "X-Forwarded-For": "104.16.12.34",
+      },
+      body: JSON.stringify({
+        id: "vid-server-no-socket",
+        user_id: alex.userId,
+        title: "No Socket",
+        video_url: "https://cdn.example.com/nosocket.mp4",
+        video_type: "free",
+        content_type: "long",
+      }),
+    });
+    assert.equal(extractTrustedPeerRemoteAddress(noSocketReq), undefined);
+    const noSocketRes = await serverEntry.fetch(noSocketReq, DEV_ENV, undefined);
+    assert.equal(noSocketRes.status, 201);
+    const noSocketBody = await noSocketRes.json();
+    assert.equal(noSocketBody.video.countryCode, "UNKNOWN");
   });
 });

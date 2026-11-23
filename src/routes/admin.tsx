@@ -197,8 +197,13 @@ function AdminPage() {
     totalReferralIncome: 0,
     totalGlobalIncome: 0,
     totalAdsenseIncome: 0,
+    totalAdmobIncome: 0,
+    totalAdEarnings: 0,
     totalAffiliateIncome: 0,
+    admobAvailable: true,
+    admobStatus: "available" as "available" | "unavailable",
   });
+  const [earningsReportError, setEarningsReportError] = useState<string | null>(null);
   const [reportPage, setReportPage] = useState(1);
   const [reportLimit, setReportLimit] = useState(20);
   const [reportTotalPages, setReportTotalPages] = useState(1);
@@ -216,6 +221,7 @@ function AdminPage() {
   const loadEarningsReport = useCallback(
     async (pageOverride?: number) => {
       setIsLoadingReport(true);
+      setEarningsReportError(null);
       try {
         const targetPage = pageOverride !== undefined ? pageOverride : reportPage;
         const queryParams: Parameters<typeof api.admin.getEarningsReport>[0] = {
@@ -230,17 +236,45 @@ function AdminPage() {
         const res = await api.admin.getEarningsReport(queryParams);
         if (res && res.success) {
           setEarningsUsers(res.users || []);
-          if (res.summary) setEarningsSummary(res.summary);
+          if (res.summary) {
+            const adsenseTotal = Number(res.summary.totalAdsenseIncome) || 0;
+            const admobTotal = Number(res.summary.totalAdmobIncome) || 0;
+            const admobAvail =
+              res.summary.admobAvailable !== false && res.summary.admobStatus !== "unavailable";
+            const totalAd =
+              typeof res.summary.totalAdEarnings === "number"
+                ? res.summary.totalAdEarnings
+                : Math.round((adsenseTotal + (admobAvail ? admobTotal : 0)) * 100) / 100;
+            setEarningsSummary({
+              totalUsers: res.summary.totalUsers ?? 0,
+              totalWalletBalance: Number(res.summary.totalWalletBalance) || 0,
+              totalEarned: Number(res.summary.totalEarned) || 0,
+              totalWithdrawn: Number(res.summary.totalWithdrawn) || 0,
+              totalReferralIncome: Number(res.summary.totalReferralIncome) || 0,
+              totalGlobalIncome: Number(res.summary.totalGlobalIncome) || 0,
+              totalAdsenseIncome: adsenseTotal,
+              totalAdmobIncome: admobAvail ? admobTotal : 0,
+              totalAdEarnings: totalAd,
+              totalAffiliateIncome: Number(res.summary.totalAffiliateIncome) || 0,
+              admobAvailable: admobAvail,
+              admobStatus: admobAvail ? "available" : "unavailable",
+            });
+          }
           if (res.pagination) {
             setReportPage(res.pagination.page);
             setReportLimit(res.pagination.limit);
             setReportTotalPages(res.pagination.totalPages);
             setReportTotalUsers(res.pagination.total);
           }
+        } else {
+          setEarningsReportError("Earnings report data is currently unavailable.");
+          setEarningsUsers([]);
         }
       } catch (err: any) {
         console.error("Failed to load earnings report:", err);
-        toast.error(err?.message || "Failed to load earnings report.");
+        const msg = err?.message || "Earnings report source data is currently unavailable.";
+        setEarningsReportError(msg);
+        toast.error(msg);
       } finally {
         setIsLoadingReport(false);
       }
@@ -301,15 +335,28 @@ function AdminPage() {
         "Referral Income (INR)",
         "Global Pool Income (INR)",
         "AdSense Income (INR)",
+        "AdMob Income (INR)",
+        "Total Ad Earnings (INR)",
         "Affiliate Income (INR)",
         "Total Withdrawn (INR)",
         "Joined Date",
       ];
 
+      const admobAvailableForExport =
+        res?.summary?.admobAvailable !== false &&
+        res?.summary?.admobStatus !== "unavailable" &&
+        earningsSummary.admobAvailable !== false;
+
       const csvContent = [
         headers.join(","),
-        ...rows.map((r: any) =>
-          [
+        ...rows.map((r: any) => {
+          const adsenseVal = Number(r.adsenseIncome) || 0;
+          const admobVal = Number(r.admobIncome) || 0;
+          const totalAdVal =
+            typeof r.totalAdEarnings === "number"
+              ? r.totalAdEarnings
+              : Math.round((adsenseVal + admobVal) * 100) / 100;
+          return [
             `"${r.userId}"`,
             `"${(r.name || "").replace(/"/g, '""')}"`,
             `"${(r.email || "").replace(/"/g, '""')}"`,
@@ -319,12 +366,14 @@ function AdminPage() {
             (Number(r.totalEarned) || 0).toFixed(2),
             (Number(r.referralIncome) || 0).toFixed(2),
             (Number(r.globalIncome) || 0).toFixed(2),
-            (Number(r.adsenseIncome) || 0).toFixed(2),
+            adsenseVal.toFixed(2),
+            admobAvailableForExport ? admobVal.toFixed(2) : "Unavailable",
+            admobAvailableForExport ? totalAdVal.toFixed(2) : "Unavailable",
             (Number(r.affiliateIncome) || 0).toFixed(2),
             (Number(r.totalWithdrawn) || 0).toFixed(2),
             `"${r.createdAt || ""}"`,
-          ].join(","),
-        ),
+          ].join(",");
+        }),
       ].join("\r\n");
 
       const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
@@ -1188,7 +1237,7 @@ function AdminPage() {
             ? `🚫 Video "${video.title.slice(0, 20)}..." has been blocked from all feeds.`
             : `✅ Video "${video.title.slice(0, 20)}..." has been unblocked.`,
         );
-        await loadModerationVideos();
+        await Promise.all([loadModerationVideos(), loadCountryVideoCounts()]);
       } else {
         toast.error("Failed to update video moderation status.");
       }
@@ -1279,6 +1328,9 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS channel_name VARCHAR(150) NULL AFTER 
 ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS is_blocked TINYINT(1) DEFAULT 0;
 ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS block_reason VARCHAR(255) NULL;
 ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) DEFAULT 0.00;
+
+-- Country-wise Video Tracking (MySQL 5.7/8.x & MariaDB idempotent; preserves historical NULLs)
+-- Run database/migrations/20261126_uploaded_videos_country.sql in phpMyAdmin
 `;
 
   const copySql = () => {
@@ -2437,7 +2489,8 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground">
                       Authoritative user earnings breakdown across separate income streams:
-                      Referral, Global Pool, Google AdSense, and Affiliate / Marketing.
+                      Referral, Global Pool, Google AdSense, Google AdMob, and Affiliate /
+                      Marketing.
                     </p>
                   </div>
 
@@ -2575,13 +2628,31 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                 )}
               </section>
 
+              {/* Unavailable Source Banner */}
+              {earningsReportError && (
+                <div className="rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs text-amber-200 flex items-center justify-between gap-3">
+                  <span>
+                    Earnings report source data is currently unavailable ({earningsReportError}).
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => loadEarningsReport(1)}
+                    className="rounded-lg border border-amber-400/40 px-2.5 py-1 text-[11px] font-semibold hover:bg-amber-500/20"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
+
               {/* Summary Cards */}
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4 lg:grid-cols-4">
                 <div className="rounded-2xl border border-border bg-secondary/30 p-4 shadow-card">
                   <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
                     Total In Scope Users
                   </p>
-                  <p className="mt-2 text-2xl font-black">{earningsSummary.totalUsers}</p>
+                  <p className="mt-2 text-2xl font-black">
+                    {earningsReportError ? "Unavailable" : earningsSummary.totalUsers}
+                  </p>
                   <p className="mt-1 text-[11px] text-muted-foreground">Registered accounts</p>
                 </div>
 
@@ -2590,10 +2661,11 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                     Current Wallet Balance
                   </p>
                   <p className="mt-2 text-2xl font-black text-brand">
-                    ₹
-                    {earningsSummary.totalWalletBalance.toLocaleString("en-IN", {
-                      minimumFractionDigits: 2,
-                    })}
+                    {earningsReportError
+                      ? "Unavailable"
+                      : `₹${earningsSummary.totalWalletBalance.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })}`}
                   </p>
                   <p className="mt-1 text-[11px] text-muted-foreground">
                     Outstanding creator liability
@@ -2605,10 +2677,11 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                     Cumulative Earned
                   </p>
                   <p className="mt-2 text-2xl font-black text-emerald-400">
-                    ₹
-                    {earningsSummary.totalEarned.toLocaleString("en-IN", {
-                      minimumFractionDigits: 2,
-                    })}
+                    {earningsReportError
+                      ? "Unavailable"
+                      : `₹${earningsSummary.totalEarned.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })}`}
                   </p>
                   <p className="mt-1 text-[11px] text-muted-foreground">All-time settled income</p>
                 </div>
@@ -2618,10 +2691,11 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                     Total Withdrawn
                   </p>
                   <p className="mt-2 text-2xl font-black text-amber-400">
-                    ₹
-                    {earningsSummary.totalWithdrawn.toLocaleString("en-IN", {
-                      minimumFractionDigits: 2,
-                    })}
+                    {earningsReportError
+                      ? "Unavailable"
+                      : `₹${earningsSummary.totalWithdrawn.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                        })}`}
                   </p>
                   <p className="mt-1 text-[11px] text-muted-foreground">Disbursed to creators</p>
                 </div>
@@ -2633,16 +2707,17 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                   <BarChart3 className="h-4 w-4 text-brand" />
                   <span>Platform Aggregate Breakdown by Genuine Income Stream</span>
                 </p>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
                   <div className="rounded-xl border border-border/60 bg-secondary/20 p-3">
                     <span className="text-[10px] uppercase font-bold text-muted-foreground">
                       Referral Income
                     </span>
                     <p className="text-base font-black text-foreground mt-1">
-                      ₹
-                      {earningsSummary.totalReferralIncome.toLocaleString("en-IN", {
-                        minimumFractionDigits: 2,
-                      })}
+                      {earningsReportError
+                        ? "Unavailable"
+                        : `₹${earningsSummary.totalReferralIncome.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}`}
                     </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">Sponsor commissions</p>
                   </div>
@@ -2651,10 +2726,11 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                       Global Pool Income
                     </span>
                     <p className="text-base font-black text-foreground mt-1">
-                      ₹
-                      {earningsSummary.totalGlobalIncome.toLocaleString("en-IN", {
-                        minimumFractionDigits: 2,
-                      })}
+                      {earningsReportError
+                        ? "Unavailable"
+                        : `₹${earningsSummary.totalGlobalIncome.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}`}
                     </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
                       Weighted creator pool
@@ -2665,10 +2741,11 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                       Google AdSense Income
                     </span>
                     <p className="text-base font-black text-foreground mt-1">
-                      ₹
-                      {earningsSummary.totalAdsenseIncome.toLocaleString("en-IN", {
-                        minimumFractionDigits: 2,
-                      })}
+                      {earningsReportError
+                        ? "Unavailable"
+                        : `₹${earningsSummary.totalAdsenseIncome.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}`}
                     </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
                       Impressions & watch time
@@ -2676,13 +2753,48 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                   </div>
                   <div className="rounded-xl border border-border/60 bg-secondary/20 p-3">
                     <span className="text-[10px] uppercase font-bold text-muted-foreground">
+                      Google AdMob Income
+                    </span>
+                    <p className="text-base font-black text-foreground mt-1">
+                      {earningsReportError || !earningsSummary.admobAvailable
+                        ? "Unavailable"
+                        : `₹${earningsSummary.totalAdmobIncome.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}`}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {earningsReportError || !earningsSummary.admobAvailable
+                        ? "AdMob source unavailable"
+                        : "Android native app statements"}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-brand/30 bg-brand/5 p-3">
+                    <span className="text-[10px] uppercase font-bold text-brand">
+                      Total Ad Earnings
+                    </span>
+                    <p className="text-base font-black text-foreground mt-1">
+                      {earningsReportError || !earningsSummary.admobAvailable
+                        ? "Unavailable"
+                        : `₹${earningsSummary.totalAdEarnings.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}`}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      {earningsReportError || !earningsSummary.admobAvailable
+                        ? "Requires AdSense + AdMob sources"
+                        : "AdSense + AdMob"}
+                    </p>
+                  </div>
+                  <div className="rounded-xl border border-border/60 bg-secondary/20 p-3">
+                    <span className="text-[10px] uppercase font-bold text-muted-foreground">
                       Affiliate / Marketing
                     </span>
                     <p className="text-base font-black text-foreground mt-1">
-                      ₹
-                      {earningsSummary.totalAffiliateIncome.toLocaleString("en-IN", {
-                        minimumFractionDigits: 2,
-                      })}
+                      {earningsReportError
+                        ? "Unavailable"
+                        : `₹${earningsSummary.totalAffiliateIncome.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}`}
                     </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
                       Ad promotion marketing ({marketingPercentage}%)
@@ -2707,6 +2819,10 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                     <div className="h-6 w-6 animate-spin rounded-full border-2 border-brand border-t-transparent" />
                     <p className="text-xs">Loading ledger analytics...</p>
                   </div>
+                ) : earningsReportError ? (
+                  <div className="py-12 text-center text-xs text-amber-300">
+                    Earnings source data unavailable. Please retry once the database is reachable.
+                  </div>
                 ) : earningsUsers.length === 0 ? (
                   <div className="py-12 text-center text-xs text-muted-foreground">
                     No user records match the specified filters.
@@ -2723,60 +2839,80 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                           <th className="pb-3 font-semibold">Referral</th>
                           <th className="pb-3 font-semibold">Global Pool</th>
                           <th className="pb-3 font-semibold">AdSense</th>
+                          <th className="pb-3 font-semibold">AdMob</th>
+                          <th className="pb-3 font-semibold">Total Ad</th>
                           <th className="pb-3 font-semibold">Affiliate</th>
                           <th className="pb-3 pr-2 text-right font-semibold">History</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-border/60">
-                        {earningsUsers.map((u) => (
-                          <tr key={u.userId} className="transition hover:bg-secondary/30">
-                            <td className="py-3 pl-2">
-                              <p className="font-semibold text-xs text-foreground">{u.name}</p>
-                              <p className="text-[11px] text-muted-foreground">{u.email}</p>
-                              <div className="flex items-center gap-1.5 mt-0.5">
-                                <span className="font-mono text-[10px] font-bold text-brand bg-brand/10 px-1 py-0.2 rounded">
-                                  {u.userId}
-                                </span>
-                                {u.referralCode && (
-                                  <span className="font-mono text-[10px] text-muted-foreground">
-                                    Ref: {u.referralCode}
+                        {earningsUsers.map((u) => {
+                          const userAdsense = Number(u.adsenseIncome || 0);
+                          const userAdmob = Number(u.admobIncome || 0);
+                          const userTotalAd =
+                            typeof u.totalAdEarnings === "number"
+                              ? u.totalAdEarnings
+                              : Math.round((userAdsense + userAdmob) * 100) / 100;
+                          return (
+                            <tr key={u.userId} className="transition hover:bg-secondary/30">
+                              <td className="py-3 pl-2">
+                                <p className="font-semibold text-xs text-foreground">{u.name}</p>
+                                <p className="text-[11px] text-muted-foreground">{u.email}</p>
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                  <span className="font-mono text-[10px] font-bold text-brand bg-brand/10 px-1 py-0.2 rounded">
+                                    {u.userId}
                                   </span>
-                                )}
-                              </div>
-                            </td>
-                            <td className="py-3 font-mono text-xs font-bold text-brand">
-                              ₹{Number(u.balance || 0).toFixed(2)}
-                            </td>
-                            <td className="py-3 font-mono text-xs font-bold text-emerald-400">
-                              ₹{Number(u.totalEarned || 0).toFixed(2)}
-                            </td>
-                            <td className="py-3 font-mono text-xs font-bold text-amber-400">
-                              ₹{Number(u.totalWithdrawn || 0).toFixed(2)}
-                            </td>
-                            <td className="py-3 font-mono text-xs text-foreground">
-                              ₹{Number(u.referralIncome || 0).toFixed(2)}
-                            </td>
-                            <td className="py-3 font-mono text-xs text-foreground">
-                              ₹{Number(u.globalIncome || 0).toFixed(2)}
-                            </td>
-                            <td className="py-3 font-mono text-xs text-foreground">
-                              ₹{Number(u.adsenseIncome || 0).toFixed(2)}
-                            </td>
-                            <td className="py-3 font-mono text-xs text-foreground">
-                              ₹{Number(u.affiliateIncome || 0).toFixed(2)}
-                            </td>
-                            <td className="py-3 pr-2 text-right">
-                              <button
-                                type="button"
-                                onClick={() => handleViewWithdrawals(u)}
-                                className="inline-flex items-center gap-1 rounded-lg border border-border bg-secondary/50 px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-secondary hover:text-brand"
-                              >
-                                <Eye className="h-3 w-3" />
-                                <span>Withdrawals</span>
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
+                                  {u.referralCode && (
+                                    <span className="font-mono text-[10px] text-muted-foreground">
+                                      Ref: {u.referralCode}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="py-3 font-mono text-xs font-bold text-brand">
+                                ₹{Number(u.balance || 0).toFixed(2)}
+                              </td>
+                              <td className="py-3 font-mono text-xs font-bold text-emerald-400">
+                                ₹{Number(u.totalEarned || 0).toFixed(2)}
+                              </td>
+                              <td className="py-3 font-mono text-xs font-bold text-amber-400">
+                                ₹{Number(u.totalWithdrawn || 0).toFixed(2)}
+                              </td>
+                              <td className="py-3 font-mono text-xs text-foreground">
+                                ₹{Number(u.referralIncome || 0).toFixed(2)}
+                              </td>
+                              <td className="py-3 font-mono text-xs text-foreground">
+                                ₹{Number(u.globalIncome || 0).toFixed(2)}
+                              </td>
+                              <td className="py-3 font-mono text-xs text-foreground">
+                                ₹{userAdsense.toFixed(2)}
+                              </td>
+                              <td className="py-3 font-mono text-xs text-foreground">
+                                {earningsSummary.admobAvailable
+                                  ? `₹${userAdmob.toFixed(2)}`
+                                  : "Unavailable"}
+                              </td>
+                              <td className="py-3 font-mono text-xs font-semibold text-brand">
+                                {earningsSummary.admobAvailable
+                                  ? `₹${userTotalAd.toFixed(2)}`
+                                  : "Unavailable"}
+                              </td>
+                              <td className="py-3 font-mono text-xs text-foreground">
+                                ₹{Number(u.affiliateIncome || 0).toFixed(2)}
+                              </td>
+                              <td className="py-3 pr-2 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => handleViewWithdrawals(u)}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-border bg-secondary/50 px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-secondary hover:text-brand"
+                                >
+                                  <Eye className="h-3 w-3" />
+                                  <span>Withdrawals</span>
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -4575,9 +4711,13 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
               </div>
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                 All production SQL migrations for channel logos, video moderation, live streaming,
-                and bulk payouts are in{" "}
+                bulk payouts, and country-wise video tracking are in{" "}
                 <code className="text-foreground">
                   database/migrations/20261027_company_audit_updates.sql
+                </code>{" "}
+                and{" "}
+                <code className="text-foreground">
+                  database/migrations/20261126_uploaded_videos_country.sql
                 </code>
                 .
               </p>

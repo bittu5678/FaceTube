@@ -44,6 +44,56 @@ function isH3SwallowedErrorBody(body: string): boolean {
   }
 }
 
+type RequestWithNodeRuntime = Request & {
+  runtime?: {
+    name?: string;
+    node?: {
+      req?: {
+        socket?: {
+          remoteAddress?: unknown;
+        };
+      };
+    };
+  };
+};
+
+type ContextWithNodeSocket = {
+  node?: {
+    req?: {
+      socket?: {
+        remoteAddress?: unknown;
+      };
+    };
+  };
+  req?: {
+    socket?: {
+      remoteAddress?: unknown;
+    };
+  };
+  socket?: {
+    remoteAddress?: unknown;
+  };
+};
+
+export function extractTrustedPeerRemoteAddress(
+  request: Request,
+  ctx?: unknown,
+): string | undefined {
+  const reqRuntime = (request as RequestWithNodeRuntime).runtime;
+  const ctxObj = ctx && typeof ctx === "object" ? (ctx as ContextWithNodeSocket) : undefined;
+  const candidate =
+    reqRuntime?.node?.req?.socket?.remoteAddress ??
+    ctxObj?.node?.req?.socket?.remoteAddress ??
+    ctxObj?.req?.socket?.remoteAddress ??
+    ctxObj?.socket?.remoteAddress;
+
+  if (typeof candidate !== "string") {
+    return undefined;
+  }
+  const trimmed = candidate.trim();
+  return trimmed !== "" ? trimmed : undefined;
+}
+
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
@@ -64,7 +114,12 @@ export default {
           return await proxyHostingerApiRequest(request);
         }
         const { handleApiRequest } = await import("./server/api-handler.ts");
-        const apiResponse = await handleApiRequest(request, envRecord);
+        const remoteAddress = extractTrustedPeerRemoteAddress(request, ctx);
+        const apiResponse = await handleApiRequest(
+          request,
+          envRecord,
+          remoteAddress ? { remoteAddress } : undefined,
+        );
         if (apiResponse) return apiResponse;
       }
 

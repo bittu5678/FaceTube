@@ -1,6 +1,7 @@
-import { Capacitor } from "@capacitor/core";
+import { Capacitor, type PluginListenerHandle } from "@capacitor/core";
 import {
   AdMob,
+  AdmobConsentStatus,
   BannerAdPosition,
   BannerAdSize,
   RewardAdPluginEvents,
@@ -196,11 +197,33 @@ export function requireAdMobConfig(envOverride?: AdMobRuntimeEnv): ResolvedAdMob
   return resolved;
 }
 
+export interface AdMobTestingBridge {
+  isNativeAndroid?: () => boolean;
+  adMob?: Partial<typeof AdMob>;
+}
+
+let testBridgeOverride: AdMobTestingBridge | null = null;
+
+function getAdMobClient(): typeof AdMob {
+  if (testBridgeOverride?.adMob) {
+    return testBridgeOverride.adMob as typeof AdMob;
+  }
+  return AdMob;
+}
+
+export function setAdMobTestingBridge(override: AdMobTestingBridge | null): void {
+  testBridgeOverride = override;
+  resetAdMobStateForTests();
+}
+
 /**
  * Detects whether the current runtime environment is a native Android Capacitor app.
  * Returns false on Web browsers, iOS, and desktop PWAs.
  */
 export function isNativeAndroid(): boolean {
+  if (testBridgeOverride?.isNativeAndroid) {
+    return testBridgeOverride.isNativeAndroid();
+  }
   if (typeof window === "undefined") return false;
   try {
     return Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android";
@@ -210,18 +233,84 @@ export function isNativeAndroid(): boolean {
 }
 
 let isInitialized = false;
+let initPromise: Promise<boolean> | null = null;
+let consentChecked = false;
+let canRequestAdsState = true;
 let isBannerVisible = false;
+let isBannerDesired = false;
+let bannerRequestEpoch = 0;
 let isInterstitialLoaded = false;
 let isRewardedLoaded = false;
+let isRewardedShowing = false;
+let interstitialPreloadTimer: ReturnType<typeof setTimeout> | null = null;
+let rewardedPreloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+export function canRequestAdMobAds(): boolean {
+  return canRequestAdsState;
+}
+
+/**
+ * Checks Google User Messaging Platform (UMP) consent status on native Android
+ * and displays the GDPR/UMP consent form when required.
+ * Fails gracefully if UMP is unconfigured or unavailable offline.
+ */
+export async function ensureAdMobConsent(): Promise<boolean> {
+  if (!isNativeAndroid()) return false;
+  if (consentChecked) return canRequestAdsState;
+
+  const client = getAdMobClient();
+  try {
+    if (typeof client.requestConsentInfo !== "function") {
+      consentChecked = true;
+      canRequestAdsState = true;
+      return true;
+    }
+
+    let consentInfo = await client.requestConsentInfo();
+    if (
+      consentInfo.isConsentFormAvailable &&
+      consentInfo.status === AdmobConsentStatus.REQUIRED &&
+      typeof client.showConsentForm === "function"
+    ) {
+      consentInfo = await client.showConsentForm();
+    }
+
+    canRequestAdsState = consentInfo.canRequestAds !== false;
+    consentChecked = true;
+    return canRequestAdsState;
+  } catch (err) {
+    // Allow non-EEA / pre-UMP builds to initialize safely if UMP check fails
+    console.warn("[AdMob] UMP consent check unavailable or skipped:", err);
+    consentChecked = true;
+    canRequestAdsState = true;
+    return true;
+  }
+}
+
+/**
+ * Opens Google's UMP Privacy Options form if available on native Android.
+ */
+export async function showAdMobPrivacyOptions(): Promise<boolean> {
+  if (!isNativeAndroid()) return false;
+  try {
+    await getAdMobClient().showPrivacyOptionsForm();
+    return true;
+  } catch (err) {
+    console.warn("[AdMob] Privacy options form unavailable:", err);
+    return false;
+  }
+}
 
 /**
  * Initializes Google Mobile Ads SDK strictly on native Android.
- * Fails safely if production configuration is missing or invalid.
+ * Runs UMP consent check, deduplicates concurrent initialization calls,
+ * and fails safely if production configuration is missing or invalid.
  * Safe no-op on Web / PWA.
  */
 export async function initializeAdMob(): Promise<boolean> {
   if (!isNativeAndroid()) return false;
-  if (isInitialized) return true;
+  if (isInitialized) return canRequestAdsState;
+  if (initPromise) return initPromise;
 
   const config = resolveAdMobConfig();
   if (!config.valid) {
@@ -229,29 +318,42 @@ export async function initializeAdMob(): Promise<boolean> {
     return false;
   }
 
-  try {
-    await AdMob.initialize(
-      config.isTesting
-        ? {
-            initializeForTesting: true,
-            testingDevices: ["EMULATOR"],
-          }
-        : {
-            initializeForTesting: false,
-          },
-    );
-    isInitialized = true;
-    console.info("[AdMob] Google Mobile Ads SDK initialized on Android");
-    return true;
-  } catch (err) {
-    console.warn("[AdMob] Initialization skipped or failed:", err);
-    return false;
-  }
+  initPromise = (async () => {
+    try {
+      const allowedByConsent = await ensureAdMobConsent();
+      if (!allowedByConsent) {
+        console.warn("[AdMob] Ad requests blocked by UMP consent status.");
+        return false;
+      }
+
+      await getAdMobClient().initialize(
+        config.isTesting
+          ? {
+              initializeForTesting: true,
+              testingDevices: ["EMULATOR"],
+            }
+          : {
+              initializeForTesting: false,
+            },
+      );
+      isInitialized = true;
+      console.info("[AdMob] Google Mobile Ads SDK initialized on Android");
+      return true;
+    } catch (err) {
+      console.warn("[AdMob] Initialization skipped or failed:", err);
+      return false;
+    } finally {
+      initPromise = null;
+    }
+  })();
+
+  return initPromise;
 }
 
 /**
  * Shows an AdMob Banner Ad positioned at the bottom or top of the Android screen.
- * Automatically checks native Android platform and configuration validity before calling.
+ * Automatically checks native Android platform, configuration validity, and guards against
+ * fast unmount races where hideAdMobBanner() runs while showAdMobBanner() is still pending.
  */
 export async function showAdMobBanner(options?: {
   position?: "TOP" | "BOTTOM";
@@ -265,35 +367,53 @@ export async function showAdMobBanner(options?: {
     return false;
   }
 
+  const requestEpoch = ++bannerRequestEpoch;
+  isBannerDesired = true;
+
   try {
     const initialized = await initializeAdMob();
-    if (!initialized) return false;
+    if (!initialized || !isBannerDesired || requestEpoch !== bannerRequestEpoch) {
+      return false;
+    }
 
     const position =
       options?.position === "TOP" ? BannerAdPosition.TOP_CENTER : BannerAdPosition.BOTTOM_CENTER;
 
-    await AdMob.showBanner({
+    await getAdMobClient().showBanner({
       adId: config.bannerAdUnitId,
       adSize: BannerAdSize.BANNER,
       position,
       margin: options?.margin ?? 60, // Above bottom navigation bar on mobile
       isTesting: config.isTesting,
     });
+
+    if (!isBannerDesired || requestEpoch !== bannerRequestEpoch) {
+      await getAdMobClient()
+        .hideBanner()
+        .catch(() => {});
+      isBannerVisible = false;
+      return false;
+    }
+
     isBannerVisible = true;
     return true;
   } catch (err) {
     console.warn("[AdMob] Failed to show Banner Ad:", err);
+    isBannerVisible = false;
     return false;
   }
 }
 
 /**
- * Hides the active AdMob Banner ad.
+ * Hides the active AdMob Banner ad (and cancels any pending banner show).
  */
 export async function hideAdMobBanner(): Promise<void> {
-  if (!isNativeAndroid() || !isBannerVisible) return;
+  if (!isNativeAndroid()) return;
+  isBannerDesired = false;
+  bannerRequestEpoch += 1;
+  if (!isBannerVisible) return;
   try {
-    await AdMob.hideBanner();
+    await getAdMobClient().hideBanner();
     isBannerVisible = false;
   } catch (err) {
     console.warn("[AdMob] Failed to hide Banner Ad:", err);
@@ -305,8 +425,10 @@ export async function hideAdMobBanner(): Promise<void> {
  */
 export async function removeAdMobBanner(): Promise<void> {
   if (!isNativeAndroid()) return;
+  isBannerDesired = false;
+  bannerRequestEpoch += 1;
   try {
-    await AdMob.removeBanner();
+    await getAdMobClient().removeBanner();
     isBannerVisible = false;
   } catch (err) {
     console.warn("[AdMob] Failed to remove Banner Ad:", err);
@@ -330,7 +452,7 @@ export async function prepareInterstitialAd(): Promise<boolean> {
     const initialized = await initializeAdMob();
     if (!initialized) return false;
 
-    await AdMob.prepareInterstitial({
+    await getAdMobClient().prepareInterstitial({
       adId: config.interstitialAdUnitId,
       isTesting: config.isTesting,
     });
@@ -365,6 +487,13 @@ export function isAnyVideoPlaying(): boolean {
 export async function showInterstitialAd(options?: { force?: boolean }): Promise<boolean> {
   if (!isNativeAndroid()) return false;
 
+  const config = resolveAdMobConfig();
+  if (!config.valid) {
+    console.error("[AdMob] Interstitial Ad aborted:", config.error);
+    isInterstitialLoaded = false;
+    return false;
+  }
+
   // Strict Policy Check: Do NOT interrupt active video playback
   if (!options?.force && isAnyVideoPlaying()) {
     console.info("[AdMob] Skipping Interstitial: Video playback in progress");
@@ -379,12 +508,17 @@ export async function showInterstitialAd(options?: { force?: boolean }): Promise
       const prepared = await prepareInterstitialAd();
       if (!prepared) return false;
     }
-    await AdMob.showInterstitial();
+    await getAdMobClient().showInterstitial();
     isInterstitialLoaded = false;
     // Pre-load next interstitial in background
-    setTimeout(() => prepareInterstitialAd().catch(() => {}), 15000);
+    if (interstitialPreloadTimer) clearTimeout(interstitialPreloadTimer);
+    interstitialPreloadTimer = setTimeout(() => {
+      interstitialPreloadTimer = null;
+      prepareInterstitialAd().catch(() => {});
+    }, 15000);
     return true;
   } catch (err) {
+    isInterstitialLoaded = false;
     console.warn("[AdMob] Failed to display Interstitial Ad:", err);
     return false;
   }
@@ -407,7 +541,7 @@ export async function prepareRewardedAd(): Promise<boolean> {
     const initialized = await initializeAdMob();
     if (!initialized) return false;
 
-    await AdMob.prepareRewardVideoAd({
+    await getAdMobClient().prepareRewardVideoAd({
       adId: config.rewardedAdUnitId,
       isTesting: config.isTesting,
     });
@@ -430,13 +564,19 @@ export interface ShowRewardedOptions {
 
 /**
  * Shows a user-initiated Rewarded Ad.
- * STRICT RULE: Only awards rewards upon genuine verified completion callback.
+ * STRICT RULE: Only awards rewards upon genuine verified completion callback,
+ * cleans up native event listeners on all exit paths, and resets stale state on errors.
  */
 export async function showRewardedAd(options: ShowRewardedOptions): Promise<boolean> {
   if (!isNativeAndroid()) {
     options.onError?.(
       new Error("Rewarded ads are only available in the Android mobile application."),
     );
+    return false;
+  }
+
+  if (isRewardedShowing) {
+    options.onError?.(new Error("A rewarded ad is already being displayed."));
     return false;
   }
 
@@ -447,41 +587,121 @@ export async function showRewardedAd(options: ShowRewardedOptions): Promise<bool
     return false;
   }
 
+  const handles: PluginListenerHandle[] = [];
+  let listenersCleaned = false;
+  let dismissNotified = false;
+
+  const cleanupListeners = () => {
+    if (listenersCleaned) return;
+    listenersCleaned = true;
+    for (const h of handles) {
+      Promise.resolve(h.remove()).catch(() => {});
+    }
+  };
+
+  const notifyDismissedOnce = () => {
+    if (dismissNotified) return;
+    dismissNotified = true;
+    options.onDismissed?.();
+  };
+
+  isRewardedShowing = true;
+  const client = getAdMobClient();
+
   try {
     const initialized = await initializeAdMob();
     if (!initialized) {
+      isRewardedShowing = false;
       options.onError?.(new Error("AdMob SDK could not be initialized."));
       return false;
     }
     if (!isRewardedLoaded) {
       const prepared = await prepareRewardedAd();
       if (!prepared) {
+        isRewardedShowing = false;
         options.onError?.(new Error("Rewarded ad could not be prepared."));
         return false;
       }
     }
 
-    const rewardListener = await AdMob.addListener(
-      RewardAdPluginEvents.Rewarded,
-      (reward: AdMobRewardItem) => {
-        options.onRewardEarned(reward);
-      },
+    handles.push(
+      await (client.addListener as any)(
+        RewardAdPluginEvents.Rewarded,
+        (reward: AdMobRewardItem) => {
+          options.onRewardEarned(reward);
+        },
+      ),
     );
 
-    const dismissListener = await AdMob.addListener(RewardAdPluginEvents.Dismissed, () => {
-      rewardListener.remove();
-      dismissListener.remove();
-      isRewardedLoaded = false;
-      options.onDismissed?.();
-      // Prepare next reward in background
-      setTimeout(() => prepareRewardedAd().catch(() => {}), 10000);
-    });
+    handles.push(
+      await (client.addListener as any)(RewardAdPluginEvents.Dismissed, () => {
+        cleanupListeners();
+        isRewardedLoaded = false;
+        isRewardedShowing = false;
+        notifyDismissedOnce();
+        // Prepare next reward in background
+        if (rewardedPreloadTimer) clearTimeout(rewardedPreloadTimer);
+        rewardedPreloadTimer = setTimeout(() => {
+          rewardedPreloadTimer = null;
+          prepareRewardedAd().catch(() => {});
+        }, 10000);
+      }),
+    );
 
-    await AdMob.showRewardVideoAd();
+    handles.push(
+      await (client.addListener as any)(RewardAdPluginEvents.FailedToShow, (error: unknown) => {
+        cleanupListeners();
+        isRewardedLoaded = false;
+        isRewardedShowing = false;
+        options.onError?.(error);
+      }),
+    );
+
+    await client.showRewardVideoAd();
     return true;
-  } catch (err) {
+  } catch (err: any) {
+    cleanupListeners();
+    isRewardedShowing = false;
+    const errCode = String(err?.code || "").toUpperCase();
+    const errMsg = String(err?.message || "").toLowerCase();
+
+    if (errCode === "REWARDED_AD_CANCELLED" || errMsg.includes("dismissed before earning")) {
+      isRewardedLoaded = false;
+      notifyDismissedOnce();
+      if (rewardedPreloadTimer) clearTimeout(rewardedPreloadTimer);
+      rewardedPreloadTimer = setTimeout(() => {
+        rewardedPreloadTimer = null;
+        prepareRewardedAd().catch(() => {});
+      }, 10000);
+      return false;
+    }
+
+    if (errCode !== "REWARDED_AD_ALREADY_SHOWING") {
+      isRewardedLoaded = false;
+    }
     console.warn("[AdMob] Failed to display Rewarded Ad:", err);
     options.onError?.(err);
     return false;
   }
+}
+
+export function resetAdMobStateForTests(): void {
+  if (interstitialPreloadTimer) {
+    clearTimeout(interstitialPreloadTimer);
+    interstitialPreloadTimer = null;
+  }
+  if (rewardedPreloadTimer) {
+    clearTimeout(rewardedPreloadTimer);
+    rewardedPreloadTimer = null;
+  }
+  isInitialized = false;
+  initPromise = null;
+  consentChecked = false;
+  canRequestAdsState = true;
+  isBannerVisible = false;
+  isBannerDesired = false;
+  bannerRequestEpoch = 0;
+  isInterstitialLoaded = false;
+  isRewardedLoaded = false;
+  isRewardedShowing = false;
 }

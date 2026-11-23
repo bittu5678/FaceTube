@@ -138,18 +138,33 @@ if (!empty($search)) {
 
 $hasStartDate = !empty($startDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDate);
 $hasEndDate = !empty($endDate) && preg_match('/^\d{4}-\d{2}-\d{2}$/', $endDate);
+$isActivityDateFiltered = ($dateMode === 'activity') && ($hasStartDate || $hasEndDate);
+
+$ledgerDateClauses = [];
+$ledgerDateParams = [];
+if ($isActivityDateFiltered) {
+    if ($hasStartDate) {
+        $ledgerDateClauses[] = "created_at >= ?";
+        $ledgerDateParams[] = $startDate . ' 00:00:00';
+    }
+    if ($hasEndDate) {
+        $ledgerDateClauses[] = "created_at <= ?";
+        $ledgerDateParams[] = $endDate . ' 23:59:59';
+    }
+}
+$ledgerDateSql = !empty($ledgerDateClauses) ? (' AND ' . implode(' AND ', $ledgerDateClauses)) : '';
 
 if ($dateMode === 'activity') {
-    // Filter users who had income or withdrawal transactions within the date window
+    // Filter users who had settled income or withdrawal ledger activity within the date window
     if ($hasStartDate && $hasEndDate) {
-        $whereClauses[] = "u.user_id IN (SELECT DISTINCT user_id FROM income_ledger WHERE created_at >= ? AND created_at <= ?)";
+        $whereClauses[] = "u.user_id IN (SELECT DISTINCT user_id FROM income_ledger WHERE status = 'settled' AND created_at >= ? AND created_at <= ?)";
         $params[] = $startDate . ' 00:00:00';
         $params[] = $endDate . ' 23:59:59';
     } elseif ($hasStartDate) {
-        $whereClauses[] = "u.user_id IN (SELECT DISTINCT user_id FROM income_ledger WHERE created_at >= ?)";
+        $whereClauses[] = "u.user_id IN (SELECT DISTINCT user_id FROM income_ledger WHERE status = 'settled' AND created_at >= ?)";
         $params[] = $startDate . ' 00:00:00';
     } elseif ($hasEndDate) {
-        $whereClauses[] = "u.user_id IN (SELECT DISTINCT user_id FROM income_ledger WHERE created_at <= ?)";
+        $whereClauses[] = "u.user_id IN (SELECT DISTINCT user_id FROM income_ledger WHERE status = 'settled' AND created_at <= ?)";
         $params[] = $endDate . ' 23:59:59';
     }
 } else {
@@ -167,6 +182,86 @@ if ($dateMode === 'activity') {
 $whereSql = !empty($whereClauses) ? ('WHERE ' . implode(' AND ', $whereClauses)) : '';
 
 try {
+    // 0. Inspect AdMob schema availability so pre-migration schemas never crash or fabricate data
+    $hasWalletAdmobCol = true;
+    $hasLedgerAdmobType = true;
+    try {
+        $schemaStmt = $pdo->query("
+            SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND (
+                TABLE_NAME = 'wallet_balances'
+                OR (TABLE_NAME = 'income_ledger' AND COLUMN_NAME = 'income_type')
+              )
+        ");
+        $schemaRows = $schemaStmt ? $schemaStmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        if (!empty($schemaRows)) {
+            $hasWalletAdmobCol = false;
+            $hasLedgerAdmobType = false;
+            foreach ($schemaRows as $sRow) {
+                $tName = strtolower(trim((string)($sRow['TABLE_NAME'] ?? $sRow['table_name'] ?? '')));
+                $cName = strtolower(trim((string)($sRow['COLUMN_NAME'] ?? $sRow['column_name'] ?? '')));
+                $cType = strtolower(trim((string)($sRow['COLUMN_TYPE'] ?? $sRow['column_type'] ?? '')));
+                if ($tName === 'wallet_balances' && $cName === 'admob_income') {
+                    $hasWalletAdmobCol = true;
+                }
+                if ($tName === 'income_ledger' && $cName === 'income_type' && str_contains($cType, 'admob_income')) {
+                    $hasLedgerAdmobType = true;
+                }
+            }
+        }
+    } catch (Throwable $_schemaErr) {
+        $hasWalletAdmobCol = true;
+        $hasLedgerAdmobType = true;
+    }
+
+    $admobAvailable = $hasWalletAdmobCol || $hasLedgerAdmobType;
+    $admobStatus = $admobAvailable ? 'available' : 'unavailable';
+
+    $ledgerAdmobExpr = $hasLedgerAdmobType
+        ? "SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END)"
+        : "0";
+
+    if ($isActivityDateFiltered) {
+        // Activity date window: compute period-scoped metrics strictly from settled income_ledger rows in range
+        $summaryTotalEarnedExpr = "COALESCE(SUM(COALESCE(lt.ledger_total_earned, 0)), 0)";
+        $summaryTotalWithdrawnExpr = "COALESCE(SUM(COALESCE(lt.ledger_total_withdrawn, 0)), 0)";
+        $summaryReferralExpr = "COALESCE(SUM(COALESCE(lt.ledger_referral_income, 0)), 0)";
+        $summaryGlobalExpr = "COALESCE(SUM(COALESCE(lt.ledger_global_income, 0)), 0)";
+        $summaryAdsenseExpr = "COALESCE(SUM(COALESCE(lt.ledger_adsense_income, 0)), 0)";
+        $summaryAdmobExpr = "COALESCE(SUM(COALESCE(lt.ledger_admob_income, 0)), 0)";
+        $summaryAffiliateExpr = "COALESCE(SUM(COALESCE(lt.ledger_affiliate_income, 0)), 0)";
+
+        $rowTotalEarnedExpr = "COALESCE(lt.ledger_total_earned, 0.00)";
+        $rowTotalWithdrawnExpr = "COALESCE(lt.ledger_total_withdrawn, 0.00)";
+        $rowReferralExpr = "COALESCE(lt.ledger_referral_income, 0.00)";
+        $rowGlobalExpr = "COALESCE(lt.ledger_global_income, 0.00)";
+        $rowAdsenseExpr = "COALESCE(lt.ledger_adsense_income, 0.00)";
+        $rowAdmobExpr = "COALESCE(lt.ledger_admob_income, 0.00)";
+        $rowAffiliateExpr = "COALESCE(lt.ledger_affiliate_income, 0.00)";
+    } else {
+        $summaryTotalEarnedExpr = "COALESCE(SUM(COALESCE(wb.total_earned, lt.ledger_total_earned, 0)), 0)";
+        $summaryTotalWithdrawnExpr = "COALESCE(SUM(COALESCE(wb.total_withdrawn, lt.ledger_total_withdrawn, 0)), 0)";
+        $summaryReferralExpr = "COALESCE(SUM(COALESCE(lt.ledger_referral_income, wb.referral_income, 0)), 0)";
+        $summaryGlobalExpr = "COALESCE(SUM(COALESCE(lt.ledger_global_income, wb.global_income, 0)), 0)";
+        $summaryAdsenseExpr = "COALESCE(SUM(COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0)), 0)";
+        $summaryAdmobExpr = $hasWalletAdmobCol
+            ? "COALESCE(SUM(COALESCE(lt.ledger_admob_income, wb.admob_income, 0)), 0)"
+            : "COALESCE(SUM(COALESCE(lt.ledger_admob_income, 0)), 0)";
+        $summaryAffiliateExpr = "COALESCE(SUM(COALESCE(lt.ledger_affiliate_income, wb.affiliate_income, 0)), 0)";
+
+        $rowTotalEarnedExpr = "COALESCE(wb.total_earned, lt.ledger_total_earned, 0.00)";
+        $rowTotalWithdrawnExpr = "COALESCE(wb.total_withdrawn, lt.ledger_total_withdrawn, 0.00)";
+        $rowReferralExpr = "COALESCE(lt.ledger_referral_income, wb.referral_income, 0.00)";
+        $rowGlobalExpr = "COALESCE(lt.ledger_global_income, wb.global_income, 0.00)";
+        $rowAdsenseExpr = "COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0.00)";
+        $rowAdmobExpr = $hasWalletAdmobCol
+            ? "COALESCE(lt.ledger_admob_income, wb.admob_income, 0.00)"
+            : "COALESCE(lt.ledger_admob_income, 0.00)";
+        $rowAffiliateExpr = "COALESCE(lt.ledger_affiliate_income, wb.affiliate_income, 0.00)";
+    }
+
     // 1. Count total matching users
     $countSql = "SELECT COUNT(*) FROM users u {$whereSql}";
     $stmtCount = $pdo->prepare($countSql);
@@ -178,14 +273,14 @@ try {
         SELECT 
             COUNT(u.id) AS total_count,
             COALESCE(SUM(wb.balance), 0) AS total_wallet_balance,
-            COALESCE(SUM(COALESCE(wb.total_earned, lt.ledger_total_earned, 0)), 0) AS total_earned,
-            COALESCE(SUM(COALESCE(wb.total_withdrawn, lt.ledger_total_withdrawn, 0)), 0) AS total_withdrawn,
-            COALESCE(SUM(COALESCE(lt.ledger_referral_income, wb.referral_income, 0)), 0) AS total_referral_income,
+            {$summaryTotalEarnedExpr} AS total_earned,
+            {$summaryTotalWithdrawnExpr} AS total_withdrawn,
+            {$summaryReferralExpr} AS total_referral_income,
             COALESCE(SUM(COALESCE(lt.ledger_ad_boost_income, 0)), 0) AS total_ad_boost_income,
-            COALESCE(SUM(COALESCE(lt.ledger_global_income, wb.global_income, 0)), 0) AS total_global_income,
-            COALESCE(SUM(COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0)), 0) AS total_adsense_income,
-            COALESCE(SUM(COALESCE(lt.ledger_admob_income, wb.admob_income, 0)), 0) AS total_admob_income,
-            COALESCE(SUM(COALESCE(lt.ledger_affiliate_income, wb.affiliate_income, 0)), 0) AS total_affiliate_income
+            {$summaryGlobalExpr} AS total_global_income,
+            {$summaryAdsenseExpr} AS total_adsense_income,
+            {$summaryAdmobExpr} AS total_admob_income,
+            {$summaryAffiliateExpr} AS total_affiliate_income
         FROM users u
         LEFT JOIN wallet_balances wb ON UPPER(wb.user_id) = UPPER(u.user_id)
         LEFT JOIN (
@@ -201,19 +296,23 @@ try {
                          THEN amount ELSE 0 END) AS ledger_ad_boost_income,
                 SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
-                SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END) AS ledger_admob_income,
+                {$ledgerAdmobExpr} AS ledger_admob_income,
                 SUM(CASE WHEN income_type IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN income_type = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN income_type != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
             FROM income_ledger
-            WHERE status = 'settled'
+            WHERE status = 'settled'{$ledgerDateSql}
             GROUP BY UPPER(user_id)
         ) lt ON UPPER(lt.user_id) = UPPER(u.user_id)
         {$whereSql}
     ";
     $stmtSummary = $pdo->prepare($summarySql);
-    $stmtSummary->execute($params);
+    $stmtSummary->execute(array_merge($ledgerDateParams, $params));
     $summaryRow = $stmtSummary->fetch() ?: [];
+
+    $summaryAdsense = round(floatval($summaryRow['total_adsense_income'] ?? 0), 2);
+    $summaryAdmob = $admobAvailable ? round(floatval($summaryRow['total_admob_income'] ?? 0), 2) : 0.0;
+    $summaryTotalAdEarnings = round($summaryAdsense + $summaryAdmob, 2);
 
     $summary = [
         'totalUsers' => intval($summaryRow['total_count'] ?? $totalUsers),
@@ -223,9 +322,12 @@ try {
         'totalReferralIncome' => round(floatval($summaryRow['total_referral_income'] ?? 0), 2),
         'totalAdBoostIncome' => round(floatval($summaryRow['total_ad_boost_income'] ?? 0), 2),
         'totalGlobalIncome' => round(floatval($summaryRow['total_global_income'] ?? 0), 2),
-        'totalAdsenseIncome' => round(floatval($summaryRow['total_adsense_income'] ?? 0), 2),
-        'totalAdmobIncome' => round(floatval($summaryRow['total_admob_income'] ?? 0), 2),
+        'totalAdsenseIncome' => $summaryAdsense,
+        'totalAdmobIncome' => $summaryAdmob,
+        'totalAdEarnings' => $summaryTotalAdEarnings,
         'totalAffiliateIncome' => round(floatval($summaryRow['total_affiliate_income'] ?? 0), 2),
+        'admobAvailable' => $admobAvailable,
+        'admobStatus' => $admobStatus,
     ];
 
     // 3. Fetch paginated user records using actual income_ledger aggregates
@@ -239,14 +341,14 @@ try {
             u.referral_code,
             u.created_at,
             COALESCE(wb.balance, 0.00) AS balance,
-            COALESCE(wb.total_earned, lt.ledger_total_earned, 0.00) AS total_earned,
-            COALESCE(wb.total_withdrawn, lt.ledger_total_withdrawn, 0.00) AS total_withdrawn,
-            COALESCE(lt.ledger_referral_income, wb.referral_income, 0.00) AS referral_income,
+            {$rowTotalEarnedExpr} AS total_earned,
+            {$rowTotalWithdrawnExpr} AS total_withdrawn,
+            {$rowReferralExpr} AS referral_income,
             COALESCE(lt.ledger_ad_boost_income, 0.00) AS ad_boost_income,
-            COALESCE(lt.ledger_global_income, wb.global_income, 0.00) AS global_income,
-            COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0.00) AS adsense_income,
-            COALESCE(lt.ledger_admob_income, wb.admob_income, 0.00) AS admob_income,
-            COALESCE(lt.ledger_affiliate_income, wb.affiliate_income, 0.00) AS affiliate_income
+            {$rowGlobalExpr} AS global_income,
+            {$rowAdsenseExpr} AS adsense_income,
+            {$rowAdmobExpr} AS admob_income,
+            {$rowAffiliateExpr} AS affiliate_income
         FROM users u
         LEFT JOIN wallet_balances wb ON UPPER(wb.user_id) = UPPER(u.user_id)
         LEFT JOIN (
@@ -262,12 +364,12 @@ try {
                          THEN amount ELSE 0 END) AS ledger_ad_boost_income,
                 SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
-                SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END) AS ledger_admob_income,
+                {$ledgerAdmobExpr} AS ledger_admob_income,
                 SUM(CASE WHEN income_type IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN income_type = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN income_type != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
             FROM income_ledger
-            WHERE status = 'settled'
+            WHERE status = 'settled'{$ledgerDateSql}
             GROUP BY UPPER(user_id)
         ) lt ON UPPER(lt.user_id) = UPPER(u.user_id)
         {$whereSql}
@@ -275,7 +377,7 @@ try {
         LIMIT " . intval($limit) . " OFFSET " . intval($offset) . "
     ";
     $stmtData = $pdo->prepare($dataSql);
-    $stmtData->execute($params);
+    $stmtData->execute(array_merge($ledgerDateParams, $params));
     $rows = $stmtData->fetchAll();
 
     // 4. Handle CSV Export
@@ -301,12 +403,16 @@ try {
             'Global Income (INR)',
             'AdSense Income (INR)',
             'AdMob Income (INR)',
+            'Total Ad Earnings (INR)',
             'Affiliate Income (INR)',
             'Total Withdrawn (INR)',
             'Joined Date'
         ]);
 
         foreach ($rows as $r) {
+            $adsenseVal = round(floatval($r['adsense_income']), 2);
+            $admobVal = $admobAvailable ? round(floatval($r['admob_income']), 2) : 0.0;
+            $totalAdVal = round($adsenseVal + $admobVal, 2);
             fputcsv($out, [
                 $r['user_id'],
                 $r['name'],
@@ -317,8 +423,9 @@ try {
                 number_format(floatval($r['total_earned']), 2, '.', ''),
                 number_format(floatval($r['referral_income']), 2, '.', ''),
                 number_format(floatval($r['global_income']), 2, '.', ''),
-                number_format(floatval($r['adsense_income']), 2, '.', ''),
-                number_format(floatval($r['admob_income']), 2, '.', ''),
+                number_format($adsenseVal, 2, '.', ''),
+                $admobAvailable ? number_format(floatval($r['admob_income']), 2, '.', '') : 'Unavailable',
+                $admobAvailable ? number_format($totalAdVal, 2, '.', '') : 'Unavailable',
                 number_format(floatval($r['affiliate_income']), 2, '.', ''),
                 number_format(floatval($r['total_withdrawn']), 2, '.', ''),
                 $r['created_at'],
@@ -329,7 +436,9 @@ try {
     }
 
     // 5. Build structured JSON response
-    $users = array_map(function ($r) {
+    $users = array_map(function ($r) use ($admobAvailable) {
+        $adsenseVal = round(floatval($r['adsense_income']), 2);
+        $admobVal = $admobAvailable ? round(floatval($r['admob_income']), 2) : 0.0;
         return [
             'id' => $r['id'],
             'userId' => $r['user_id'],
@@ -344,8 +453,9 @@ try {
             'referralIncome' => round(floatval($r['referral_income']), 2),
             'adBoostIncome' => round(floatval($r['ad_boost_income'] ?? 0), 2),
             'globalIncome' => round(floatval($r['global_income']), 2),
-            'adsenseIncome' => round(floatval($r['adsense_income']), 2),
-            'admobIncome' => round(floatval($r['admob_income']), 2),
+            'adsenseIncome' => $adsenseVal,
+            'admobIncome' => $admobVal,
+            'totalAdEarnings' => round($adsenseVal + $admobVal, 2),
             'affiliateIncome' => round(floatval($r['affiliate_income']), 2),
         ];
     }, $rows);
@@ -364,5 +474,6 @@ try {
         'summary' => $summary,
     ]);
 } catch (PDOException $e) {
-    jsonResponse(['success' => false, 'error' => 'Database query error: ' . $e->getMessage()], 500);
+    error_log('[admin/earnings-report.php] Database query error: ' . $e->getMessage());
+    jsonResponse(['success' => false, 'error' => 'Database error while fetching earnings report.'], 500);
 }

@@ -70,25 +70,36 @@ if (strtolower(trim((string)($authUser['role'] ?? ''))) !== 'admin') {
 
 try {
     $hasCountryCodeCol = false;
+    $hasIsBlockedCol = false;
     try {
         $colStmt = $pdo->query("
-            SELECT 1
+            SELECT COLUMN_NAME
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_SCHEMA = DATABASE()
               AND TABLE_NAME = 'uploaded_videos'
-              AND COLUMN_NAME = 'country_code'
-            LIMIT 1
+              AND COLUMN_NAME IN ('country_code', 'is_blocked')
         ");
-        if ($colStmt && $colStmt->fetchColumn()) {
-            $hasCountryCodeCol = true;
+        if ($colStmt) {
+            while ($colRow = $colStmt->fetch(PDO::FETCH_ASSOC)) {
+                $colName = strtolower(trim((string)($colRow['COLUMN_NAME'] ?? $colRow['column_name'] ?? '')));
+                if ($colName === 'country_code') {
+                    $hasCountryCodeCol = true;
+                } elseif ($colName === 'is_blocked') {
+                    $hasIsBlockedCol = true;
+                }
+            }
         }
     } catch (Throwable $_eCol) {
         $hasCountryCodeCol = false;
+        $hasIsBlockedCol = false;
     }
 
     $countryExpr = $hasCountryCodeCol
         ? "COALESCE(NULLIF(UPPER(TRIM(country_code)), ''), 'UNKNOWN')"
         : "'UNKNOWN'";
+    $blockedExpr = $hasIsBlockedCol
+        ? "COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 1 THEN 1 ELSE 0 END), 0)"
+        : "0";
 
     $sql = "
         SELECT
@@ -97,7 +108,7 @@ try {
             COALESCE(SUM(CASE WHEN video_type = 'free' THEN 1 ELSE 0 END), 0) AS free_videos,
             COALESCE(SUM(CASE WHEN video_type = 'premium' THEN 1 ELSE 0 END), 0) AS premium_videos,
             COALESCE(SUM(CASE WHEN is_promoted = 1 AND promotion_expires_at IS NOT NULL AND promotion_expires_at > NOW() THEN 1 ELSE 0 END), 0) AS active_ads_videos,
-            COALESCE(SUM(CASE WHEN COALESCE(is_blocked, 0) = 1 THEN 1 ELSE 0 END), 0) AS blocked_videos
+            {$blockedExpr} AS blocked_videos
         FROM uploaded_videos
         WHERE (
             (video_type = 'free' AND COALESCE(NULLIF(LOWER(TRIM(payment_status)), ''), 'not_required') IN ('not_required', 'paid'))

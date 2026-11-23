@@ -2,8 +2,9 @@ import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { handleApiRequest, resetStoreForTests } from "./api-handler";
+import { handleApiRequest, resetInMemoryStore, resetStoreForTests } from "./api-handler";
 import { setMysqlPoolForTesting } from "./mysql";
 
 const TEST_KEY_ID = "rzp_test_Step3ASecurity";
@@ -100,13 +101,29 @@ async function createVerifiedPayment(params: {
 }
 
 describe("Phase 2B Step 3A: Secure Video Write Endpoints & Checkout Parity", () => {
+  let tempDataDir = "";
+  let prevDataDir: string | undefined;
+
   beforeEach(() => {
-    resetStoreForTests();
+    prevDataDir = process.env["FACETUBE_DATA_DIR"];
+    tempDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "facetube-video-write-test-"));
+    process.env["FACETUBE_DATA_DIR"] = tempDataDir;
     setMysqlPoolForTesting(null);
+    resetInMemoryStore();
+    resetStoreForTests();
   });
 
   afterEach(() => {
     setMysqlPoolForTesting(null);
+    resetInMemoryStore();
+    if (prevDataDir === undefined) {
+      delete process.env["FACETUBE_DATA_DIR"];
+    } else {
+      process.env["FACETUBE_DATA_DIR"] = prevDataDir;
+    }
+    if (tempDataDir && fs.existsSync(tempDataDir)) {
+      fs.rmSync(tempDataDir, { recursive: true, force: true });
+    }
   });
 
   it("1. Rejects unauthenticated requests to videos/create and videos/promote with 401", async () => {

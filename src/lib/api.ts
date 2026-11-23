@@ -1093,9 +1093,11 @@ export const api = {
           totalEarned: number;
           totalWithdrawn: number;
           referralIncome: number;
+          adBoostIncome?: number;
           globalIncome: number;
           adsenseIncome: number;
           admobIncome: number;
+          totalAdEarnings: number;
           affiliateIncome: number;
         }>;
         pagination: {
@@ -1110,10 +1112,14 @@ export const api = {
           totalEarned: number;
           totalWithdrawn: number;
           totalReferralIncome: number;
+          totalAdBoostIncome?: number;
           totalGlobalIncome: number;
           totalAdsenseIncome: number;
           totalAdmobIncome: number;
+          totalAdEarnings: number;
           totalAffiliateIncome: number;
+          admobAvailable?: boolean;
+          admobStatus?: "available" | "unavailable";
         };
       }>(`/admin/earnings-report.php${qStr}`);
     },

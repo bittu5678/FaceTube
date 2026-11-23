@@ -19,6 +19,7 @@ android {
     buildTypes {
         def resolvedAdMobAppId = (
             project.findProperty("ADMOB_APP_ID")
+            ?: project.findProperty("VITE_ADMOB_APP_ID")
             ?: System.getenv("ADMOB_APP_ID")
             ?: System.getenv("VITE_ADMOB_APP_ID")
             ?: ""
