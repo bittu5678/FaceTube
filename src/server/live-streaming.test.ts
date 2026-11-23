@@ -2314,7 +2314,7 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
       enableMockDbEnv({
         query: async (sql: string, params: unknown[] = []) => {
           executedQueries.push({ sql, params });
-          if (sql.includes("SELECT id FROM livekit_webhook_events")) {
+          if (sql.includes("SELECT event_id FROM livekit_webhook_events")) {
             return [[], []];
           }
           if (sql.includes("INSERT INTO livekit_webhook_events")) {
@@ -3440,7 +3440,7 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
             room: roomName,
             roomJoin: true,
             canPublish: true,
-            canPublishSources: ["camera", "microphone"],
+            canPublishSources: ["camera", "microphone", "screen_share"],
             canSubscribe: true,
             canPublishData: true,
           }
@@ -3544,7 +3544,11 @@ describe("LiveKit WebRTC Live Streaming Backend Foundation Tests (Stage 1)", () 
         base64UrlDecode(creatorRes.body.token!.split(".")[1]!).toString("utf8"),
       );
       assert.equal(creatorPayload.video.canPublish, true);
-      assert.deepEqual(creatorPayload.video.canPublishSources, ["camera", "microphone"]);
+      assert.deepEqual(creatorPayload.video.canPublishSources, [
+        "camera",
+        "microphone",
+        "screen_share",
+      ]);
 
       // Authenticated viewer requesting subscriber -> HTTP 200 with user identity and publish=false
       const viewerRes = createPhpLiveTokenHarness({

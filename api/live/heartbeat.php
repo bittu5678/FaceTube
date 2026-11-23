@@ -56,7 +56,9 @@ $hasSuppliedAuthHeader = static function (): bool {
         $_SERVER['Authorization'] ?? null,
         $_SERVER['HTTP_X_AUTHORIZATION'] ?? null,
         $_SERVER['REDIRECT_HTTP_X_AUTHORIZATION'] ?? null,
+        $_SERVER['REDIRECT_REDIRECT_HTTP_X_AUTHORIZATION'] ?? null,
         $_SERVER['X-Authorization'] ?? null,
+        $_SERVER['X_AUTHORIZATION'] ?? null,
     ];
     foreach ($candidates as $candidate) {
         if ($candidate !== null && trim((string)$candidate) !== '') {
@@ -80,7 +82,14 @@ $hasSuppliedAuthHeader = static function (): bool {
             }
         }
     }
-    foreach (['HTTP_AUTHORIZATION', 'REDIRECT_HTTP_AUTHORIZATION', 'HTTP_X_AUTHORIZATION'] as $envKey) {
+    foreach ([
+        'HTTP_AUTHORIZATION',
+        'REDIRECT_HTTP_AUTHORIZATION',
+        'REDIRECT_REDIRECT_HTTP_AUTHORIZATION',
+        'HTTP_X_AUTHORIZATION',
+        'REDIRECT_HTTP_X_AUTHORIZATION',
+        'REDIRECT_REDIRECT_HTTP_X_AUTHORIZATION',
+    ] as $envKey) {
         $envVal = getenv($envKey);
         if ($envVal !== false && trim((string)$envVal) !== '') {
             return true;
@@ -256,6 +265,7 @@ if ($role === 'broadcaster' || $role === 'publisher') {
         'role' => 'broadcaster',
         'stream_status' => $stream['status'],
         'viewers_count' => intval($stream['viewers_count']),
+        'active_viewers' => intval($stream['viewers_count']),
         'ping_received_at' => date('c'),
     ], 200);
 }
@@ -304,5 +314,6 @@ jsonResponse([
     'role' => 'viewer',
     'stream_status' => $stream['status'],
     'viewers_count' => intval($stream['viewers_count']),
+    'active_viewers' => intval($stream['viewers_count']),
     'ping_received_at' => date('c'),
 ], 200);

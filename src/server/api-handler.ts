@@ -6,6 +6,10 @@ import bcrypt from "bcryptjs";
 import type { Pool, PoolConnection } from "mysql2/promise";
 import { getMysqlPool, getDbConfig, testDatabaseConnection } from "./mysql.ts";
 import {
+  parseImageDimensionsFromBytes,
+  validateChannelLogoDimensions,
+} from "../lib/channel-logo-validation.ts";
+import {
   createServerPaymentOrder,
   verifyServerPayment,
   getPersistentTransactions,
@@ -48,6 +52,18 @@ import {
   normalizeCountryCode,
   getCountryName,
 } from "../lib/countries.ts";
+import {
+  GeminiServiceError,
+  checkAiRateLimit,
+  generateVideoMetadataSuggestions,
+  rankPersonalizedRecommendations,
+  resolveGeminiConfig,
+  runFaceTubeChatbotTurn,
+  sanitizeGeminiErrorMessage,
+  summarizeVideoContent,
+  type ChatTurnInput,
+  type RecommendationCandidateVideo,
+} from "./gemini-service.ts";
 
 function getStoreDataDir(): string {
   const override = process.env["FACETUBE_DATA_DIR"]?.trim();
@@ -1963,7 +1979,7 @@ function jsonResponse(data: unknown, status = 200): Response {
       "Content-Type": "application/json; charset=utf-8",
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Authorization",
     },
   });
 }
@@ -2579,7 +2595,7 @@ async function dispatchApiRequest(
       headers: {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Authorization",
       },
     });
   }
@@ -9208,9 +9224,13 @@ async function dispatchApiRequest(
     if (method === "POST") {
       try {
         const formData = await request.formData();
-        const purpose = String(formData.get("purpose") || "")
+        const formPurpose = String(formData.get("purpose") || "")
           .trim()
           .toLowerCase();
+        const queryPurpose = String(url.searchParams.get("purpose") || "")
+          .trim()
+          .toLowerCase();
+        const purpose = formPurpose || queryPurpose || "default";
         const isChannelLogo = purpose === "channel_logo";
 
         if (isChannelLogo) {
@@ -9286,6 +9306,20 @@ async function dispatchApiRequest(
               },
               400,
             );
+          }
+
+          const dims = parseImageDimensionsFromBytes(buf);
+          if (dims) {
+            const dimValidation = validateChannelLogoDimensions(dims.width, dims.height);
+            if (!dimValidation.valid) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: dimValidation.error || "Invalid channel logo dimensions.",
+                },
+                400,
+              );
+            }
           }
         }
 
@@ -13833,9 +13867,16 @@ async function dispatchApiRequest(
       if (!authUser) {
         return jsonResponse({ success: false, error: "Authentication required" }, 401);
       }
-      const body = await request.json();
+      const body: any = await request.json().catch(() => null);
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return jsonResponse({ success: false, error: "Invalid JSON request body" }, 400);
+      }
       const streamId = `live_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
       const roomName = `room_${streamId}`;
+      const requestedPlaybackUrl =
+        typeof (body.playbackUrl ?? body.playback_url) === "string"
+          ? String(body.playbackUrl ?? body.playback_url).trim()
+          : "";
       const newStream = {
         id: streamId,
         user_id: authUser.user_id,
@@ -13843,8 +13884,8 @@ async function dispatchApiRequest(
         description: body.description || "",
         category: body.category || "General",
         stream_key: `sk_live_${crypto.randomBytes(12).toString("hex")}`,
-        playback_url: body.playbackUrl || "https://vjs.zencdn.net/v/oceans.mp4",
-        thumbnail_url: body.thumbnailUrl || "",
+        playback_url: requestedPlaybackUrl,
+        thumbnail_url: body.thumbnailUrl || body.thumbnail_url || "",
         livekit_room_name: roomName,
         status: "live" as const,
         viewers_count: 1,
@@ -14147,11 +14188,17 @@ async function dispatchApiRequest(
     } else {
       if (pool) {
         try {
+          const viewerIdentifier = String(authUser.user_id).slice(0, 64);
+          const viewerRowId = `vw_${crypto
+            .createHash("sha256")
+            .update(`${stream.id}|${viewerIdentifier}`)
+            .digest("hex")
+            .slice(0, 32)}`;
           await pool.query(
-            `INSERT INTO live_stream_viewers (stream_id, user_id, last_heartbeat_at)
-             VALUES (?, ?, NOW())
-             ON DUPLICATE KEY UPDATE last_heartbeat_at = NOW()`,
-            [stream.id, authUser.user_id],
+            `INSERT INTO live_stream_viewers (id, stream_id, viewer_identifier, user_id, joined_at, last_ping_at)
+             VALUES (?, ?, ?, ?, NOW(), NOW())
+             ON DUPLICATE KEY UPDATE last_ping_at = NOW()`,
+            [viewerRowId, stream.id, viewerIdentifier, authUser.user_id],
           );
         } catch (_e) {
           if (isProduction) {
@@ -14393,7 +14440,7 @@ async function dispatchApiRequest(
     if (pool && eventId) {
       try {
         const [dupRows]: any = await pool.query(
-          "SELECT id FROM livekit_webhook_events WHERE event_id = ? LIMIT 1",
+          "SELECT event_id FROM livekit_webhook_events WHERE event_id = ? LIMIT 1",
           [eventId],
         );
         if (dupRows && dupRows.length > 0) {
@@ -14407,14 +14454,15 @@ async function dispatchApiRequest(
             200,
           );
         }
+        const payloadHash = crypto.createHash("sha256").update(rawBody).digest("hex");
         await pool.query(
-          `INSERT INTO livekit_webhook_events (event_id, event_type, room_name, raw_payload, processed_at)
+          `INSERT INTO livekit_webhook_events (event_id, event_type, room_name, payload_hash, created_at)
            VALUES (?, ?, ?, ?, NOW())`,
           [
-            eventId,
-            eventData.event || "unknown",
-            eventData.room?.name || null,
-            rawBody.slice(0, 10000),
+            eventId.slice(0, 128),
+            String(eventData.event || "unknown").slice(0, 64),
+            String(eventData.room?.name || "").slice(0, 128),
+            payloadHash,
           ],
         );
       } catch (evtErr) {
@@ -23612,6 +23660,678 @@ async function dispatchApiRequest(
       subscriber_count: totalSubscribers,
       is_self: isSelf,
     });
+  }
+
+  // ==========================================================================
+  // Google Gemini AI Endpoints (Server-Side Interactions API)
+  // ==========================================================================
+  if (route.startsWith("ai/")) {
+    const readEnv = (key: string) => readEnvValue(env, key);
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+    const pool = getMysqlPool();
+    const rateSubjectIp =
+      stripIpv4MappedPrefix(
+        String(requestMeta?.remoteAddress ?? readEnvValue(env, "__REMOTE_ADDR__") ?? "local"),
+      ) || "local";
+
+    const readJsonBodySafe = async (maxBytes: number): Promise<Record<string, unknown> | null> => {
+      const contentLen = Number.parseInt(request.headers.get("content-length") || "0", 10);
+      if (Number.isFinite(contentLen) && contentLen > maxBytes) {
+        throw new GeminiServiceError(
+          413,
+          "PAYLOAD_TOO_LARGE",
+          "Request payload exceeds allowed size limit.",
+        );
+      }
+      const rawText = await request.text();
+      if (Buffer.byteLength(rawText, "utf8") > maxBytes) {
+        throw new GeminiServiceError(
+          413,
+          "PAYLOAD_TOO_LARGE",
+          "Request payload exceeds allowed size limit.",
+        );
+      }
+      if (!rawText.trim()) return {};
+      try {
+        const parsed = JSON.parse(rawText);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new GeminiServiceError(400, "INVALID_JSON", "Request body must be a JSON object.");
+        }
+        return parsed as Record<string, unknown>;
+      } catch (err) {
+        if (err instanceof GeminiServiceError) throw err;
+        throw new GeminiServiceError(400, "INVALID_JSON", "Invalid JSON payload.");
+      }
+    };
+
+    const handleAiError = (err: unknown) => {
+      if (err instanceof AuthDatabaseError) {
+        return jsonResponse({ success: false, error: err.message }, err.status);
+      }
+      if (err instanceof GeminiServiceError) {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Authorization",
+        };
+        return new Response(
+          JSON.stringify({
+            success: false,
+            code: err.code,
+            error: sanitizeGeminiErrorMessage(err.message, readEnv("GEMINI_API_KEY")),
+          }),
+          { status: err.status, headers },
+        );
+      }
+      return jsonResponse(
+        {
+          success: false,
+          code: "AI_INTERNAL_ERROR",
+          error: sanitizeGeminiErrorMessage(err, readEnv("GEMINI_API_KEY")),
+        },
+        500,
+      );
+    };
+
+    // 1. AI Video Title, Description & Tags Generator (Auth required)
+    if (route === "ai/video-metadata" && method === "POST") {
+      try {
+        const authUser = await getAuthUserFromRequest(request, store, pool, env);
+        const authCheck = requireAuth(authUser);
+        if (!authCheck.success) return authCheck.response;
+
+        const rate = checkAiRateLimit({
+          bucket: "video-metadata",
+          subjectKey: authCheck.effectiveUserId,
+          limit: 15,
+          windowMs: 5 * 60 * 1000,
+        });
+        if (!rate.allowed) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              code: "RATE_LIMITED",
+              error: `Too many AI metadata requests. Please wait ${rate.retryAfterSec}s and try again.`,
+            }),
+            {
+              status: 429,
+              headers: {
+                "Content-Type": "application/json; charset=utf-8",
+                "Retry-After": String(rate.retryAfterSec),
+                "Access-Control-Allow-Origin": "*",
+              },
+            },
+          );
+        }
+
+        // Up to ~18MB JSON wrapper for consented inline video clip (<=12MB binary)
+        const body = await readJsonBodySafe(18 * 1024 * 1024);
+        if (!body) {
+          return jsonResponse({ success: false, error: "Request body is required." }, 400);
+        }
+
+        const aiConsent = body["aiConsent"] === true || body["ai_consent"] === true;
+        const videoId = String(body["videoId"] ?? body["video_id"] ?? "").trim();
+        let resolvedVideoUrl = "";
+        let resolvedTitleDraft = typeof body["titleDraft"] === "string" ? body["titleDraft"] : "";
+        let resolvedDescDraft =
+          typeof body["descriptionDraft"] === "string" ? body["descriptionDraft"] : "";
+        let resolvedCategory = typeof body["category"] === "string" ? body["category"] : "General";
+        let resolvedContentType: "short" | "long" =
+          body["contentType"] === "short" ? "short" : "long";
+        let resolvedDuration = typeof body["duration"] === "string" ? body["duration"] : "";
+
+        if (videoId) {
+          let foundRow: any = null;
+          if (isProduction && !pool) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Database connection unavailable in production environment.",
+              },
+              503,
+            );
+          }
+          if (pool) {
+            const [rows]: any = await pool.query(
+              `SELECT id, user_id, title, description, video_url, category, content_type, duration, visibility, is_blocked
+               FROM uploaded_videos WHERE id = ? LIMIT 1`,
+              [videoId],
+            );
+            if (Array.isArray(rows) && rows.length > 0) foundRow = rows[0];
+          } else {
+            foundRow = store.videos.find((v) => v.id === videoId) || null;
+          }
+          if (!foundRow) {
+            return jsonResponse({ success: false, error: "Video not found." }, 404);
+          }
+          if (foundRow.is_blocked) {
+            return jsonResponse(
+              { success: false, error: "This video is blocked and cannot be processed." },
+              403,
+            );
+          }
+          const isAdmin = String(authCheck.user.role || "").toLowerCase() === "admin";
+          const rowOwner = String(foundRow.user_id || "")
+            .trim()
+            .toUpperCase();
+          const isOwner =
+            rowOwner === authCheck.effectiveUserId.toUpperCase() ||
+            rowOwner ===
+              String(authCheck.user.id || "")
+                .trim()
+                .toUpperCase();
+          if (!isOwner && !isAdmin) {
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  "Unauthorized: Only the video creator or an administrator can generate metadata for this video.",
+              },
+              403,
+            );
+          }
+          if (!resolvedTitleDraft) resolvedTitleDraft = String(foundRow.title || "");
+          if (!resolvedDescDraft) resolvedDescDraft = String(foundRow.description || "");
+          if (!body["category"]) resolvedCategory = String(foundRow.category || "General");
+          if (!body["contentType"]) {
+            resolvedContentType = foundRow.content_type === "short" ? "short" : "long";
+          }
+          if (!resolvedDuration) resolvedDuration = String(foundRow.duration || "");
+          if (aiConsent && foundRow.video_url) {
+            resolvedVideoUrl = String(foundRow.video_url);
+          }
+        }
+
+        const result = await generateVideoMetadataSuggestions({
+          env,
+          titleDraft: resolvedTitleDraft,
+          descriptionDraft: resolvedDescDraft,
+          category: resolvedCategory,
+          contentType: resolvedContentType,
+          fileName: typeof body["fileName"] === "string" ? body["fileName"] : "",
+          duration: resolvedDuration,
+          ...(typeof body["videoBase64"] === "string" ? { videoBase64: body["videoBase64"] } : {}),
+          ...(typeof body["videoMimeType"] === "string"
+            ? { videoMimeType: body["videoMimeType"] }
+            : {}),
+          ...(resolvedVideoUrl ? { videoUrl: resolvedVideoUrl } : {}),
+          aiConsent,
+        });
+
+        return jsonResponse({
+          success: true,
+          suggestions: {
+            title: result.title,
+            description: result.description,
+            tags: result.tags,
+            analysisMode: result.analysisMode,
+            applied: false,
+          },
+          model: result.model,
+        });
+      } catch (err) {
+        return handleAiError(err);
+      }
+    }
+
+    // 2. AI Video Summary (Enforces visibility, blocked status & payment-eligibility)
+    if (route === "ai/video-summary" && method === "POST") {
+      try {
+        if (isProduction && !pool) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database connection unavailable in production environment.",
+            },
+            503,
+          );
+        }
+
+        const body = await readJsonBodySafe(32 * 1024);
+        const videoId = String(body?.["videoId"] ?? body?.["video_id"] ?? "").trim();
+        if (!videoId) {
+          return jsonResponse({ success: false, error: "videoId is required." }, 400);
+        }
+        const aiConsent = body?.["aiConsent"] === true || body?.["ai_consent"] === true;
+
+        const authUser = await getAuthUserFromRequest(request, store, pool, env);
+        const isAdmin = Boolean(
+          authUser &&
+          String(authUser.role || "")
+            .trim()
+            .toLowerCase() === "admin",
+        );
+        const authUserId = authUser ? String(authUser.user_id || "").trim() : "";
+
+        const rate = checkAiRateLimit({
+          bucket: "video-summary",
+          subjectKey: authUserId || rateSubjectIp,
+          limit: 20,
+          windowMs: 5 * 60 * 1000,
+        });
+        if (!rate.allowed) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              code: "RATE_LIMITED",
+              error: `Too many AI summary requests. Please wait ${rate.retryAfterSec}s and try again.`,
+            }),
+            {
+              status: 429,
+              headers: {
+                "Content-Type": "application/json; charset=utf-8",
+                "Retry-After": String(rate.retryAfterSec),
+                "Access-Control-Allow-Origin": "*",
+              },
+            },
+          );
+        }
+
+        let r: any = null;
+        if (pool) {
+          const [rows]: any = await pool.query(
+            `SELECT id, user_id, title, description, video_url, video_type, category, duration, payment_status, visibility, COALESCE(is_blocked, 0) AS is_blocked
+             FROM uploaded_videos WHERE id = ? LIMIT 1`,
+            [videoId],
+          );
+          if (Array.isArray(rows) && rows.length > 0) {
+            r = rows[0];
+          }
+        } else {
+          r = store.videos.find((v) => v.id === videoId) || null;
+        }
+
+        if (!r) {
+          return jsonResponse({ success: false, error: "Video not found." }, 404);
+        }
+
+        if (r.is_blocked) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "This video has been blocked by administrators and cannot be summarized.",
+            },
+            403,
+          );
+        }
+
+        const rowOwner = String(r.user_id || "").trim();
+        const isOwner = Boolean(
+          authUser &&
+          (rowOwner.toUpperCase() === authUserId.toUpperCase() ||
+            (authUser.id && rowOwner.toUpperCase() === String(authUser.id).trim().toUpperCase())),
+        );
+        const visibility = resolveStoredVisibilityFailClosed(r.visibility);
+        const vType = String(r.video_type || "free")
+          .trim()
+          .toLowerCase();
+        const pStatus =
+          String(r.payment_status || "")
+            .trim()
+            .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+        const isPaymentEligible =
+          (vType === "free" && (pStatus === "not_required" || pStatus === "paid")) ||
+          (vType === "premium" && pStatus === "paid");
+
+        if (visibility === "private" && !isOwner && !isAdmin) {
+          if (!authUser) {
+            return jsonResponse(
+              { success: false, error: "Authentication required to summarize this private video." },
+              401,
+            );
+          }
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                "Unauthorized: Private videos can only be summarized by their creator or administrators.",
+            },
+            403,
+          );
+        }
+
+        if (!isPaymentEligible && !isOwner && !isAdmin) {
+          if (!authUser) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Authentication required to summarize this unpaid Sponsor video.",
+              },
+              401,
+            );
+          }
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                "Unauthorized: Unpaid Sponsor videos can only be summarized by their creator or administrators.",
+            },
+            403,
+          );
+        }
+
+        const summary = await summarizeVideoContent({
+          env,
+          videoId: String(r.id),
+          title: String(r.title || "FaceTube Video"),
+          description: String(r.description || ""),
+          category: String(r.category || "General"),
+          duration: String(r.duration || ""),
+          videoUrl: String(r.video_url || ""),
+          visibility,
+          aiConsent,
+        });
+
+        return jsonResponse({
+          success: true,
+          summary,
+        });
+      } catch (err) {
+        return handleAiError(err);
+      }
+    }
+
+    // 3. FaceTube AI Chatbot (Auth required, verified platform knowledge only)
+    if (route === "ai/chat" && method === "POST") {
+      try {
+        const authUser = await getAuthUserFromRequest(request, store, pool, env);
+        const authCheck = requireAuth(authUser);
+        if (!authCheck.success) return authCheck.response;
+
+        const rate = checkAiRateLimit({
+          bucket: "chat",
+          subjectKey: authCheck.effectiveUserId,
+          limit: 30,
+          windowMs: 5 * 60 * 1000,
+        });
+        if (!rate.allowed) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              code: "RATE_LIMITED",
+              error: `Too many chat requests. Please wait ${rate.retryAfterSec}s and try again.`,
+            }),
+            {
+              status: 429,
+              headers: {
+                "Content-Type": "application/json; charset=utf-8",
+                "Retry-After": String(rate.retryAfterSec),
+                "Access-Control-Allow-Origin": "*",
+              },
+            },
+          );
+        }
+
+        const body = await readJsonBodySafe(32 * 1024);
+        const message = typeof body?.["message"] === "string" ? body["message"] : "";
+        const rawHistory = Array.isArray(body?.["history"]) ? body["history"] : [];
+        const history: ChatTurnInput[] = rawHistory
+          .filter((item): item is Record<string, unknown> =>
+            Boolean(item && typeof item === "object"),
+          )
+          .map((item) => ({
+            role: item["role"] === "assistant" ? ("assistant" as const) : ("user" as const),
+            text: typeof item["text"] === "string" ? item["text"] : "",
+          }))
+          .filter((item) => item.text.trim().length > 0);
+
+        const displayName = authCheck.user.channel_name || authCheck.user.name || "FaceTube Member";
+        const role: "admin" | "user" =
+          String(authCheck.user.role || "").toLowerCase() === "admin" ? "admin" : "user";
+
+        const chatRes = await runFaceTubeChatbotTurn({
+          env,
+          message,
+          history,
+          userContext: { displayName, role },
+        });
+
+        return jsonResponse({
+          success: true,
+          reply: chatRes.reply,
+          model: chatRes.model,
+          informationalOnly: true,
+        });
+      } catch (err) {
+        return handleAiError(err);
+      }
+    }
+
+    // 4. AI-Powered Personalized Video Recommendations (Public discovery rules + safe fallback)
+    if (route === "ai/recommendations" && (method === "GET" || method === "POST")) {
+      try {
+        if (isProduction && !pool) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database connection unavailable in production environment.",
+            },
+            503,
+          );
+        }
+
+        const authUser = await getAuthUserFromRequest(request, store, pool, env);
+        const authUserId = authUser ? String(authUser.user_id || "").trim() : "";
+
+        const rate = checkAiRateLimit({
+          bucket: "recommendations",
+          subjectKey: authUserId || rateSubjectIp,
+          limit: 30,
+          windowMs: 5 * 60 * 1000,
+        });
+        if (!rate.allowed) {
+          return new Response(
+            JSON.stringify({
+              success: false,
+              code: "RATE_LIMITED",
+              error: `Too many recommendation requests. Please wait ${rate.retryAfterSec}s.`,
+            }),
+            {
+              status: 429,
+              headers: {
+                "Content-Type": "application/json; charset=utf-8",
+                "Retry-After": String(rate.retryAfterSec),
+                "Access-Control-Allow-Origin": "*",
+              },
+            },
+          );
+        }
+
+        const body = method === "POST" ? await readJsonBodySafe(16 * 1024) : {};
+        const rawLimit = body?.["limit"] ?? url.searchParams.get("limit") ?? "12";
+        const limit = Math.max(1, Math.min(24, Number.parseInt(String(rawLimit), 10) || 12));
+        const excludeVideoId = String(
+          body?.["excludeVideoId"] ?? url.searchParams.get("excludeVideoId") ?? "",
+        ).trim();
+        const watchedIdsRaw = Array.isArray(body?.["watchedVideoIds"])
+          ? body["watchedVideoIds"]
+          : String(url.searchParams.get("watchedVideoIds") || "")
+              .split(",")
+              .filter(Boolean);
+        const watchedIdSet = new Set(
+          watchedIdsRaw
+            .map((id) => String(id || "").trim())
+            .filter(Boolean)
+            .slice(0, 30),
+        );
+        const preferredCategories = Array.isArray(body?.["preferredCategories"])
+          ? body["preferredCategories"]
+              .map((c) => String(c || "").trim())
+              .filter(Boolean)
+              .slice(0, 10)
+          : [];
+
+        // Load only real, non-blocked, public, payment-eligible catalog videos
+        const allEligible: RecommendationCandidateVideo[] = [];
+        const likedIdSet = new Set<string>();
+
+        if (pool) {
+          const [rows]: any = await pool.query(
+            `SELECT
+              v.id, v.user_id, v.creator_name, v.title, v.description, v.video_url, v.thumbnail_url,
+              v.video_type, v.content_type, v.category, v.duration, v.views, v.likes,
+              v.payment_status, v.is_promoted, v.visibility, v.promotion_expires_at,
+              v.created_at, v.updated_at,
+              u.channel_logo_url AS creator_channel_logo_url,
+              u.channel_name AS creator_channel_name
+             FROM uploaded_videos v
+             LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
+             WHERE COALESCE(v.is_blocked, 0) = 0
+               AND COALESCE(NULLIF(v.visibility, ''), 'public') = 'public'
+               AND (
+                 (v.video_type = 'free' AND COALESCE(NULLIF(v.payment_status, ''), 'not_required') IN ('not_required', 'paid'))
+                 OR (v.video_type = 'premium' AND v.payment_status = 'paid')
+               )
+             ORDER BY v.created_at DESC
+             LIMIT 100`,
+          );
+          const rowList = Array.isArray(rows) ? rows : [];
+          for (const r of rowList) {
+            const active = isAdPromotionActive({
+              is_promoted: r.is_promoted,
+              promotion_expires_at: r.promotion_expires_at,
+            });
+            const channelName = String(
+              r.creator_channel_name || r.creator_name || "FaceTube Creator",
+            );
+            allEligible.push({
+              id: String(r.id),
+              userId: String(r.user_id || ""),
+              creatorName: channelName,
+              channelName,
+              channelLogoUrl: r.creator_channel_logo_url
+                ? String(r.creator_channel_logo_url)
+                : null,
+              title: String(r.title || "Untitled Video"),
+              description: String(r.description || ""),
+              videoUrl: String(r.video_url || ""),
+              thumbnailUrl: String(r.thumbnail_url || ""),
+              videoType: r.video_type === "premium" ? "premium" : "free",
+              contentType: r.content_type === "short" ? "short" : "long",
+              category: String(r.category || "General"),
+              duration: String(r.duration || "0:00"),
+              views: Number(r.views) || 0,
+              likes: Number(r.likes) || 0,
+              paymentStatus: String(r.payment_status || "not_required"),
+              isPromoted: active,
+              visibility: "public",
+              createdAt: String(r.created_at || ""),
+              updatedAt: String(r.updated_at || ""),
+            });
+          }
+
+          if (authUserId) {
+            try {
+              const [likeRows]: any = await pool.query(
+                `SELECT video_id FROM video_likes WHERE UPPER(user_id) = UPPER(?) LIMIT 50`,
+                [authUserId],
+              );
+              if (Array.isArray(likeRows)) {
+                for (const lr of likeRows) {
+                  if (lr?.video_id) likedIdSet.add(String(lr.video_id));
+                }
+              }
+            } catch {
+              // Ignore if video_likes table absent
+            }
+          }
+        } else {
+          for (const v of store.videos) {
+            if (v.is_blocked) continue;
+            if (resolveStoredVisibilityFailClosed(v.visibility) !== "public") continue;
+            const vType = String(v.video_type || "free")
+              .trim()
+              .toLowerCase();
+            const pStatus =
+              String(v.payment_status || "")
+                .trim()
+                .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+            const isPayEligible =
+              (vType === "free" && (pStatus === "not_required" || pStatus === "paid")) ||
+              (vType === "premium" && pStatus === "paid");
+            if (!isPayEligible) continue;
+
+            const owner = store.users.find(
+              (u) => u.user_id.toUpperCase() === (v.user_id || "").toUpperCase(),
+            );
+            const channelName = owner?.channel_name || v.creator_name || "FaceTube Creator";
+            allEligible.push({
+              id: String(v.id),
+              userId: String(v.user_id || ""),
+              creatorName: channelName,
+              channelName,
+              channelLogoUrl: owner?.channel_logo_url || null,
+              title: String(v.title || "Untitled Video"),
+              description: String(v.description || ""),
+              videoUrl: String(v.video_url || ""),
+              thumbnailUrl: String(v.thumbnail_url || ""),
+              videoType: vType === "premium" ? "premium" : "free",
+              contentType: v.content_type === "short" ? "short" : "long",
+              category: String(v.category || "General"),
+              duration: String(v.duration || "0:00"),
+              views: Number(v.views) || 0,
+              likes: Number(v.likes) || 0,
+              paymentStatus: pStatus,
+              isPromoted: isAdPromotionActive(v),
+              visibility: "public",
+              createdAt: String(v.created_at || ""),
+              updatedAt: String(v.updated_at || ""),
+            });
+          }
+        }
+
+        const eligibleById = new Map(allEligible.map((v) => [v.id, v]));
+        const watchedVideos = Array.from(watchedIdSet)
+          .map((id) => eligibleById.get(id))
+          .filter((v): v is RecommendationCandidateVideo => Boolean(v));
+        const likedVideos = Array.from(likedIdSet)
+          .map((id) => eligibleById.get(id))
+          .filter((v): v is RecommendationCandidateVideo => Boolean(v));
+
+        const candidates = excludeVideoId
+          ? allEligible.filter((v) => v.id !== excludeVideoId)
+          : allEligible;
+
+        const ranked = await rankPersonalizedRecommendations({
+          env,
+          candidates,
+          watchedVideos,
+          likedVideos,
+          preferredCategories,
+          limit,
+        });
+
+        const cfg = resolveGeminiConfig(env);
+        return jsonResponse({
+          success: true,
+          source: ranked.source,
+          fallbackUsed: ranked.fallbackUsed,
+          geminiConfigured: cfg.configured,
+          model: ranked.model,
+          total: ranked.items.length,
+          recommendations: ranked.items.map(({ video, reason }) => ({
+            ...video,
+            user_id: video.userId,
+            creator_name: video.creatorName,
+            channel_name: video.channelName,
+            channel_logo_url: video.channelLogoUrl,
+            video_url: video.videoUrl,
+            thumbnail_url: video.thumbnailUrl,
+            video_type: video.videoType,
+            content_type: video.contentType,
+            payment_status: video.paymentStatus,
+            is_promoted: video.isPromoted,
+            created_at: video.createdAt,
+            updated_at: video.updatedAt,
+            aiReason: reason,
+          })),
+        });
+      } catch (err) {
+        return handleAiError(err);
+      }
+    }
   }
 
   // Unhandled /api route

@@ -10,7 +10,16 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
 }
 
-$purpose = strtolower(trim((string)($_POST['purpose'] ?? ($_GET['purpose'] ?? 'default'))));
+$rawPostPurpose = isset($_POST['purpose']) ? trim((string)$_POST['purpose']) : '';
+$rawGetPurpose = isset($_GET['purpose']) ? trim((string)$_GET['purpose']) : '';
+$rawReqPurpose = isset($_REQUEST['purpose']) ? trim((string)$_REQUEST['purpose']) : '';
+$purpose = strtolower(
+    $rawPostPurpose !== ''
+        ? $rawPostPurpose
+        : ($rawGetPurpose !== ''
+            ? $rawGetPurpose
+            : ($rawReqPurpose !== '' ? $rawReqPurpose : 'default'))
+);
 $isChannelLogo = ($purpose === 'channel_logo');
 
 if ($isChannelLogo) {
@@ -87,6 +96,21 @@ if (!empty($_FILES['image']) && $_FILES['image']['error'] === UPLOAD_ERR_OK) {
                     'error' => 'Image MIME verification failed.'
                 ], 400);
             }
+        }
+        $logoWidth = (int)$imageInfo[0];
+        $logoHeight = (int)$imageInfo[1];
+        if ($logoWidth > 4096 || $logoHeight > 4096) {
+            jsonResponse([
+                'success' => false,
+                'error' => "Channel logo dimensions exceed maximum allowed size (4096x4096). Current dimensions: {$logoWidth}x{$logoHeight}."
+            ], 400);
+        }
+        $logoRatio = $logoWidth / $logoHeight;
+        if (abs($logoRatio - 1.0) > 0.08) {
+            jsonResponse([
+                'success' => false,
+                'error' => "Channel logo must be a square (1:1) image (e.g. 512x512). Current dimensions: {$logoWidth}x{$logoHeight}."
+            ], 400);
         }
     } else {
         // Enforce 9:16 aspect ratio for standard image uploads

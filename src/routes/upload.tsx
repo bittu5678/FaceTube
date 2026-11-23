@@ -39,6 +39,7 @@ import { Footer } from "@/components/videohub/Footer";
 import { useAuth } from "@/lib/auth-context";
 import { resolveChannelDisplayName } from "@/lib/channel-branding";
 import { api } from "@/lib/api";
+import { AiMetadataAssistant } from "@/components/ai/AiMetadataAssistant";
 import {
   recordNewVideoUpload,
   fetchUploadedVideos,
@@ -2120,6 +2121,23 @@ function FreeVideoUploadView({
 
         {/* Video Metadata Inputs */}
         <div className="rounded-2xl border border-border bg-card p-6 space-y-4">
+          <AiMetadataAssistant
+            titleDraft={title}
+            descriptionDraft={description}
+            category={category}
+            contentType={format}
+            visibility={visibility}
+            videoFile={videoFile}
+            duration={detectedDuration}
+            accentClassName="border-sky-500/30 bg-sky-500/5"
+            onApplyTitle={(nextTitle) => setTitle(nextTitle)}
+            onApplyDescription={(nextDesc) => setDescription(nextDesc)}
+            onApplyBoth={(nextTitle, nextDesc) => {
+              if (nextTitle.trim()) setTitle(nextTitle);
+              if (nextDesc.trim()) setDescription(nextDesc);
+            }}
+          />
+
           <div>
             <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
               Video Title <span className="text-brand">*</span>
@@ -2707,6 +2725,23 @@ function PremiumVideoUploadView({
 
         {/* Video Metadata Inputs */}
         <div className="rounded-2xl border border-border bg-card p-6 space-y-4">
+          <AiMetadataAssistant
+            titleDraft={title}
+            descriptionDraft={description}
+            category={category}
+            contentType={format}
+            visibility={visibility}
+            videoFile={videoFile}
+            duration={detectedDuration}
+            accentClassName="border-pink-500/30 bg-pink-500/5"
+            onApplyTitle={(nextTitle) => setTitle(nextTitle)}
+            onApplyDescription={(nextDesc) => setDescription(nextDesc)}
+            onApplyBoth={(nextTitle, nextDesc) => {
+              if (nextTitle.trim()) setTitle(nextTitle);
+              if (nextDesc.trim()) setDescription(nextDesc);
+            }}
+          />
+
           <div>
             <label className="block text-xs font-bold text-foreground uppercase tracking-wide mb-1.5">
               Video Title <span className="text-brand">*</span>

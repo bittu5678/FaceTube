@@ -6,6 +6,12 @@
 
 // Enable CORS restricted to approved FaceTube frontend origins
 function handleCors() {
+    static $corsHandled = false;
+    if ($corsHandled) {
+        return;
+    }
+    $corsHandled = true;
+
     $allowedOrigins = [
         'https://facetube.online',
         'https://www.facetube.online',
@@ -66,7 +72,8 @@ handleCors();
 function jsonResponse($data, $statusCode = 200) {
     http_response_code($statusCode);
     header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
+    echo $json !== false ? $json : '{"success":false,"error":"Failed to encode JSON response."}';
     exit;
 }
 
@@ -89,7 +96,9 @@ function getBearerToken() {
         $_SERVER['Authorization'] ?? null,
         $_SERVER['HTTP_X_AUTHORIZATION'] ?? null,
         $_SERVER['REDIRECT_HTTP_X_AUTHORIZATION'] ?? null,
+        $_SERVER['REDIRECT_REDIRECT_HTTP_X_AUTHORIZATION'] ?? null,
         $_SERVER['X-Authorization'] ?? null,
+        $_SERVER['X_AUTHORIZATION'] ?? null,
     ];
 
     foreach ($headerCandidates as $candidate) {
@@ -121,11 +130,20 @@ function getBearerToken() {
     }
 
     // Fallback check on getenv for direct FastCGI process environment variables
-    $envAuth = getenv('HTTP_AUTHORIZATION') ?: (getenv('REDIRECT_HTTP_AUTHORIZATION') ?: getenv('HTTP_X_AUTHORIZATION'));
-    if (!empty($envAuth)) {
-        $trimmed = trim((string)$envAuth);
-        if (preg_match('/Bearer\s+(\S+)/i', $trimmed, $matches)) {
-            return $matches[1];
+    foreach ([
+        'HTTP_AUTHORIZATION',
+        'REDIRECT_HTTP_AUTHORIZATION',
+        'REDIRECT_REDIRECT_HTTP_AUTHORIZATION',
+        'HTTP_X_AUTHORIZATION',
+        'REDIRECT_HTTP_X_AUTHORIZATION',
+        'REDIRECT_REDIRECT_HTTP_X_AUTHORIZATION',
+    ] as $envKey) {
+        $envAuth = getenv($envKey);
+        if (!empty($envAuth)) {
+            $trimmed = trim((string)$envAuth);
+            if (preg_match('/Bearer\s+(\S+)/i', $trimmed, $matches)) {
+                return $matches[1];
+            }
         }
     }
 

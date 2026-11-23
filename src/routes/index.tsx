@@ -22,6 +22,7 @@ import type { ShortItem } from "@/data/shorts";
 import {
   buildPublicHomeSections,
   fetchUploadedVideos,
+  convertUploadedToCatalogVideo,
   convertVideoToShortItem,
   isPubliclyCacheableVideo,
   isShortVideo,
@@ -29,6 +30,8 @@ import {
   deriveCreatorsFromVideos,
   type UploadedVideo,
 } from "@/lib/video-service";
+import { api } from "@/lib/api";
+import { getRecentWatchedVideoIds } from "@/lib/watch-history";
 import { AdSenseAd } from "@/components/adsense/AdSenseAd";
 import { AdMobBanner } from "@/components/admob/AdMobBanner";
 
@@ -95,6 +98,7 @@ function Index() {
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
   const [uploadedHomeShorts, setUploadedHomeShorts] = useState<UploadedVideo[]>([]);
   const [dynamicCategories, setDynamicCategories] = useState<string[]>(categories);
+  const [aiRecommendedVideos, setAiRecommendedVideos] = useState<Video[] | null>(null);
 
   useEffect(() => {
     if (searchParams.q !== undefined) {
@@ -175,6 +179,26 @@ function Index() {
 
     loadHomeCategories();
     window.addEventListener("facetube:categories-updated", loadHomeCategories);
+
+    const watchedVideoIds = getRecentWatchedVideoIds();
+    api.ai
+      .getRecommendations({
+        watchedVideoIds,
+        limit: 12,
+      })
+      .then((res) => {
+        if (!isMounted || !res?.success || !Array.isArray(res.recommendations)) return;
+        const verified = res.recommendations
+          .filter((item) => isPubliclyCacheableVideo(item))
+          .map((item) => convertUploadedToCatalogVideo(item as unknown as UploadedVideo));
+        if (verified.length > 0) {
+          setAiRecommendedVideos(verified);
+        }
+      })
+      .catch(() => {
+        // Silently fall back to deterministic homeSections.recommendedVideos
+      });
+
     return () => {
       isMounted = false;
       window.removeEventListener("facetube:categories-updated", loadHomeCategories);
@@ -210,7 +234,10 @@ function Index() {
     });
   }, [allCombinedVideos, query, activeCategory]);
 
-  const recommendedCombined = homeSections.recommendedVideos;
+  const recommendedCombined =
+    aiRecommendedVideos && aiRecommendedVideos.length > 0
+      ? aiRecommendedVideos
+      : homeSections.recommendedVideos;
   const trendingVideos = homeSections.trendingVideos;
   const recentVideos = homeSections.recentVideos;
 

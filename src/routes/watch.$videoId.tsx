@@ -40,6 +40,8 @@ import {
 } from "@/lib/image-service";
 import { AdSenseAd } from "@/components/adsense/AdSenseAd";
 import { AdMobBanner } from "@/components/admob/AdMobBanner";
+import { AiVideoSummaryCard } from "@/components/ai/AiVideoSummaryCard";
+import { recordWatchedVideoId } from "@/lib/watch-history";
 
 export const Route = createFileRoute("/watch/$videoId")({
   loader: async ({ params }) => {
@@ -269,6 +271,7 @@ function WatchPage() {
 
   useEffect(() => {
     if (!video) return;
+    recordWatchedVideoId(video.id);
     fetchUploadedVideos()
       .then((vids) => {
         setUploadedVideos(Array.isArray(vids) ? vids : []);
@@ -552,6 +555,11 @@ function WatchPage() {
               {expanded ? "Show less" : "Show more"}
             </button>
           </div>
+
+          <AiVideoSummaryCard
+            videoId={video.id}
+            visibility={(video as any).visibility || "public"}
+          />
 
           {/* Google AdSense Placement: Non-disruptive watch page responsive banner */}
           <AdSenseAd slotType="watch-banner" format="auto" />

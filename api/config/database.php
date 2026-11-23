@@ -3,9 +3,8 @@
  * FaceTube - Production Database Configuration
  * Hostinger MySQL Connection with PDO & Prepared Statements
  * Compatible with Hostinger phpMyAdmin (MySQL 5.7+ / 8.0+ / MariaDB)
+ * Minimum runtime: PHP 8.0+ (uses str_starts_with / str_ends_with across API endpoints)
  */
-
-require_once __DIR__ . '/../response.php';
 
 // Load .env variables if present in project root, parent directory, or /api/.env
 function loadEnvFile($path) {
@@ -58,6 +57,9 @@ if (!empty($_SERVER['DOCUMENT_ROOT'])) {
     loadEnvFile($_SERVER['DOCUMENT_ROOT'] . '/.env');
     loadEnvFile(dirname($_SERVER['DOCUMENT_ROOT']) . '/.env');
 }
+
+// Initialize shared response & CORS handling only after environment variables are loaded
+require_once __DIR__ . '/../response.php';
 
 function getRazorpayConfig() {
     static $cached = null;

@@ -5,6 +5,7 @@
  */
 
 import { cropAndResizeTo9to16, cropAndResizeToSquare } from "./image-effects";
+import { buildImageUploadRequest } from "./channel-logo-validation";
 
 export const PRODUCTION_API_URL = "https://api.facetube.online";
 
@@ -117,8 +118,19 @@ export function setStoredAuthToken(token: string | null): void {
   }
 }
 
+export function getAiApiBaseUrl(): string {
+  const envAiUrl =
+    (typeof import.meta !== "undefined" && import.meta.env?.["VITE_AI_API_BASE_URL"]) ||
+    (typeof process !== "undefined" && process.env?.["VITE_AI_API_BASE_URL"]);
+  if (envAiUrl) {
+    return String(envAiUrl).trim().replace(/\/+$/, "");
+  }
+  return "/api";
+}
+
 export type ApiFetchOptions = RequestInit & {
   timeoutMs?: number;
+  baseUrlOverride?: string;
 };
 
 /**
@@ -128,7 +140,7 @@ export async function apiFetch<T = unknown>(
   endpoint: string,
   options: ApiFetchOptions = {},
 ): Promise<T> {
-  const { timeoutMs, signal: externalSignal, ...fetchOptions } = options;
+  const { timeoutMs, signal: externalSignal, baseUrlOverride, ...fetchOptions } = options;
   const token = getStoredAuthToken();
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -162,7 +174,7 @@ export async function apiFetch<T = unknown>(
   }
 
   const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
-  const baseUrl = getApiBaseUrl();
+  const baseUrl = baseUrlOverride ?? getApiBaseUrl();
   let url = `${baseUrl}${cleanEndpoint}`;
 
   // When running on the server (SSR / Node.js runtime), fetch requires an absolute URL with protocol and host
@@ -788,18 +800,14 @@ export const api = {
         purpose === "channel_logo"
           ? await cropAndResizeToSquare(file)
           : await cropAndResizeTo9to16(file);
-      const formData = new FormData();
-      formData.append("image", processedFile);
-      if (purpose === "channel_logo") {
-        formData.append("purpose", "channel_logo");
-      }
+      const { endpoint, formData } = buildImageUploadRequest(processedFile, purpose);
       return apiFetch<{
         success: boolean;
         url: string;
         fileName: string;
         format: string;
         fileSize: string;
-      }>("/uploads/image.php", {
+      }>(endpoint, {
         method: "POST",
         body: formData,
       });
@@ -2052,6 +2060,106 @@ export const api = {
         is_self?: boolean;
         error?: string;
       }>(`/channel/status.php?creator_user_id=${encodeURIComponent(creatorUserId)}`);
+    },
+  },
+
+  // Google Gemini AI (Server-Only Interactions API via Node /api/ai/*)
+  ai: {
+    generateVideoMetadata: async (params: {
+      titleDraft?: string;
+      descriptionDraft?: string;
+      category?: string;
+      contentType?: "short" | "long";
+      fileName?: string;
+      duration?: string;
+      videoBase64?: string;
+      videoMimeType?: string;
+      videoId?: string;
+      aiConsent?: boolean;
+    }) => {
+      return apiFetch<{
+        success: boolean;
+        suggestions: {
+          title: string;
+          description: string;
+          tags: string[];
+          analysisMode: "video_content" | "metadata_only";
+          applied: boolean;
+        };
+        model?: string;
+        error?: string;
+      }>("/ai/video-metadata", {
+        method: "POST",
+        body: JSON.stringify(params),
+        baseUrlOverride: getAiApiBaseUrl(),
+        timeoutMs: 30000,
+      });
+    },
+
+    summarizeVideo: async (params: { videoId: string; aiConsent?: boolean }) => {
+      return apiFetch<{
+        success: boolean;
+        summary: {
+          videoId: string;
+          title: string;
+          shortSummary: string;
+          keyPoints: string[];
+          analysisMode: "video_content";
+          model: string;
+        };
+        error?: string;
+        code?: string;
+      }>("/ai/video-summary", {
+        method: "POST",
+        body: JSON.stringify(params),
+        baseUrlOverride: getAiApiBaseUrl(),
+        timeoutMs: 35000,
+      });
+    },
+
+    chat: async (params: {
+      message: string;
+      history?: Array<{ role: "user" | "assistant"; text: string }>;
+    }) => {
+      return apiFetch<{
+        success: boolean;
+        reply: string;
+        model?: string;
+        informationalOnly?: boolean;
+        error?: string;
+      }>("/ai/chat", {
+        method: "POST",
+        body: JSON.stringify(params),
+        baseUrlOverride: getAiApiBaseUrl(),
+        timeoutMs: 25000,
+      });
+    },
+
+    getRecommendations: async (params?: {
+      watchedVideoIds?: string[];
+      preferredCategories?: string[];
+      excludeVideoId?: string;
+      limit?: number;
+    }) => {
+      return apiFetch<{
+        success: boolean;
+        source: "gemini" | "fallback";
+        fallbackUsed: boolean;
+        geminiConfigured?: boolean;
+        model?: string | null;
+        total: number;
+        recommendations: Array<
+          Record<string, any> & {
+            id: string;
+            aiReason?: string;
+          }
+        >;
+      }>("/ai/recommendations", {
+        method: "POST",
+        body: JSON.stringify(params || {}),
+        baseUrlOverride: getAiApiBaseUrl(),
+        timeoutMs: 15000,
+      });
     },
   },
 };

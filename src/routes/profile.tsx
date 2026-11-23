@@ -27,6 +27,7 @@ import { BottomNav } from "@/components/videohub/BottomNav";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
+import { validateChannelLogoFile } from "@/lib/channel-logo-validation";
 import { resolveMediaUrl } from "@/lib/media-url";
 import {
   CHANNEL_BRANDING_UPDATED_EVENT,
@@ -201,15 +202,9 @@ function ProfilePage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const validTypes = ["image/jpeg", "image/png", "image/webp"];
-    if (!validTypes.includes(file.type)) {
-      toast.error("Please upload a JPG, PNG, or WEBP image for channel logo.");
-      e.target.value = "";
-      return;
-    }
-
-    if (file.size > 10 * 1024 * 1024) {
-      toast.error("Image file size cannot exceed 10MB.");
+    const validation = validateChannelLogoFile(file);
+    if (!validation.valid) {
+      toast.error(validation.error || "Invalid channel logo file.");
       e.target.value = "";
       return;
     }

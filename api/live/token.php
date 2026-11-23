@@ -143,18 +143,23 @@ foreach ($domainDirCandidates as $allowedDomainDir) {
 }
 
 if ($livekitConfigPath !== null) {
-    $customLivekit = include $livekitConfigPath;
-    if (is_array($customLivekit)) {
-        $livekitUrl = $customLivekit['LIVEKIT_URL'] ?? ($customLivekit['livekit_url'] ?? ($customLivekit['url'] ?? $livekitUrl));
-        $apiKey = $customLivekit['LIVEKIT_API_KEY'] ?? ($customLivekit['livekit_api_key'] ?? ($customLivekit['apiKey'] ?? ($customLivekit['api_key'] ?? $apiKey)));
-        $apiSecret = $customLivekit['LIVEKIT_API_SECRET'] ?? ($customLivekit['livekit_api_secret'] ?? ($customLivekit['apiSecret'] ?? ($customLivekit['api_secret'] ?? $apiSecret)));
+    try {
+        $customLivekit = include $livekitConfigPath;
+        if (is_array($customLivekit)) {
+            $livekitUrl = $customLivekit['LIVEKIT_URL'] ?? ($customLivekit['livekit_url'] ?? ($customLivekit['url'] ?? $livekitUrl));
+            $apiKey = $customLivekit['LIVEKIT_API_KEY'] ?? ($customLivekit['livekit_api_key'] ?? ($customLivekit['apiKey'] ?? ($customLivekit['api_key'] ?? $apiKey)));
+            $apiSecret = $customLivekit['LIVEKIT_API_SECRET'] ?? ($customLivekit['livekit_api_secret'] ?? ($customLivekit['apiSecret'] ?? ($customLivekit['api_secret'] ?? $apiSecret)));
+        }
+        if (empty($livekitUrl) && defined('LIVEKIT_URL')) $livekitUrl = constant('LIVEKIT_URL');
+        if (empty($apiKey) && defined('LIVEKIT_API_KEY')) $apiKey = constant('LIVEKIT_API_KEY');
+        if (empty($apiSecret) && defined('LIVEKIT_API_SECRET')) $apiSecret = constant('LIVEKIT_API_SECRET');
+        if (empty($livekitUrl) && isset($LIVEKIT_URL)) $livekitUrl = $LIVEKIT_URL;
+        if (empty($apiKey) && isset($LIVEKIT_API_KEY)) $apiKey = $LIVEKIT_API_KEY;
+        if (empty($apiSecret) && isset($LIVEKIT_API_SECRET)) $apiSecret = $LIVEKIT_API_SECRET;
+    } catch (Throwable $cfgErr) {
+        error_log('[live/token.php][CONFIG] Failed to load domain livekit config: ' . $cfgErr->getMessage());
+        jsonResponse(['success' => false, 'error' => 'LiveKit configuration error on server.'], 503);
     }
-    if (empty($livekitUrl) && defined('LIVEKIT_URL')) $livekitUrl = constant('LIVEKIT_URL');
-    if (empty($apiKey) && defined('LIVEKIT_API_KEY')) $apiKey = constant('LIVEKIT_API_KEY');
-    if (empty($apiSecret) && defined('LIVEKIT_API_SECRET')) $apiSecret = constant('LIVEKIT_API_SECRET');
-    if (empty($livekitUrl) && isset($LIVEKIT_URL)) $livekitUrl = $LIVEKIT_URL;
-    if (empty($apiKey) && isset($LIVEKIT_API_KEY)) $apiKey = $LIVEKIT_API_KEY;
-    if (empty($apiSecret) && isset($LIVEKIT_API_SECRET)) $apiSecret = $LIVEKIT_API_SECRET;
 }
 
 if (empty($livekitUrl) || empty($apiKey) || empty($apiSecret)) {
@@ -176,13 +181,13 @@ if (empty($streamId)) {
 // 3. Verify stream existence and status in database
 $stream = null;
 try {
-    $stmt = $pdo->prepare('
+    $stmt = $pdo->prepare("
         SELECT id, user_id, title, status, stream_key,
-               COALESCE(livekit_room_name, CONCAT("room_", id)) as room_name
+               COALESCE(livekit_room_name, CONCAT('room_', id)) as room_name
         FROM live_streams
         WHERE id = ?
         LIMIT 1
-    ');
+    ");
     if ($stmt === false) {
         throw new RuntimeException('Failed to prepare live stream lookup query.');
     }
@@ -194,12 +199,12 @@ try {
     if ($isMissingColumnError($e)) {
         // If livekit_room_name column not migrated yet, query without it
         try {
-            $stmt = $pdo->prepare('
-                SELECT id, user_id, title, status, stream_key, CONCAT("room_", id) as room_name
+            $stmt = $pdo->prepare("
+                SELECT id, user_id, title, status, stream_key, CONCAT('room_', id) as room_name
                 FROM live_streams
                 WHERE id = ?
                 LIMIT 1
-            ');
+            ");
             if ($stmt === false) {
                 throw new RuntimeException('Failed to prepare fallback live stream lookup query.');
             }
@@ -311,7 +316,7 @@ if ($isBroadcaster) {
         'room' => $roomName,
         'roomJoin' => true,
         'canPublish' => true,
-        'canPublishSources' => ['camera', 'microphone'],
+        'canPublishSources' => ['camera', 'microphone', 'screen_share'],
         'canSubscribe' => true,
         'canPublishData' => true,
     ];
@@ -359,9 +364,11 @@ jsonResponse([
     'token' => $jwtToken,
     'url' => $livekitUrl,
     'room' => $roomName,
-    'stream_id' => $stream['id'],
+    'stream_id' => (string)$stream['id'],
     'identity' => $participantIdentity,
     'role' => $isBroadcaster ? 'publisher' : 'subscriber',
     'can_publish' => $isBroadcaster,
     'expires_in' => $expirySeconds,
+    'expires_at' => $now + $expirySeconds,
+    'server_configured' => true,
 ], 200);

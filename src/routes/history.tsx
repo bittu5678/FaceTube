@@ -5,6 +5,11 @@ import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { allVideos, type Video } from "@/data/videos";
 import { getVideoBadgeLabels } from "@/lib/video-service";
+import {
+  clearRecentWatchedVideoIds,
+  isWatchHistoryPaused,
+  setWatchHistoryPaused,
+} from "@/lib/watch-history";
 
 export const Route = createFileRoute("/history")({
   head: () => ({
@@ -21,7 +26,7 @@ export const Route = createFileRoute("/history")({
 
 export function HistoryPage() {
   const [historyList, setHistoryList] = useState<Video[]>(allVideos.slice(0, 8));
-  const [isPaused, setIsPaused] = useState(false);
+  const [isPaused, setIsPaused] = useState<boolean>(() => isWatchHistoryPaused());
   const [filterQuery, setFilterQuery] = useState("");
 
   const handleRemove = (id: string) => {
@@ -31,6 +36,7 @@ export function HistoryPage() {
   const handleClear = () => {
     if (confirm("Clear your entire FaceTube watch history?")) {
       setHistoryList([]);
+      clearRecentWatchedVideoIds();
     }
   };
 
@@ -202,7 +208,13 @@ export function HistoryPage() {
 
                 <button
                   type="button"
-                  onClick={() => setIsPaused((p) => !p)}
+                  onClick={() =>
+                    setIsPaused((p) => {
+                      const next = !p;
+                      setWatchHistoryPaused(next);
+                      return next;
+                    })
+                  }
                   className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-xs font-semibold text-foreground transition hover:bg-secondary text-left"
                 >
                   {isPaused ? (

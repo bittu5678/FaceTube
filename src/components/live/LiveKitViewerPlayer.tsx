@@ -1,12 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import {
-  Room,
-  RoomEvent,
-  Track,
-  type RemoteTrack,
-  type RemoteParticipant,
-  ConnectionState,
-} from "livekit-client";
+import { Room, RoomEvent, Track, type RemoteTrack, ConnectionState } from "livekit-client";
 import {
   Volume2,
   VolumeX,
@@ -20,6 +13,13 @@ import {
   Sparkles,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import {
+  clearAudioElementPlayback,
+  runViewerRoomConnection,
+  teardownViewerSession,
+  unlockViewerAudioPlayback,
+  type RoomLike,
+} from "./live-lifecycle-utils";
 
 function isMockStreamId(id: string | undefined | null): boolean {
   if (!id) return true;
@@ -57,9 +57,12 @@ export function LiveKitViewerPlayer({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
+  const sessionRunIdRef = useRef(0);
   const roomRef = useRef<Room | null>(null);
   const activeVideoTrackRef = useRef<RemoteTrack | null>(null);
   const activeAudioTrackRef = useRef<RemoteTrack | null>(null);
+  const registeredListenersRef = useRef<Array<[string, (...args: any[]) => void]>>([]);
+  const isMutedRef = useRef(false);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>(
     ConnectionState.Disconnected,
@@ -69,52 +72,50 @@ export function LiveKitViewerPlayer({
   const [serverConfigured, setServerConfigured] = useState<boolean>(true);
   const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
   const [hasRemoteAudio, setHasRemoteAudio] = useState(false);
+  const [isAudioBlocked, setIsAudioBlocked] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [viewerCount, setViewerCount] = useState<number>(initialViewers);
 
-  // Connect to LiveKit Room as Viewer
+  useEffect(() => {
+    setViewerCount(initialViewers);
+  }, [streamId, initialViewers]);
+
+  // Connect to LiveKit Room as Viewer with cancellation & stale-token guards
   const connectToRoom = useCallback(async () => {
-    // Clean up existing room if any
-    if (roomRef.current) {
-      try {
-        roomRef.current.disconnect();
-      } catch (_e) {
-        // Ignore
-      }
-      roomRef.current = null;
-    }
-
-    if (disabled || !streamId || isMockStreamId(streamId)) {
-      setIsConnecting(false);
-      setConnectionState(ConnectionState.Disconnected);
-      return;
-    }
-
-    setIsConnecting(true);
-    setErrorMessage(null);
-
-    try {
-      // 1. Fetch Subscriber JWT token from authoritative backend
-      const tokenRes = await api.live.getStreamToken({
-        streamId,
-        role: "subscriber",
-      });
-
-      if (!tokenRes.success || !tokenRes.token) {
-        throw new Error("Failed to acquire live stream access token from server.");
-      }
-
-      setServerConfigured(tokenRes.server_configured !== false);
-
-      // 2. Instantiate LiveKit Room with WebRTC adaptive streaming enabled
-      const room = new Room({
-        adaptiveStream: true,
-        dynacast: true,
-      });
-      roomRef.current = room;
-
-      const syncRemoteMediaTracks = () => {
+    await runViewerRoomConnection<RemoteTrack, Room, ConnectionState>({
+      streamId,
+      disabled,
+      isMockStream: isMockStreamId(streamId),
+      refs: {
+        sessionRunIdRef,
+        roomRef,
+        activeVideoTrackRef,
+        activeAudioTrackRef,
+        registeredListenersRef,
+        isMutedRef,
+      },
+      getToken: (targetStreamId) =>
+        api.live.getStreamToken({
+          streamId: targetStreamId,
+          role: "subscriber",
+        }),
+      createRoom: () =>
+        new Room({
+          adaptiveStream: true,
+          dynacast: true,
+        }),
+      events: {
+        ConnectionStateChanged: RoomEvent.ConnectionStateChanged,
+        TrackSubscribed: RoomEvent.TrackSubscribed,
+        TrackUnsubscribed: RoomEvent.TrackUnsubscribed,
+        Disconnected: RoomEvent.Disconnected,
+        AudioPlaybackStatusChanged: RoomEvent.AudioPlaybackStatusChanged,
+      },
+      disconnectedState: ConnectionState.Disconnected,
+      getVideoEl: () => videoRef.current,
+      getAudioEl: () => audioRef.current,
+      syncMediaTracks: function syncRemoteMediaTracks(room: Room) {
         let screenShareTrack: RemoteTrack | null = null;
         let cameraTrack: RemoteTrack | null = null;
         let fallbackVideoTrack: RemoteTrack | null = null;
@@ -143,7 +144,8 @@ export function LiveKitViewerPlayer({
         }
 
         const nextVideoTrack = screenShareTrack ?? cameraTrack ?? fallbackVideoTrack;
-        if (activeVideoTrackRef.current !== nextVideoTrack) {
+        const videoChanged = activeVideoTrackRef.current !== nextVideoTrack;
+        if (videoChanged) {
           if (activeVideoTrackRef.current) {
             try {
               if (videoRef.current) {
@@ -151,7 +153,7 @@ export function LiveKitViewerPlayer({
               } else {
                 activeVideoTrackRef.current.detach();
               }
-            } catch (_e) {
+            } catch {
               // Ignore
             }
           }
@@ -160,10 +162,10 @@ export function LiveKitViewerPlayer({
             nextVideoTrack.attach(videoRef.current);
           }
         }
-        setHasRemoteVideo(Boolean(nextVideoTrack));
 
         const nextAudioTrack = micAudioTrack ?? fallbackAudioTrack;
-        if (activeAudioTrackRef.current !== nextAudioTrack) {
+        const audioChanged = activeAudioTrackRef.current !== nextAudioTrack;
+        if (audioChanged) {
           if (activeAudioTrackRef.current) {
             try {
               if (audioRef.current) {
@@ -171,68 +173,35 @@ export function LiveKitViewerPlayer({
               } else {
                 activeAudioTrackRef.current.detach();
               }
-            } catch (_e) {
+            } catch {
               // Ignore
             }
           }
+          clearAudioElementPlayback(audioRef.current);
           activeAudioTrackRef.current = nextAudioTrack;
           if (nextAudioTrack && audioRef.current) {
+            audioRef.current.muted = isMutedRef.current;
             nextAudioTrack.attach(audioRef.current);
           }
         }
-        setHasRemoteAudio(Boolean(nextAudioTrack));
-      };
 
-      // Track Connection State Changes
-      room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
-        setConnectionState(state);
-      });
-
-      // Handle Remote Track Subscriptions (prioritize ScreenShare while active, fall back to Camera)
-      room.on(
-        RoomEvent.TrackSubscribed,
-        (_track: RemoteTrack, _publication: unknown, _participant: RemoteParticipant) => {
-          syncRemoteMediaTracks();
-        },
-      );
-
-      // Handle Remote Track Unsubscriptions
-      room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
-        try {
-          track.detach();
-        } catch (_e) {
-          // Ignore
-        }
-        if (activeVideoTrackRef.current === track) {
-          activeVideoTrackRef.current = null;
-        }
-        if (activeAudioTrackRef.current === track) {
-          activeAudioTrackRef.current = null;
-        }
-        syncRemoteMediaTracks();
-      });
-
-      // Handle Disconnections
-      room.on(RoomEvent.Disconnected, () => {
-        activeVideoTrackRef.current = null;
-        activeAudioTrackRef.current = null;
-        setConnectionState(ConnectionState.Disconnected);
-        setHasRemoteVideo(false);
-        setHasRemoteAudio(false);
-      });
-
-      // 3. Connect WebRTC signaling and media peer connection
-      await room.connect(tokenRes.url, tokenRes.token);
-
-      // Attach any tracks that were already published before this viewer connected
-      syncRemoteMediaTracks();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMessage(msg);
-      setConnectionState(ConnectionState.Disconnected);
-    } finally {
-      setIsConnecting(false);
-    }
+        return {
+          videoChanged,
+          nextVideoTrack,
+          audioChanged,
+          nextAudioTrack,
+        };
+      },
+      callbacks: {
+        onConnectingChange: setIsConnecting,
+        onConnectionStateChange: setConnectionState,
+        onErrorChange: setErrorMessage,
+        onServerConfiguredChange: setServerConfigured,
+        onRemoteVideoChange: setHasRemoteVideo,
+        onRemoteAudioChange: setHasRemoteAudio,
+        onAudioBlockedChange: setIsAudioBlocked,
+      },
+    });
   }, [streamId, disabled]);
 
   // Periodic Viewer Presence Heartbeat
@@ -249,7 +218,7 @@ export function LiveKitViewerPlayer({
         if (isMounted && res.success && typeof res.active_viewers === "number") {
           setViewerCount(res.active_viewers);
         }
-      } catch (_e) {
+      } catch {
         // Fallback to initial
       }
     };
@@ -263,29 +232,60 @@ export function LiveKitViewerPlayer({
     };
   }, [streamId, disabled]);
 
-  // Initiate connection when streamId changes
+  // Initiate connection when streamId/disabled changes and cancel pending work on teardown
   useEffect(() => {
-    connectToRoom();
+    const videoEl = videoRef.current;
+    const audioEl = audioRef.current;
+    void connectToRoom();
 
     return () => {
-      if (roomRef.current) {
-        try {
-          if (activeVideoTrackRef.current) activeVideoTrackRef.current.detach();
-          if (activeAudioTrackRef.current) activeAudioTrackRef.current.detach();
-          roomRef.current.disconnect();
-        } catch (_e) {
-          // Ignore cleanup errors
-        }
-        roomRef.current = null;
-      }
+      sessionRunIdRef.current += 1;
+      teardownViewerSession({
+        refs: {
+          sessionRunIdRef,
+          roomRef,
+          activeVideoTrackRef,
+          activeAudioTrackRef,
+          registeredListenersRef,
+          isMutedRef,
+        },
+        videoEl,
+        audioEl,
+      });
     };
   }, [connectToRoom]);
 
+  // Explicit user-triggered audio recovery when browser autoplay blocks playback
+  const handleEnableAudio = async () => {
+    isMutedRef.current = false;
+    setIsMuted(false);
+    const result = await unlockViewerAudioPlayback({
+      room: roomRef.current as unknown as RoomLike,
+      audioEl: audioRef.current,
+      audioTrack: activeAudioTrackRef.current,
+    });
+    setIsAudioBlocked(result.blocked);
+  };
+
   // Audio mute/unmute control
-  const toggleMute = () => {
+  const toggleMute = async () => {
+    const nextMuted = !isMuted;
+    isMutedRef.current = nextMuted;
+    setIsMuted(nextMuted);
     if (audioRef.current) {
-      audioRef.current.muted = !isMuted;
-      setIsMuted(!isMuted);
+      audioRef.current.muted = nextMuted;
+    }
+    if (nextMuted) {
+      setIsAudioBlocked(false);
+      return;
+    }
+    if (hasRemoteAudio) {
+      const result = await unlockViewerAudioPlayback({
+        room: roomRef.current as unknown as RoomLike,
+        audioEl: audioRef.current,
+        audioTrack: activeAudioTrackRef.current,
+      });
+      setIsAudioBlocked(result.blocked);
     }
   };
 
@@ -300,7 +300,7 @@ export function LiveKitViewerPlayer({
         await document.exitFullscreen();
         setIsFullscreen(false);
       }
-    } catch (_e) {
+    } catch {
       // Ignore fullscreen rejection
     }
   };
@@ -333,7 +333,7 @@ export function LiveKitViewerPlayer({
       />
 
       {/* Hidden Audio Element for Remote Sound Track */}
-      <audio ref={audioRef} autoPlay playsInline />
+      <audio ref={audioRef} autoPlay playsInline muted={isMuted} />
 
       {/* Fallback Display When Waiting for Broadcaster Video */}
       {!hasRemoteVideo && (
@@ -434,6 +434,18 @@ export function LiveKitViewerPlayer({
             <Sparkles className="h-3 w-3" /> Dev Credentials Pending
           </span>
         )}
+
+        {hasRemoteAudio && isAudioBlocked && !isMuted && (
+          <button
+            type="button"
+            onClick={handleEnableAudio}
+            aria-label="Enable stream audio playback"
+            className="inline-flex items-center gap-1.5 rounded-full bg-amber-500/90 hover:bg-amber-500 px-3 py-1 text-xs font-bold text-black backdrop-blur-sm shadow-md transition active:scale-95"
+          >
+            <Volume2 className="h-3.5 w-3.5" />
+            <span>Tap for Audio</span>
+          </button>
+        )}
       </div>
 
       {/* Top Right Actions (Broadcaster Studio Quick Access if Stream Owner) */}
@@ -473,7 +485,13 @@ export function LiveKitViewerPlayer({
             {isMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
           </button>
           <span className="text-[11px] text-zinc-300 font-mono">
-            {hasRemoteAudio ? (isMuted ? "Muted" : "Live Audio") : "No Audio Feed"}
+            {hasRemoteAudio
+              ? isMuted
+                ? "Muted"
+                : isAudioBlocked
+                  ? "Audio Paused (Tap for Audio)"
+                  : "Live Audio"
+              : "No Audio Feed"}
           </span>
         </div>
 

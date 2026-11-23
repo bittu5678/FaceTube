@@ -40,6 +40,12 @@ import {
   type CameraFacingMode,
   type ScreenShareTrackLike,
 } from "./live-camera-utils";
+import {
+  acquireInitialMediaTracksWithFallback,
+  executeEndBroadcastOnce,
+  teardownBroadcasterSessionIdempotently,
+  type RoomLike,
+} from "./live-lifecycle-utils";
 
 export interface LiveKitBroadcasterStudioProps {
   streamId: string;
@@ -59,6 +65,7 @@ export function LiveKitBroadcasterStudio({
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const roomRef = useRef<Room | null>(null);
   const localTracksRef = useRef<LocalTrack[]>([]);
+  const registeredRoomListenersRef = useRef<Array<[string, (...args: any[]) => void]>>([]);
   const sessionRunIdRef = useRef(0);
   const isSwitchingCameraRef = useRef(false);
   const isTogglingScreenShareRef = useRef(false);
@@ -67,6 +74,8 @@ export function LiveKitBroadcasterStudio({
   const screenShareCleanupListenerRef = useRef<(() => void) | null>(null);
   const wasCameraEnabledBeforeScreenShareRef = useRef<boolean | null>(null);
   const handleBrowserScreenShareEndedRef = useRef<() => Promise<void> | void>(() => {});
+  const isEndingStreamRef = useRef(false);
+  const hasEndedStreamRef = useRef(false);
 
   const [connectionState, setConnectionState] = useState<ConnectionState>(
     ConnectionState.Disconnected,
@@ -76,6 +85,7 @@ export function LiveKitBroadcasterStudio({
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isTogglingScreenShare, setIsTogglingScreenShare] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
+  const [audioOnlyMode, setAudioOnlyMode] = useState(false);
 
   // Audio / Video control states
   const [micEnabled, setMicEnabled] = useState(true);
@@ -90,6 +100,7 @@ export function LiveKitBroadcasterStudio({
   const [selectedMicId, setSelectedMicId] = useState<string>("");
   const selectedMicIdRef = useRef<string>("");
   const [showSettings, setShowSettings] = useState(false);
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
 
   // Stats and timing
   const [durationSeconds, setDurationSeconds] = useState(0);
@@ -134,17 +145,22 @@ export function LiveKitBroadcasterStudio({
         setAvailableCameras(cameras);
         setAvailableMics(mics);
 
+        const currentCameraStillAvailable =
+          Boolean(selectedCameraIdRef.current) &&
+          cameras.some((c) => c.deviceId === selectedCameraIdRef.current);
         const nextCameraId =
-          preferredCameraId || selectedCameraIdRef.current || cameras[0]?.deviceId || "";
-        if (nextCameraId) {
-          updateSelectedCameraId(nextCameraId);
-        }
+          preferredCameraId ||
+          (currentCameraStillAvailable ? selectedCameraIdRef.current : cameras[0]?.deviceId || "");
+        updateSelectedCameraId(nextCameraId);
 
-        const nextMicId = preferredMicId || selectedMicIdRef.current || mics[0]?.deviceId || "";
-        if (nextMicId) {
-          updateSelectedMicId(nextMicId);
-        }
-      } catch (_e) {
+        const currentMicStillAvailable =
+          Boolean(selectedMicIdRef.current) &&
+          mics.some((m) => m.deviceId === selectedMicIdRef.current);
+        const nextMicId =
+          preferredMicId ||
+          (currentMicStillAvailable ? selectedMicIdRef.current : mics[0]?.deviceId || "");
+        updateSelectedMicId(nextMicId);
+      } catch {
         // Ignore enumeration errors
       }
     },
@@ -155,7 +171,7 @@ export function LiveKitBroadcasterStudio({
     if (screenShareCleanupListenerRef.current) {
       try {
         screenShareCleanupListenerRef.current();
-      } catch (_e) {
+      } catch {
         // Ignore
       }
       screenShareCleanupListenerRef.current = null;
@@ -167,12 +183,12 @@ export function LiveKitBroadcasterStudio({
     if (screenShareTrackRef.current) {
       try {
         screenShareTrackRef.current.detach?.();
-      } catch (_e) {
+      } catch {
         // Ignore
       }
       try {
         screenShareTrackRef.current.stop?.();
-      } catch (_e) {
+      } catch {
         // Ignore
       }
       screenShareTrackRef.current = null;
@@ -181,54 +197,68 @@ export function LiveKitBroadcasterStudio({
     updateScreenSharingState(false);
   }, [clearScreenShareCleanupListener, updateScreenSharingState]);
 
-  // Clean up all local media hardware tracks
+  // Clean up all local media hardware tracks idempotently (including room-managed tracks)
   const stopLocalTracks = useCallback(() => {
     stopActiveScreenShareTrack();
+    const seen = new Set<LocalTrack>();
     for (const track of localTracksRef.current) {
+      seen.add(track);
       try {
         track.stop();
         track.detach();
-      } catch (_e) {
+      } catch {
         // Ignore
       }
     }
     localTracksRef.current = [];
+    const localParticipant = roomRef.current?.localParticipant;
+    if (localParticipant?.trackPublications) {
+      for (const pub of localParticipant.trackPublications.values()) {
+        if (pub.track && !seen.has(pub.track as LocalTrack)) {
+          try {
+            pub.track.stop();
+            pub.track.detach();
+          } catch {
+            // Ignore
+          }
+        }
+      }
+    }
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = null;
     }
   }, [stopActiveScreenShareTrack]);
 
   const disconnectRoom = useCallback(() => {
-    if (roomRef.current) {
-      const room = roomRef.current;
-      roomRef.current = null;
-      try {
+    teardownBroadcasterSessionIdempotently<LocalTrack>({
+      roomRef: roomRef as unknown as { current: RoomLike<LocalTrack> | null },
+      localTracksRef,
+      registeredListenersRef: registeredRoomListenersRef,
+      stopScreenShareTrack: stopActiveScreenShareTrack,
+      stopPublishedScreenShare: (participant) => {
         void stopScreenShareSafely<Track.Source, LocalTrack>({
-          participant: room.localParticipant,
+          participant: participant as unknown as Room["localParticipant"],
           screenShareSource: Track.Source.ScreenShare,
           screenAudioSource: Track.Source.ScreenShareAudio,
         });
-      } catch (_e) {
-        // Ignore
-      }
-      try {
-        room.disconnect();
-      } catch (_e) {
-        // Ignore
-      }
-    }
-  }, []);
+      },
+      localVideoEl: localVideoRef.current,
+    });
+  }, [stopActiveScreenShareTrack]);
 
   // Initialize Broadcaster: Obtain JWT Token, capture local tracks, publish to LiveKit Room
   const startBroadcasting = useCallback(async () => {
     if (!streamId) return;
 
     const runId = ++sessionRunIdRef.current;
+    hasEndedStreamRef.current = false;
+    setShowEndConfirm(false);
     stopLocalTracks();
     disconnectRoom();
 
     setIsInitializing(true);
     setPermissionError(null);
+    setAudioOnlyMode(false);
 
     try {
       // 1. Fetch Publisher JWT Token with Broadcaster VideoGrants
@@ -246,12 +276,13 @@ export function LiveKitBroadcasterStudio({
         );
       }
 
-      // 2. Request camera & microphone permissions and create local media tracks
-      let tracks: LocalTrack[] = [];
-      try {
-        const activeCameraId = selectedCameraIdRef.current;
-        const activeMicId = selectedMicIdRef.current;
-        tracks = await createLocalTracks({
+      // 2. Request camera & microphone permissions with safe device fallback (never falls back on NotAllowedError)
+      const activeCameraId = selectedCameraIdRef.current;
+      const activeMicId = selectedMicIdRef.current;
+      const acquisition = await acquireInitialMediaTracksWithFallback<LocalTrack>({
+        createTracks: (options) =>
+          createLocalTracks(options as Parameters<typeof createLocalTracks>[0]),
+        primaryOptions: {
           audio: activeMicId ? { deviceId: { exact: activeMicId } } : true,
           video: {
             resolution: VideoPresets.h720.resolution,
@@ -259,38 +290,18 @@ export function LiveKitBroadcasterStudio({
               ? { deviceId: { exact: activeCameraId } }
               : { facingMode: facingModeRef.current }),
           },
-        });
-      } catch (mediaErr: unknown) {
-        const errName =
-          typeof mediaErr === "object" && mediaErr !== null && "name" in mediaErr
-            ? String((mediaErr as { name?: unknown }).name || "")
-            : "";
-        if (errName === "NotAllowedError" || errName === "PermissionDeniedError") {
-          throw new Error(
-            "Camera & microphone permissions were denied. Please allow access in browser settings.",
-          );
-        } else if (errName === "NotFoundError" || errName === "DevicesNotFoundError") {
-          throw new Error("No camera or microphone device was found on this system.");
-        } else if (errName === "NotReadableError" || errName === "TrackStartError") {
-          throw new Error("Your camera or microphone is already in use by another application.");
-        } else {
-          const msg = mediaErr instanceof Error ? mediaErr.message : String(mediaErr || "");
-          throw new Error(msg || "Failed to access camera and microphone.");
-        }
-      }
+        },
+        hasSpecificCameraId: Boolean(activeCameraId),
+        hasSpecificMicId: Boolean(activeMicId),
+        resolution: VideoPresets.h720.resolution,
+        isCancelled: () => sessionRunIdRef.current !== runId,
+      });
 
-      if (sessionRunIdRef.current !== runId) {
-        for (const t of tracks) {
-          try {
-            t.stop();
-            t.detach();
-          } catch (_e) {
-            // Ignore cleanup errors on cancelled init
-          }
-        }
+      if (acquisition.cancelled || sessionRunIdRef.current !== runId) {
         return;
       }
 
+      const tracks = acquisition.tracks;
       localTracksRef.current = tracks;
 
       // Attach local video track to creator's preview screen
@@ -299,18 +310,34 @@ export function LiveKitBroadcasterStudio({
       const audioTrack = tracks.find((t) => t.kind === Track.Kind.Audio) as
         LocalAudioTrack | undefined;
 
-      if (videoTrack && localVideoRef.current) {
-        videoTrack.attach(localVideoRef.current);
+      if (videoTrack) {
+        setAudioOnlyMode(false);
+        updateCameraEnabledState(true);
+        if (localVideoRef.current) {
+          videoTrack.attach(localVideoRef.current);
+        }
+      } else {
+        setAudioOnlyMode(true);
+        updateCameraEnabledState(false);
       }
 
       const activeVideoSettings = videoTrack?.mediaStreamTrack?.getSettings?.() ?? {};
       const activeAudioSettings = audioTrack?.mediaStreamTrack?.getSettings?.() ?? {};
-      const inferredMode = inferFacingModeFromCamera(
-        activeVideoSettings,
-        videoTrack?.mediaStreamTrack?.label,
-        facingModeRef.current,
-      );
-      updateFacingMode(inferredMode);
+      if (acquisition.usedCameraFallback && !activeVideoSettings.deviceId) {
+        updateSelectedCameraId("");
+      }
+      if (acquisition.usedMicFallback && !activeAudioSettings.deviceId) {
+        updateSelectedMicId("");
+      }
+
+      if (videoTrack) {
+        const inferredMode = inferFacingModeFromCamera(
+          activeVideoSettings,
+          videoTrack.mediaStreamTrack?.label,
+          facingModeRef.current,
+        );
+        updateFacingMode(inferredMode);
+      }
 
       // 3. Connect to LiveKit Room as Authoritative Publisher
       const room = new Room({
@@ -319,17 +346,25 @@ export function LiveKitBroadcasterStudio({
       });
       roomRef.current = room;
 
-      room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
+      const registerRoomListener = (event: RoomEvent, handler: (...args: any[]) => void) => {
+        registeredRoomListenersRef.current.push([event, handler]);
+        room.on(event, handler);
+      };
+
+      registerRoomListener(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
+        if (sessionRunIdRef.current !== runId) return;
         setConnectionState(state);
       });
 
-      room.on(RoomEvent.LocalTrackUnpublished, (publication) => {
-        if (publication.source === Track.Source.ScreenShare && isScreenSharingRef.current) {
+      registerRoomListener(RoomEvent.LocalTrackUnpublished, (publication) => {
+        if (sessionRunIdRef.current !== runId) return;
+        if (publication?.source === Track.Source.ScreenShare && isScreenSharingRef.current) {
           void handleBrowserScreenShareEndedRef.current();
         }
       });
 
-      room.on(RoomEvent.Disconnected, () => {
+      registerRoomListener(RoomEvent.Disconnected, () => {
+        if (sessionRunIdRef.current !== runId) return;
         setConnectionState(ConnectionState.Disconnected);
         stopActiveScreenShareTrack();
       });
@@ -337,30 +372,28 @@ export function LiveKitBroadcasterStudio({
       await room.connect(tokenRes.url, tokenRes.token);
 
       if (sessionRunIdRef.current !== runId) {
-        try {
-          room.disconnect();
-        } catch (_e) {
-          // Ignore
-        }
-        if (roomRef.current === room) {
-          roomRef.current = null;
-        }
-        stopLocalTracks();
+        disconnectRoom();
         return;
       }
 
-      // 4. Publish real camera and microphone tracks into the LiveKit Room
+      // 4. Publish real camera and/or microphone tracks into the LiveKit Room
       for (const track of tracks) {
         await room.localParticipant.publishTrack(track);
       }
 
       if (sessionRunIdRef.current !== runId) {
         disconnectRoom();
-        stopLocalTracks();
         return;
       }
 
-      toast.success("🔴 Live broadcast is active! Streaming video & audio to FaceTube.");
+      if (acquisition.mode === "audio-only") {
+        toast.info(acquisition.notice || "Camera unavailable. Continuing in audio-only mode.");
+      } else {
+        toast.success("🔴 Live broadcast is active! Streaming video & audio to FaceTube.");
+        if (acquisition.notice) {
+          toast.info(acquisition.notice);
+        }
+      }
       await updateDeviceList(activeVideoSettings.deviceId, activeAudioSettings.deviceId);
     } catch (err: unknown) {
       if (sessionRunIdRef.current !== runId) return;
@@ -381,6 +414,9 @@ export function LiveKitBroadcasterStudio({
     disconnectRoom,
     updateDeviceList,
     updateFacingMode,
+    updateCameraEnabledState,
+    updateSelectedCameraId,
+    updateSelectedMicId,
   ]);
 
   // Periodic Broadcaster Heartbeat & Presence
@@ -452,8 +488,23 @@ export function LiveKitBroadcasterStudio({
     if (roomRef.current) {
       try {
         await roomRef.current.localParticipant.setCameraEnabled(nextState);
-      } catch (_e) {
-        // Fallback
+        if (nextState) {
+          const camTrack = getActiveVideoTrack();
+          if (!camTrack) {
+            updateCameraEnabledState(false);
+            toast.error("No usable camera device was found.");
+            return;
+          }
+          setAudioOnlyMode(false);
+          if (localVideoRef.current && !isScreenSharingRef.current) {
+            camTrack.attach(localVideoRef.current);
+          }
+        }
+      } catch {
+        updateCameraEnabledState(!nextState);
+        toast.error(
+          "Camera could not be enabled. Check browser permissions or device availability.",
+        );
       }
     } else {
       const videoTrack = localTracksRef.current.find((t) => t.kind === Track.Kind.Video) as
@@ -461,6 +512,9 @@ export function LiveKitBroadcasterStudio({
       if (videoTrack) {
         if (nextState) videoTrack.unmute();
         else videoTrack.mute();
+      } else if (nextState) {
+        updateCameraEnabledState(false);
+        toast.error("No usable camera device was found.");
       }
     }
   };
@@ -791,38 +845,45 @@ export function LiveKitBroadcasterStudio({
     }
   };
 
-  // End Live Broadcast
-  const handleEndBroadcast = async () => {
-    if (isEndingStream) return;
-    const confirmEnd = window.confirm(
-      "Are you sure you want to end this live broadcast for all viewers?",
-    );
-    if (!confirmEnd) return;
-
-    setIsEndingStream(true);
-    try {
-      await api.live.endStream({ streamId });
-      toast.success("Broadcast ended successfully. Stream has concluded.");
-
-      sessionRunIdRef.current += 1;
-      stopLocalTracks();
-      disconnectRoom();
-      onStreamEnded();
-      onClose();
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Failed to end stream on server.";
-      toast.error(msg || "Failed to end stream on server.");
-    } finally {
-      setIsEndingStream(false);
-    }
+  // Open in-studio End Broadcast confirmation (replaces window.confirm)
+  const handleEndBroadcast = () => {
+    if (isEndingStreamRef.current || hasEndedStreamRef.current) return;
+    setShowEndConfirm(true);
   };
 
-  // Lifecycle initialization & teardown on modal open/close
+  const confirmEndBroadcast = async () => {
+    if (isEndingStreamRef.current || hasEndedStreamRef.current) return;
+    setIsEndingStream(true);
+    await executeEndBroadcastOnce({
+      isEndingRef: isEndingStreamRef,
+      hasEndedRef: hasEndedStreamRef,
+      onEndApi: () => api.live.endStream({ streamId }),
+      onCleanup: () => {
+        setShowEndConfirm(false);
+        sessionRunIdRef.current += 1;
+        stopLocalTracks();
+        disconnectRoom();
+      },
+      onSuccess: () => {
+        toast.success("Broadcast ended successfully. Stream has concluded.");
+        onStreamEnded();
+        onClose();
+      },
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : "Failed to end stream on server.";
+        toast.error(msg || "Failed to end stream on server.");
+      },
+    });
+    setIsEndingStream(false);
+  };
+
+  // Lifecycle initialization & idempotent teardown on modal open/close/unmount
   useEffect(() => {
     if (isOpen) {
       setDurationSeconds(0);
-      startBroadcasting();
+      void startBroadcasting();
     } else {
+      setShowEndConfirm(false);
       sessionRunIdRef.current += 1;
       stopLocalTracks();
       disconnectRoom();
@@ -898,12 +959,18 @@ export function LiveKitBroadcasterStudio({
             } ${cameraEnabled || isScreenSharing ? "opacity-100" : "opacity-0"}`}
           />
 
-          {/* Camera Off Placeholder */}
+          {/* Camera Off / Audio-Only Placeholder */}
           {!cameraEnabled && !isScreenSharing && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-zinc-900 text-zinc-400">
               <VideoOff className="h-14 w-14 opacity-50" />
-              <p className="text-sm font-semibold text-zinc-300">Camera is paused</p>
-              <p className="text-xs text-zinc-500">Viewers cannot see your video feed</p>
+              <p className="text-sm font-semibold text-zinc-300">
+                {audioOnlyMode ? "Audio-only broadcast active" : "Camera is paused"}
+              </p>
+              <p className="text-xs text-zinc-500">
+                {audioOnlyMode
+                  ? "No usable camera was found — streaming microphone audio"
+                  : "Viewers cannot see your video feed"}
+              </p>
             </div>
           )}
 
@@ -1008,6 +1075,50 @@ export function LiveKitBroadcasterStudio({
 
               <div className="pt-1 text-[10px] text-zinc-400">
                 <p>LiveKit SFU auto-adapts bitrate dynamically to viewer bandwidth.</p>
+              </div>
+            </div>
+          )}
+
+          {/* In-Studio End Broadcast Confirmation Modal */}
+          {showEndConfirm && (
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="end-broadcast-confirm-title"
+              className="absolute inset-0 z-40 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm animate-in fade-in"
+            >
+              <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl space-y-4">
+                <div className="flex items-start gap-3">
+                  <div className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-red-600/20 text-red-500">
+                    <AlertTriangle className="h-5 w-5" />
+                  </div>
+                  <div className="space-y-1">
+                    <h3 id="end-broadcast-confirm-title" className="text-sm font-bold text-white">
+                      End Live Broadcast?
+                    </h3>
+                    <p className="text-xs text-zinc-400 leading-relaxed">
+                      Are you sure you want to end this live broadcast for all viewers?
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowEndConfirm(false)}
+                    disabled={isEndingStream}
+                    className="rounded-full bg-zinc-800 px-4 py-1.5 text-xs font-semibold text-zinc-200 hover:bg-zinc-700 transition disabled:opacity-50"
+                  >
+                    Keep Streaming
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmEndBroadcast}
+                    disabled={isEndingStream}
+                    className="rounded-full bg-red-600 px-4 py-1.5 text-xs font-extrabold text-white hover:bg-red-700 transition disabled:opacity-50"
+                  >
+                    {isEndingStream ? "Concluding..." : "End Broadcast"}
+                  </button>
+                </div>
               </div>
             </div>
           )}

@@ -18,6 +18,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { SplashScreen } from "@/components/videohub/SplashScreen";
 import { AdSenseScript } from "@/components/adsense/AdSenseScript";
 import { getAdSenseConfig } from "@/lib/adsense-config";
+import { FaceTubeChatbotWidget } from "@/components/ai/FaceTubeChatbotWidget";
 
 function NotFoundComponent() {
   return (
@@ -177,6 +178,7 @@ function RootComponent() {
         <AuthProvider>
           {/* Required: nested routes render here. Removing <Outlet /> breaks all child routes. */}
           <Outlet />
+          <FaceTubeChatbotWidget />
           <Toaster position="top-center" richColors closeButton />
           <SplashScreen />
           <AdSenseScript />
