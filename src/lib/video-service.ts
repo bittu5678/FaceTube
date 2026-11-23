@@ -1090,6 +1090,128 @@ export async function recordNewVideoUpload(params: {
   return confirmedVideo;
 }
 
+/**
+ * Reconciles shared public cache and owner-scoped cache after a server-confirmed visibility update.
+ * Removes non-public, blocked, or unpaid Sponsor videos from the shared public cache immediately.
+ */
+export function syncVideoVisibilityInCaches(confirmedVideo: UploadedVideo): void {
+  const publicAll = getStoredVideos();
+  if (isPubliclyCacheableVideo(confirmedVideo)) {
+    const idx = publicAll.findIndex((v) => v.id === confirmedVideo.id);
+    if (idx >= 0) {
+      const next = [...publicAll];
+      next[idx] = confirmedVideo;
+      saveStoredVideos(next);
+    } else {
+      saveStoredVideos([confirmedVideo, ...publicAll]);
+    }
+  } else if (publicAll.some((v) => v.id === confirmedVideo.id)) {
+    saveStoredVideos(publicAll.filter((v) => v.id !== confirmedVideo.id));
+  }
+
+  const ownerUid = (confirmedVideo.userId || "").trim();
+  if (!ownerUid) return;
+  const existingOwnerCache = getOwnerStoredVideos(ownerUid);
+  if (existingOwnerCache) {
+    const idx = existingOwnerCache.findIndex((v) => v.id === confirmedVideo.id);
+    if (idx >= 0) {
+      const nextOwner = [...existingOwnerCache];
+      nextOwner[idx] = confirmedVideo;
+      saveOwnerStoredVideos(ownerUid, nextOwner);
+    } else {
+      saveOwnerStoredVideos(ownerUid, [confirmedVideo, ...existingOwnerCache]);
+    }
+  } else {
+    const session = getCurrentAuthenticatedCacheIdentity();
+    if (session && session.userId === ownerUid.toUpperCase()) {
+      saveOwnerStoredVideos(ownerUid, [confirmedVideo]);
+    }
+  }
+}
+
+/**
+ * Updates video visibility on the backend and reconciles public/owner caches ONLY after confirmed success.
+ */
+export async function updateVideoVisibility(params: {
+  videoId: string;
+  visibility: VideoVisibility;
+}): Promise<UploadedVideo> {
+  const videoId = String(params.videoId || "").trim();
+  if (!videoId) {
+    throw new Error("Video ID is required.");
+  }
+
+  const apiRes = await api.videos.updateVisibility({
+    videoId,
+    visibility: params.visibility,
+  });
+
+  if (!apiRes || !apiRes.success || !apiRes.video) {
+    throw new Error((apiRes as any)?.error || "Failed to update video visibility on the server.");
+  }
+
+  const d = apiRes.video as Record<string, any>;
+  const resolvedType = (
+    String(d["video_type"] || d["videoType"] || "free")
+      .trim()
+      .toLowerCase() === "premium"
+      ? "premium"
+      : "free"
+  ) as VideoType;
+  const channelName = String(
+    d["channel_name"] ||
+      d["channelName"] ||
+      d["creator_name"] ||
+      d["creatorName"] ||
+      "FaceTube Creator",
+  );
+  const rawLogo = d["channel_logo_url"] || d["channelLogoUrl"] || "";
+  const channelLogoUrl = rawLogo ? resolveMediaUrl(String(rawLogo)) || undefined : undefined;
+
+  const confirmedVideo: UploadedVideo = {
+    id: String(d["id"] || videoId),
+    userId: String(d["user_id"] || d["userId"] || ""),
+    creatorName: channelName,
+    channelName,
+    channelLogoUrl,
+    title: String(d["title"] || "Untitled Video"),
+    description: String(d["description"] || ""),
+    videoUrl: resolveMediaUrl(String(d["video_url"] || d["videoUrl"] || "")),
+    thumbnailUrl: resolveVideoThumbnail({
+      thumbnailUrl: d["thumbnail_url"] || d["thumbnailUrl"],
+      category: d["category"],
+    }),
+    videoType: resolvedType,
+    contentType: (d["content_type"] || d["contentType"] || "long") as ContentType,
+    category: String(d["category"] || "General"),
+    duration: String(d["duration"] || "0:00"),
+    views: Number(d["views"]) || 0,
+    likes: Number(d["likes"]) || 0,
+    paymentStatus: (d["payment_status"] ||
+      d["paymentStatus"] ||
+      (resolvedType === "premium" ? "pending" : "not_required")) as VideoPaymentStatus,
+    ...(d["payment_id"] || d["paymentId"]
+      ? { paymentId: String(d["payment_id"] || d["paymentId"]) }
+      : {}),
+    paymentAmount: Number(d["payment_amount"] ?? d["paymentAmount"]) || 0,
+    isPromoted: Boolean(d["is_promoted"] ?? d["isPromoted"] ?? false),
+    isBlocked: Boolean(d["is_blocked"] ?? d["isBlocked"] ?? false),
+    ...(d["promotion_plan"] || d["promotionPlan"]
+      ? { promotionPlan: String(d["promotion_plan"] || d["promotionPlan"]) }
+      : {}),
+    ...(d["promotion_expires_at"] || d["promotionExpiresAt"]
+      ? { promotionExpiresAt: String(d["promotion_expires_at"] || d["promotionExpiresAt"]) }
+      : {}),
+    visibility: resolveStoredVideoVisibility(d["visibility"] ?? params.visibility),
+    createdAt: String(d["created_at"] || d["createdAt"] || new Date().toISOString()),
+    updatedAt: String(d["updated_at"] || d["updatedAt"] || new Date().toISOString()),
+    isStale: false,
+  };
+
+  syncVideoVisibilityInCaches(confirmedVideo);
+  return confirmedVideo;
+}
+
 /* -------------------------------------------------------------------------- */
 /* BULK VIDEO UPLOAD SERVICE LAYER (Shorts & Long Videos)                     */
 /* -------------------------------------------------------------------------- */

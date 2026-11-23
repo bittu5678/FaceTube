@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   handleApiRequest,
   normalizeRecommendationMediaUrl,
@@ -7,6 +10,7 @@ import {
   RECOMMENDATION_MAX_MEMORY_CANDIDATES,
   RECOMMENDATION_MAX_SCAN_PAGES,
   resetAiSchemaCacheForTesting,
+  resetInMemoryStore,
 } from "./api-handler.ts";
 import { setMysqlPoolForTesting } from "./mysql.ts";
 import {
@@ -17,7 +21,47 @@ import {
 
 const USER_TOKEN = "p24-user-token";
 
-function installMockPool(pool: any): () => void {
+interface MockPoolLike {
+  query(sql: string, params?: unknown[]): Promise<unknown[]>;
+}
+
+interface RecommendationTestItem {
+  id: string;
+  videoUrl: string;
+  video_url: string;
+  thumbnailUrl: string;
+  thumbnail_url: string;
+  channelLogoUrl: string | null;
+  channel_logo_url: string | null;
+}
+
+interface RecommendationTestResponse {
+  success: boolean;
+  source?: string;
+  fallbackUsed?: boolean;
+  recommendations: RecommendationTestItem[];
+}
+
+async function readRecommendationsJson(res: Response | null): Promise<RecommendationTestResponse> {
+  if (!res) {
+    assert.fail("Expected handleApiRequest to return a Response");
+  }
+  assert.equal(res.status, 200);
+  const parsed: unknown = await res.json();
+  if (!parsed || typeof parsed !== "object") {
+    assert.fail("Expected JSON object response from recommendations endpoint");
+  }
+  const obj = parsed as Partial<RecommendationTestResponse>;
+  assert.ok(Array.isArray(obj.recommendations), "Expected recommendations array in response");
+  return {
+    success: Boolean(obj.success),
+    ...(typeof obj.source === "string" ? { source: obj.source } : {}),
+    ...(typeof obj.fallbackUsed === "boolean" ? { fallbackUsed: obj.fallbackUsed } : {}),
+    recommendations: obj.recommendations,
+  };
+}
+
+function installMockPool(pool: MockPoolLike): () => void {
   const prevHost = process.env["DB_HOST"];
   const prevName = process.env["DB_NAME"];
   const prevUser = process.env["DB_USER"];
@@ -39,7 +83,9 @@ function installMockPool(pool: any): () => void {
   };
 }
 
-function makeProdEnv(overrides?: Record<string, string | undefined>): Record<string, string | undefined> {
+function makeProdEnv(
+  overrides?: Record<string, string | undefined>,
+): Record<string, string | undefined> {
   return {
     APP_ENV: "production",
     NODE_ENV: "production",
@@ -57,7 +103,7 @@ interface CatalogQueryRecord {
 }
 
 function createPaginatedMockPool(options: {
-  videos: Array<Record<string, any>>;
+  videos: Array<Record<string, unknown>>;
   likesByUser?: Record<string, string[]>;
 }) {
   const videos = options.videos;
@@ -66,13 +112,19 @@ function createPaginatedMockPool(options: {
   const signalLookupQueries: string[] = [];
   const affinityQueries: string[] = [];
 
-  const isRowEligible = (v: Record<string, any>) => {
-    const blocked = Number(v.is_blocked || 0) !== 0;
-    const vis = String(v.visibility || "public").trim().toLowerCase() || "public";
-    const vType = String(v.video_type || "free").trim().toLowerCase();
+  const isRowEligible = (v: Record<string, unknown>) => {
+    const blocked = Number(v["is_blocked"] ?? 0) !== 0;
+    const vis =
+      String(v["visibility"] ?? "public")
+        .trim()
+        .toLowerCase() || "public";
+    const vType = String(v["video_type"] ?? "free")
+      .trim()
+      .toLowerCase();
     const pStatus =
-      String(v.payment_status || "").trim().toLowerCase() ||
-      (vType === "free" ? "not_required" : "pending");
+      String(v["payment_status"] ?? "")
+        .trim()
+        .toLowerCase() || (vType === "free" ? "not_required" : "pending");
     const payOk =
       (vType === "free" && (pStatus === "not_required" || pStatus === "paid")) ||
       (vType === "premium" && pStatus === "paid");
@@ -83,7 +135,7 @@ function createPaginatedMockPool(options: {
     catalogPageQueries,
     signalLookupQueries,
     affinityQueries,
-    async query(sql: string, params: any[] = []) {
+    async query(sql: string, params: unknown[] = []): Promise<unknown[]> {
       const normalized = sql.replace(/\s+/g, " ").trim();
 
       if (normalized.includes("FROM INFORMATION_SCHEMA.TABLES")) {
@@ -130,36 +182,47 @@ function createPaginatedMockPool(options: {
 
         // Targeted signal ID lookup: WHERE ... AND v.id IN (?, ...) LIMIT ?
         const inMatch = normalized.match(/AND v\.id IN \(([^)]+)\)/);
-        if (inMatch) {
+        const inPlaceholderList = inMatch?.[1];
+        if (inPlaceholderList) {
           signalLookupQueries.push(normalized);
-          const count = inMatch[1].split(",").length;
+          const count = inPlaceholderList.split(",").length;
           const ids = new Set(params.slice(0, count).map(String));
           const limit = Number(params[count] ?? count);
-          const matched = filtered.filter((v) => ids.has(String(v.id))).slice(0, limit);
+          const matched = filtered.filter((v) => ids.has(String(v["id"]))).slice(0, limit);
           return [matched];
         }
 
         if (normalized.includes("AND v.id <> ?")) {
-          const excluded = String(params[cursor++] || "");
-          filtered = filtered.filter((v) => String(v.id) !== excluded);
+          const excluded = String(params[cursor++] ?? "");
+          filtered = filtered.filter((v) => String(v["id"]) !== excluded);
         }
 
         // Deep-catalog affinity fallback query: AND LOWER(v.category) IN (...) ... LIMIT 50
         const catInMatch = normalized.match(/AND LOWER\(v\.category\) IN \(([^)]+)\)/);
-        if (catInMatch) {
+        const catPlaceholderList = catInMatch?.[1];
+        if (catPlaceholderList) {
           affinityQueries.push(normalized);
-          const count = catInMatch[1].split(",").length;
+          const count = catPlaceholderList.split(",").length;
           const cats = new Set(
             params.slice(cursor, cursor + count).map((c) => String(c).trim().toLowerCase()),
           );
           const sorted = [...filtered]
-            .filter((v) => cats.has(String(v.category || "").trim().toLowerCase()))
+            .filter((v) =>
+              cats.has(
+                String(v["category"] ?? "")
+                  .trim()
+                  .toLowerCase(),
+              ),
+            )
             .sort((a, b) => {
-              const promoDiff = Number(Boolean(b.is_promoted)) - Number(Boolean(a.is_promoted));
+              const promoDiff =
+                Number(Boolean(b["is_promoted"])) - Number(Boolean(a["is_promoted"]));
               if (promoDiff !== 0) return promoDiff;
-              const dateDiff = String(b.created_at || "").localeCompare(String(a.created_at || ""));
+              const dateDiff = String(b["created_at"] ?? "").localeCompare(
+                String(a["created_at"] ?? ""),
+              );
               if (dateDiff !== 0) return dateDiff;
-              return String(b.id || "").localeCompare(String(a.id || ""));
+              return String(b["id"] ?? "").localeCompare(String(a["id"] ?? ""));
             });
           return [sorted.slice(0, 50)];
         }
@@ -170,9 +233,11 @@ function createPaginatedMockPool(options: {
         catalogPageQueries.push({ sql: normalized, limit, offset });
 
         const sorted = [...filtered].sort((a, b) => {
-          const dateDiff = String(b.created_at || "").localeCompare(String(a.created_at || ""));
+          const dateDiff = String(b["created_at"] ?? "").localeCompare(
+            String(a["created_at"] ?? ""),
+          );
           if (dateDiff !== 0) return dateDiff;
-          return String(b.id || "").localeCompare(String(a.id || ""));
+          return String(b["id"] ?? "").localeCompare(String(a["id"] ?? ""));
         });
         return [sorted.slice(offset, offset + limit)];
       }
@@ -186,12 +251,14 @@ function createPaginatedMockPool(options: {
 
 function makeCatalogVideo(
   index: number,
-  overrides: Partial<Record<string, any>> = {},
-): Record<string, any> {
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   // Higher index -> older timestamp so index 0 is newest and index >= 100 sits past old LIMIT 100
   const baseTime = Date.UTC(2026, 0, 1, 0, 0, 0) + (5000 - index) * 60_000;
   const iso = new Date(baseTime).toISOString();
-  const id = `vid-${String(index).padStart(4, "0")}`;
+  const defaultId = `vid-${String(index).padStart(4, "0")}`;
+  const overrideId = overrides["id"];
+  const id = typeof overrideId === "string" && overrideId.trim() ? overrideId.trim() : defaultId;
   return {
     id,
     user_id: "FT100001",
@@ -221,7 +288,7 @@ function makeCatalogVideo(
 test("recommendations paginate beyond the first 100 videos, bound memory, preserve privacy/eligibility, and include older relevant videos", async () => {
   resetAiRateLimitsForTesting();
 
-  const videos: Array<Record<string, any>> = [];
+  const videos: Array<Record<string, unknown>> = [];
   for (let i = 0; i < 245; i++) {
     videos.push(makeCatalogVideo(i, { category: "Gaming", views: 2 }));
   }
@@ -291,7 +358,7 @@ test("recommendations paginate beyond the first 100 videos, bound memory, preser
       async create(params) {
         createCalled = true;
         try {
-          const inputText = String(params?.input || "");
+          const inputText = String(params?.["input"] ?? "");
           const match = inputText.match(
             /^<untrusted_candidate_catalog>\n([\s\S]*?)\n<\/untrusted_candidate_catalog>/m,
           );
@@ -339,8 +406,7 @@ test("recommendations paginate beyond the first 100 videos, bound memory, preser
     });
 
     const res = await handleApiRequest(req, makeProdEnv());
-    assert.equal(res.status, 200);
-    const data = await res.json();
+    const data = await readRecommendationsJson(res);
 
     assert.equal(data.success, true);
     assert.equal(createCalled, true, `createError=${String(createError)}`);
@@ -364,7 +430,7 @@ test("recommendations paginate beyond the first 100 videos, bound memory, preser
     assert.equal(observedOlderGemInShortlist, true);
     assert.equal(observedPrivateLeak, false);
 
-    const recIds = data.recommendations.map((r: any) => r.id);
+    const recIds = data.recommendations.map((r) => r.id);
     assert.equal(recIds.includes("vid-older-gem"), true);
     assert.equal(recIds.includes("vid-watched-old"), false);
     assert.equal(recIds.includes("vid-private-science"), false);
@@ -372,9 +438,13 @@ test("recommendations paginate beyond the first 100 videos, bound memory, preser
     assert.equal(recIds.includes("vid-unpaid-premium"), false);
 
     // Relative URLs on vid-older-gem normalized to configured production API origin
-    const olderGem = data.recommendations.find((r: any) => r.id === "vid-older-gem");
+    const olderGem = data.recommendations.find((r) => r.id === "vid-older-gem");
+    assert.ok(olderGem, "Expected vid-older-gem in recommendations");
     assert.equal(olderGem.videoUrl, "https://api.facetube.online/uploads/videos/vid-older-gem.mp4");
-    assert.equal(olderGem.video_url, "https://api.facetube.online/uploads/videos/vid-older-gem.mp4");
+    assert.equal(
+      olderGem.video_url,
+      "https://api.facetube.online/uploads/videos/vid-older-gem.mp4",
+    );
     assert.equal(
       olderGem.thumbnailUrl,
       "https://api.facetube.online/uploads/thumbs/vid-older-gem.jpg",
@@ -384,7 +454,10 @@ test("recommendations paginate beyond the first 100 videos, bound memory, preser
       "https://api.facetube.online/uploads/thumbs/vid-older-gem.jpg",
     );
     assert.equal(olderGem.channelLogoUrl, "https://api.facetube.online/uploads/logos/creator.png");
-    assert.equal(olderGem.channel_logo_url, "https://api.facetube.online/uploads/logos/creator.png");
+    assert.equal(
+      olderGem.channel_logo_url,
+      "https://api.facetube.online/uploads/logos/creator.png",
+    );
   } finally {
     setGeminiClientForTesting(null);
     restorePool();
@@ -394,7 +467,7 @@ test("recommendations paginate beyond the first 100 videos, bound memory, preser
 test("deterministic fallback surfaces older catalog videos past 100 rows when Gemini is unavailable", async () => {
   resetAiRateLimitsForTesting();
 
-  const videos: Array<Record<string, any>> = [];
+  const videos: Array<Record<string, unknown>> = [];
   for (let i = 0; i < 160; i++) {
     videos.push(makeCatalogVideo(i, { category: "Travel", views: 10 }));
   }
@@ -424,14 +497,13 @@ test("deterministic fallback surfaces older catalog videos past 100 rows when Ge
     });
 
     const res = await handleApiRequest(req, makeProdEnv({ GEMINI_API_KEY: "" }));
-    assert.equal(res.status, 200);
-    const data = await res.json();
+    const data = await readRecommendationsJson(res);
 
     assert.equal(data.success, true);
     assert.equal(data.source, "fallback");
     assert.equal(data.fallbackUsed, true);
     assert.equal(pool.catalogPageQueries.length, 2);
-    assert.equal(data.recommendations[0].id, "vid-older-fallback");
+    assert.equal(data.recommendations[0]?.id, "vid-older-fallback");
   } finally {
     restorePool();
   }
@@ -441,7 +513,7 @@ test("deep catalogs exceeding scan ceiling cap pagination at max pages and invok
   resetAiRateLimitsForTesting();
 
   const totalRows = RECOMMENDATION_MAX_SCAN_PAGES * RECOMMENDATION_CATALOG_PAGE_SIZE + 120;
-  const videos: Array<Record<string, any>> = [];
+  const videos: Array<Record<string, unknown>> = [];
   for (let i = 0; i < totalRows; i++) {
     videos.push(makeCatalogVideo(i, { category: "Music", views: 10 }));
   }
@@ -472,15 +544,14 @@ test("deep catalogs exceeding scan ceiling cap pagination at max pages and invok
     });
 
     const res = await handleApiRequest(req, makeProdEnv({ GEMINI_API_KEY: "" }));
-    assert.equal(res.status, 200);
-    const data = await res.json();
+    const data = await readRecommendationsJson(res);
 
     assert.equal(data.success, true);
     assert.equal(pool.catalogPageQueries.length, RECOMMENDATION_MAX_SCAN_PAGES);
     assert.equal(pool.affinityQueries.length, 1);
     assert.ok(RECOMMENDATION_MAX_MEMORY_CANDIDATES <= 120);
     assert.equal(
-      data.recommendations.some((r: any) => r.id === "vid-deep-affinity"),
+      data.recommendations.some((r) => r.id === "vid-deep-affinity"),
       true,
     );
   } finally {
@@ -498,14 +569,26 @@ test("normalizeRecommendationMediaUrl converts relative paths, preserves trusted
     "https://api.facetube.online/uploads/videos/demo.mp4",
   );
   assert.equal(
-    normalizeRecommendationMediaUrl("uploads/thumbs/thumb.jpg", "thumbnail", prodReq, prodEnv, true),
+    normalizeRecommendationMediaUrl(
+      "uploads/thumbs/thumb.jpg",
+      "thumbnail",
+      prodReq,
+      prodEnv,
+      true,
+    ),
     "https://api.facetube.online/uploads/thumbs/thumb.jpg",
   );
 
   // 2. Respects configured VITE_API_BASE_URL / VITE_MEDIA_BASE_URL / FACETUBE_API_BASE_URL without inventing origins
   const customEnv = makeProdEnv({ VITE_API_BASE_URL: "https://media.example.org/api" });
   assert.equal(
-    normalizeRecommendationMediaUrl("/uploads/videos/custom.mp4", "video", prodReq, customEnv, true),
+    normalizeRecommendationMediaUrl(
+      "/uploads/videos/custom.mp4",
+      "video",
+      prodReq,
+      customEnv,
+      true,
+    ),
     "https://media.example.org/uploads/videos/custom.mp4",
   );
   assert.equal(
@@ -621,16 +704,17 @@ test("recommendations endpoint sanitizes unsafe/untrusted media URLs while keepi
       method: "GET",
     });
     const res = await handleApiRequest(req, makeProdEnv({ GEMINI_API_KEY: "" }));
-    assert.equal(res.status, 200);
-    const data = await res.json();
+    const data = await readRecommendationsJson(res);
     assert.equal(data.recommendations.length, 2);
 
-    const safe = data.recommendations.find((r: any) => r.id === "vid-safe-relative");
+    const safe = data.recommendations.find((r) => r.id === "vid-safe-relative");
+    assert.ok(safe, "Expected vid-safe-relative in recommendations");
     assert.equal(safe.videoUrl, "https://api.facetube.online/uploads/videos/safe.mp4");
     assert.equal(safe.thumbnailUrl, "https://api.facetube.online/uploads/thumbs/safe.jpg");
     assert.equal(safe.channelLogoUrl, "https://api.facetube.online/uploads/logos/safe.png");
 
-    const unsafe = data.recommendations.find((r: any) => r.id === "vid-unsafe-media");
+    const unsafe = data.recommendations.find((r) => r.id === "vid-unsafe-media");
+    assert.ok(unsafe, "Expected vid-unsafe-media in recommendations");
     assert.equal(unsafe.videoUrl, "");
     assert.equal(unsafe.video_url, "");
     assert.equal(unsafe.thumbnailUrl, "");
@@ -639,5 +723,110 @@ test("recommendations endpoint sanitizes unsafe/untrusted media URLs while keepi
     assert.equal(unsafe.channel_logo_url, null);
   } finally {
     restorePool();
+  }
+});
+
+test("local JSON fallback enforces fail-closed AI visibility and blocks missing, null, empty, unknown, unlisted, and private videos", async () => {
+  resetAiRateLimitsForTesting();
+  resetInMemoryStore();
+
+  const prevDataDir = process.env["FACETUBE_DATA_DIR"];
+  const prevDbHost = process.env["DB_HOST"];
+  const prevMysqlHost = process.env["MYSQL_HOST"];
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "facetube-p24-local-"));
+
+  const baseDate = "2026-01-15T12:00:00.000Z";
+  const makeLocalStoreVideo = (id: string, visibility: unknown) => ({
+    id,
+    user_id: "FT100001",
+    creator_name: "Local Creator",
+    title: `Video ${id}`,
+    description: "Local fallback visibility check",
+    video_url: `/uploads/videos/${id}.mp4`,
+    thumbnail_url: `/uploads/thumbs/${id}.jpg`,
+    video_type: "free",
+    content_type: "long",
+    category: "Coding",
+    duration: "03:00",
+    views: 500,
+    likes: 40,
+    payment_status: "not_required",
+    is_promoted: false,
+    ...(visibility !== Symbol.for("omit") ? { visibility } : {}),
+    created_at: baseDate,
+    updated_at: baseDate,
+  });
+
+  try {
+    const storePayload = {
+      users: [],
+      sessions: {},
+      videos: [
+        makeLocalStoreVideo("vid-local-public", "public"),
+        makeLocalStoreVideo("vid-local-public-ws", "  PUBLIC  "),
+        makeLocalStoreVideo("vid-local-private", "private"),
+        makeLocalStoreVideo("vid-local-unlisted", "unlisted"),
+        makeLocalStoreVideo("vid-local-empty", ""),
+        makeLocalStoreVideo("vid-local-whitespace", "   "),
+        makeLocalStoreVideo("vid-local-null", null),
+        makeLocalStoreVideo("vid-local-unknown", "internal_draft"),
+        makeLocalStoreVideo("vid-local-missing", Symbol.for("omit")),
+      ],
+      comments: [],
+      images: [],
+      payoutBatches: [],
+      personalKyc: {},
+      bankKyc: {},
+      kycAuditLog: [],
+      certificates: {},
+      wallets: {},
+      walletTransactions: [],
+      categories: [],
+      adsenseStatements: [],
+      admobStatements: [],
+      affiliateNetworks: [],
+      affiliateClicks: [],
+      affiliateConversions: [],
+      affiliateAuditLog: [],
+      liveStreams: [],
+      liveChatMessages: [],
+      subscriberPlans: [],
+      userSubscriptions: [],
+      paymentOrders: [],
+      subscriptionRefundRequests: [],
+      channelSubscriptions: [],
+    };
+
+    await fs.promises.writeFile(
+      path.join(tmpDir, "facetube_store.json"),
+      JSON.stringify(storePayload, null, 2),
+      "utf-8",
+    );
+
+    process.env["FACETUBE_DATA_DIR"] = tmpDir;
+    delete process.env["DB_HOST"];
+    delete process.env["MYSQL_HOST"];
+    setMysqlPoolForTesting(null);
+    resetInMemoryStore();
+
+    const req = new Request("http://127.0.0.1:3000/api/ai/recommendations?limit=24", {
+      method: "GET",
+    });
+    const res = await handleApiRequest(req, { NODE_ENV: "development" });
+    const data = await readRecommendationsJson(res);
+
+    assert.equal(data.success, true);
+    const ids = data.recommendations.map((r) => r.id).sort();
+    assert.deepEqual(ids, ["vid-local-public", "vid-local-public-ws"]);
+  } finally {
+    resetInMemoryStore();
+    if (prevDataDir === undefined) delete process.env["FACETUBE_DATA_DIR"];
+    else process.env["FACETUBE_DATA_DIR"] = prevDataDir;
+    if (prevDbHost === undefined) delete process.env["DB_HOST"];
+    else process.env["DB_HOST"] = prevDbHost;
+    if (prevMysqlHost === undefined) delete process.env["MYSQL_HOST"];
+    else process.env["MYSQL_HOST"] = prevMysqlHost;
+    await fs.promises.rm(tmpDir, { recursive: true, force: true });
+    resetAiRateLimitsForTesting();
   }
 });

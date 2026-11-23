@@ -201,12 +201,12 @@ try {
         if ($isAuthAdmin && $requestedUserId === '') {
             $userId = $existingOwner;
         }
-        // Preserve existing visibility when update omits visibility
+        // Preserve existing visibility when update omits visibility (fail-closed to private on corrupted/unrecognized value)
         if (!$hasExplicitVisibility) {
             $existingVisibility = strtolower(trim((string)($existingVideo['visibility'] ?? '')));
             $visibility = in_array($existingVisibility, ['public', 'unlisted', 'private'], true)
                 ? $existingVisibility
-                : 'public';
+                : 'private';
         }
     }
 

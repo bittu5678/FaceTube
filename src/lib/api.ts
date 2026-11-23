@@ -490,6 +490,16 @@ export const api = {
         },
       );
     },
+
+    updateVisibility: async (params: {
+      videoId: string;
+      visibility: "public" | "unlisted" | "private";
+    }) => {
+      return apiFetch<{ success: boolean; video: any; error?: string }>("/videos/visibility.php", {
+        method: "POST",
+        body: JSON.stringify(params),
+      });
+    },
   },
 
   // Comments

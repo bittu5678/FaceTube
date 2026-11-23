@@ -525,7 +525,10 @@ function isBlockedLocalOrPrivateHost(hostname: string): boolean {
   return false;
 }
 
-function parseSafeConfiguredOrigin(rawCandidate: string, allowInsecureHttp: boolean): string | null {
+function parseSafeConfiguredOrigin(
+  rawCandidate: string,
+  allowInsecureHttp: boolean,
+): string | null {
   const trimmed = String(rawCandidate || "").trim();
   if (!trimmed) return null;
   try {
@@ -8090,7 +8093,7 @@ async function dispatchApiRequest(
         const norm = String(raw ?? "")
           .trim()
           .toLowerCase();
-        return norm === "private" || norm === "unlisted" || norm === "public" ? norm : "public";
+        return norm === "private" || norm === "unlisted" || norm === "public" ? norm : "private";
       };
       let visibility: "public" | "unlisted" | "private" = "public";
       if (hasExplicitVisibility) {
@@ -9047,6 +9050,295 @@ async function dispatchApiRequest(
         },
       });
     }
+  }
+
+  if (route === "videos/visibility") {
+    if (method !== "POST") {
+      return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
+    }
+
+    const readEnv = (key: string) => readEnvValue(env, key);
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+    const pool = getMysqlPool();
+
+    if (isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, video visibility updates require a persistent database connection.",
+        },
+        503,
+      );
+    }
+
+    let authUser: AuthUser | null = null;
+    try {
+      authUser = await getAuthUserFromRequest(request, store, pool, env);
+    } catch (authErr: any) {
+      if (authErr instanceof AuthDatabaseError) {
+        return jsonResponse({ success: false, error: authErr.message }, authErr.status);
+      }
+      throw authErr;
+    }
+
+    const auth = requireAuth(authUser);
+    if (!auth.success) {
+      return auth.response;
+    }
+
+    const authUserId = String(auth.user.user_id || "").trim();
+    const authInternalId = String(auth.user.id || "").trim();
+    const isAuthAdmin =
+      String(auth.user.role || "")
+        .trim()
+        .toLowerCase() === "admin";
+
+    const body = await request.json().catch(() => ({}));
+    const videoId = String(body.videoId || body.video_id || body.id || "").trim();
+    const normalizedVisibility = String(body.visibility ?? "")
+      .trim()
+      .toLowerCase();
+
+    if (!videoId) {
+      return jsonResponse({ success: false, error: "Video ID is required." }, 400);
+    }
+    if (
+      normalizedVisibility !== "public" &&
+      normalizedVisibility !== "unlisted" &&
+      normalizedVisibility !== "private"
+    ) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Invalid visibility value. Allowed values: public, unlisted, private.",
+        },
+        400,
+      );
+    }
+    const targetVisibility: "public" | "unlisted" | "private" = normalizedVisibility;
+
+    if (pool) {
+      const conn = await pool.getConnection();
+      try {
+        await conn.beginTransaction();
+
+        const [vidRows]: any = await conn.query(
+          `SELECT * FROM uploaded_videos WHERE id = ? LIMIT 1 FOR UPDATE`,
+          [videoId],
+        );
+        const row = vidRows?.[0];
+        if (!row) {
+          await conn.rollback();
+          return jsonResponse({ success: false, error: "Video not found." }, 404);
+        }
+
+        const rowOwner = String(row.user_id || "").trim();
+        const isOwner =
+          rowOwner !== "" &&
+          ((authUserId !== "" && rowOwner.toUpperCase() === authUserId.toUpperCase()) ||
+            (authInternalId !== "" && rowOwner.toUpperCase() === authInternalId.toUpperCase()));
+
+        if (!isOwner && !isAuthAdmin) {
+          await conn.rollback();
+          return jsonResponse(
+            {
+              success: false,
+              error: "Unauthorized: You can only update visibility for your own videos.",
+            },
+            403,
+          );
+        }
+
+        const isBlocked = Boolean(row.is_blocked);
+        if (isBlocked) {
+          if (!isAuthAdmin) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  "Blocked videos cannot have their visibility changed or be published by their owners.",
+              },
+              403,
+            );
+          }
+          if (targetVisibility === "public") {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  "Blocked videos must be unblocked via the Admin Moderation workflow before publishing.",
+              },
+              409,
+            );
+          }
+        }
+
+        await conn.query(
+          `UPDATE uploaded_videos SET visibility = ?, updated_at = NOW() WHERE id = ?`,
+          [targetVisibility, videoId],
+        );
+        await conn.commit();
+
+        const nowIso = new Date().toISOString();
+        const vType =
+          String(row.video_type || "free")
+            .trim()
+            .toLowerCase() === "premium"
+            ? "premium"
+            : "free";
+        const pStatus =
+          String(row.payment_status || "")
+            .trim()
+            .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+
+        return jsonResponse({
+          success: true,
+          video: {
+            id: String(row.id),
+            userId: String(row.user_id || ""),
+            user_id: String(row.user_id || ""),
+            creatorName: String(row.creator_name || "FaceTube Creator"),
+            creator_name: String(row.creator_name || "FaceTube Creator"),
+            title: String(row.title || "Untitled Video"),
+            description: String(row.description || ""),
+            videoUrl: String(row.video_url || ""),
+            video_url: String(row.video_url || ""),
+            thumbnailUrl: String(row.thumbnail_url || ""),
+            thumbnail_url: String(row.thumbnail_url || ""),
+            videoType: vType,
+            video_type: vType,
+            contentType: String(row.content_type || "long"),
+            content_type: String(row.content_type || "long"),
+            category: String(row.category || "General"),
+            duration: String(row.duration || "0:00"),
+            visibility: targetVisibility,
+            views: Number(row.views || 0),
+            likes: Number(row.likes || 0),
+            paymentStatus: pStatus,
+            payment_status: pStatus,
+            paymentId: row.payment_id ?? null,
+            payment_id: row.payment_id ?? null,
+            paymentAmount: Number(row.payment_amount || 0),
+            payment_amount: Number(row.payment_amount || 0),
+            isPromoted: Boolean(row.is_promoted),
+            is_promoted: Boolean(row.is_promoted),
+            promotionPlan: row.promotion_plan ?? null,
+            promotion_plan: row.promotion_plan ?? null,
+            promotionExpiresAt: row.promotion_expires_at ?? null,
+            promotion_expires_at: row.promotion_expires_at ?? null,
+            isBlocked,
+            is_blocked: isBlocked,
+            blockReason: row.block_reason ?? null,
+            block_reason: row.block_reason ?? null,
+            createdAt: row.created_at || nowIso,
+            created_at: row.created_at || nowIso,
+            updatedAt: nowIso,
+            updated_at: nowIso,
+          },
+        });
+      } catch (dbErr: any) {
+        try {
+          await conn.rollback();
+        } catch (_rbErr) {
+          // Ignore rollback warning
+        }
+        console.warn("MySQL videos/visibility update warning:", dbErr?.message);
+        return jsonResponse(
+          { success: false, error: "Database error during video visibility update." },
+          503,
+        );
+      } finally {
+        conn.release();
+      }
+    }
+
+    // Non-production JSON store path
+    const idx = store.videos.findIndex((v) => v.id === videoId);
+    if (idx < 0) {
+      return jsonResponse({ success: false, error: "Video not found." }, 404);
+    }
+    const existing = store.videos[idx]!;
+    const existingOwner = String(existing.user_id || "").trim();
+    const isOwner =
+      existingOwner !== "" &&
+      ((authUserId !== "" && existingOwner.toUpperCase() === authUserId.toUpperCase()) ||
+        (authInternalId !== "" && existingOwner.toUpperCase() === authInternalId.toUpperCase()));
+
+    if (!isOwner && !isAuthAdmin) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Unauthorized: You can only update visibility for your own videos.",
+        },
+        403,
+      );
+    }
+
+    const isBlocked = Boolean(existing.is_blocked);
+    if (isBlocked) {
+      if (!isAuthAdmin) {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Blocked videos cannot have their visibility changed or be published by their owners.",
+          },
+          403,
+        );
+      }
+      if (targetVisibility === "public") {
+        return jsonResponse(
+          {
+            success: false,
+            error:
+              "Blocked videos must be unblocked via the Admin Moderation workflow before publishing.",
+          },
+          409,
+        );
+      }
+    }
+
+    const nowIso = new Date().toISOString();
+    existing.visibility = targetVisibility;
+    existing.updated_at = nowIso;
+    saveStore(store, env);
+
+    const vType =
+      String(existing.video_type || "free")
+        .trim()
+        .toLowerCase() === "premium"
+        ? "premium"
+        : "free";
+    const pStatus =
+      String(existing.payment_status || "")
+        .trim()
+        .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+
+    return jsonResponse({
+      success: true,
+      video: {
+        ...existing,
+        userId: existing.user_id,
+        creatorName: existing.creator_name,
+        videoUrl: existing.video_url,
+        thumbnailUrl: existing.thumbnail_url,
+        videoType: vType,
+        contentType: existing.content_type,
+        paymentStatus: pStatus,
+        payment_status: pStatus,
+        paymentId: existing.payment_id,
+        paymentAmount: existing.payment_amount,
+        isPromoted: Boolean(existing.is_promoted),
+        isBlocked,
+        is_blocked: isBlocked,
+        visibility: targetVisibility,
+        createdAt: existing.created_at,
+        updatedAt: nowIso,
+      },
+    });
   }
 
   if (route === "videos/promote") {
@@ -11587,17 +11879,114 @@ async function dispatchApiRequest(
 
   // 14. Admin Video Moderation (Shorts & Long Videos)
   if (route === "admin/videos") {
+    const readEnv = (key: string) => readEnvValue(env, key);
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
     const pool = getMysqlPool();
-    const authUser = await getAuthUserFromRequest(request, store, pool);
-    if (!authUser || authUser.role !== "admin") {
+
+    if (isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, persistent database storage is required.",
+        },
+        503,
+      );
+    }
+
+    let authUser: AuthUser | null = null;
+    try {
+      authUser = await getAuthUserFromRequest(request, store, pool, env);
+    } catch (authErr: any) {
+      if (authErr instanceof AuthDatabaseError) {
+        return jsonResponse({ success: false, error: authErr.message }, authErr.status);
+      }
+      throw authErr;
+    }
+
+    if (!authUser) {
+      return jsonResponse({ success: false, error: "Authentication required" }, 401);
+    }
+
+    if (
+      String(authUser.role || "")
+        .trim()
+        .toLowerCase() !== "admin"
+    ) {
       return jsonResponse({ success: false, error: "Admin authorization required" }, 403);
     }
 
     if (method === "GET") {
-      const list = store.videos.map((v) => ({
-        ...v,
-        is_blocked: Boolean(v.is_blocked),
-      }));
+      if (pool) {
+        try {
+          const [rows] = (await pool.query(
+            `SELECT id, user_id, creator_name, title, description, video_url, thumbnail_url,
+                    video_type, content_type, category, duration, views, likes,
+                    payment_status, visibility, is_promoted,
+                    COALESCE(is_blocked, 0) AS is_blocked, block_reason, blocked_at, created_at, updated_at
+             FROM uploaded_videos
+             ORDER BY created_at DESC`,
+          )) as any;
+
+          const list = (Array.isArray(rows) ? rows : []).map((v: any) => {
+            const vType =
+              String(v.video_type || "free")
+                .trim()
+                .toLowerCase() === "premium"
+                ? "premium"
+                : "free";
+            const pStatus =
+              String(v.payment_status || "")
+                .trim()
+                .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+            return {
+              ...v,
+              visibility: resolveStoredVisibilityFailClosed(v.visibility),
+              payment_status: pStatus,
+              is_blocked: Boolean(v.is_blocked),
+            };
+          });
+
+          return jsonResponse({
+            success: true,
+            videos: list,
+            counts: {
+              total: list.length,
+              blocked: list.filter((v) => v.is_blocked).length,
+              shorts: list.filter((v) => v.content_type === "short").length,
+              long: list.filter((v) => v.content_type === "long").length,
+            },
+          });
+        } catch (dbErr: any) {
+          console.warn("MySQL admin/videos GET warning:", dbErr?.message);
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database error while listing admin videos.",
+            },
+            503,
+          );
+        }
+      }
+
+      const list = store.videos.map((v) => {
+        const vType =
+          String(v.video_type || "free")
+            .trim()
+            .toLowerCase() === "premium"
+            ? "premium"
+            : "free";
+        const pStatus =
+          String(v.payment_status || "")
+            .trim()
+            .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+        return {
+          ...v,
+          visibility: resolveStoredVisibilityFailClosed(v.visibility),
+          payment_status: pStatus,
+          is_blocked: Boolean(v.is_blocked),
+        };
+      });
       return jsonResponse({
         success: true,
         videos: list,
@@ -11611,10 +12000,40 @@ async function dispatchApiRequest(
     }
 
     if (method === "POST") {
-      const body = await request.json();
-      const videoId = body.videoId || body.video_id;
+      const body = await request.json().catch(() => ({}));
+      const videoId = String(body.videoId || body.video_id || "").trim();
       const isBlocked = Boolean(body.isBlocked ?? body.is_blocked);
-      const reason = body.reason || body.block_reason || "Content moderation policy violation";
+      const reason = String(
+        body.reason || body.block_reason || "Content moderation policy violation",
+      ).trim();
+
+      if (!videoId) {
+        return jsonResponse({ success: false, error: "Video ID is required" }, 400);
+      }
+
+      if (pool) {
+        try {
+          await pool.query(
+            "UPDATE uploaded_videos SET is_blocked = ?, block_reason = ?, blocked_at = ? WHERE id = ?",
+            [isBlocked ? 1 : 0, isBlocked ? reason : null, isBlocked ? new Date() : null, videoId],
+          );
+          return jsonResponse({
+            success: true,
+            message: isBlocked ? "Video has been blocked" : "Video has been unblocked",
+            video_id: videoId,
+            is_blocked: isBlocked,
+          });
+        } catch (dbErr: any) {
+          console.warn("MySQL admin/videos POST warning:", dbErr?.message);
+          return jsonResponse(
+            {
+              success: false,
+              error: "Database error while updating video moderation status.",
+            },
+            503,
+          );
+        }
+      }
 
       const vid = store.videos.find((v) => v.id === videoId);
       if (vid) {
@@ -11623,14 +12042,6 @@ async function dispatchApiRequest(
         vid.blocked_at = isBlocked ? new Date().toISOString() : undefined;
         saveStore(store, env);
       }
-      if (pool) {
-        await pool
-          .query(
-            "UPDATE uploaded_videos SET is_blocked = ?, block_reason = ?, blocked_at = ? WHERE id = ?",
-            [isBlocked ? 1 : 0, isBlocked ? reason : null, isBlocked ? new Date() : null, videoId],
-          )
-          .catch(() => {});
-      }
       return jsonResponse({
         success: true,
         message: isBlocked ? "Video has been blocked" : "Video has been unblocked",
@@ -11638,6 +12049,8 @@ async function dispatchApiRequest(
         is_blocked: isBlocked,
       });
     }
+
+    return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
   }
 
   // 14b. Admin Country-wise Video Counts Analytics
@@ -23597,7 +24010,10 @@ async function dispatchApiRequest(
       };
 
       if (isActivityDateFiltered) {
-        filteredUsers = filteredUsers.filter((u) => getUserMetrics(u.user_id).hasActivity);
+        filteredUsers = filteredUsers.filter((u) => {
+          const metrics = getUserMetrics(u.user_id);
+          return "hasActivity" in metrics && Boolean(metrics.hasActivity);
+        });
       } else {
         if (startMs !== null) {
           filteredUsers = filteredUsers.filter(
@@ -24666,7 +25082,10 @@ async function dispatchApiRequest(
 
         const eligibleById = new Map<string, RecommendationCandidateVideo>();
         const likedIdSet = new Set<string>();
-        const topPoolMap = new Map<string, { video: RecommendationCandidateVideo; score: number }>();
+        const topPoolMap = new Map<
+          string,
+          { video: RecommendationCandidateVideo; score: number }
+        >();
 
         const mapMysqlRowToCandidate = (r: any): RecommendationCandidateVideo => {
           const active = isAdPromotionActive({
@@ -24700,7 +25119,9 @@ async function dispatchApiRequest(
           };
         };
 
-        const mapStoreVideoToCandidate = (v: ServerStore["videos"][number]): RecommendationCandidateVideo => {
+        const mapStoreVideoToCandidate = (
+          v: ServerStore["videos"][number],
+        ): RecommendationCandidateVideo => {
           const vType = String(v.video_type || "free")
             .trim()
             .toLowerCase();
@@ -24750,7 +25171,10 @@ async function dispatchApiRequest(
           const creator = (video.channelName || video.creatorName || "").trim().toLowerCase();
           if (watchedIdSet.has(video.id)) {
             if (cat) {
-              signalMaps.watchedCategories.set(cat, (signalMaps.watchedCategories.get(cat) || 0) + 1);
+              signalMaps.watchedCategories.set(
+                cat,
+                (signalMaps.watchedCategories.get(cat) || 0) + 1,
+              );
             }
             if (creator) signalMaps.watchedCreators.add(creator);
           }
@@ -24917,7 +25341,7 @@ async function dispatchApiRequest(
           const eligibleStoreCandidates: RecommendationCandidateVideo[] = [];
           for (const v of store.videos) {
             if (v.is_blocked) continue;
-            if (resolveStoredVisibilityFailClosed(v.visibility) !== "public") continue;
+            if (resolveAiSummaryVisibilityFailClosed(v.visibility) !== "public") continue;
             const vType = String(v.video_type || "free")
               .trim()
               .toLowerCase();

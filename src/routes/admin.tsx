@@ -44,6 +44,7 @@ import {
   AlertCircle,
   Shield,
   Smartphone,
+  Link2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Navbar } from "@/components/videohub/Navbar";
@@ -52,6 +53,11 @@ import { BottomNav } from "@/components/videohub/BottomNav";
 import { useAuth } from "@/lib/auth-context";
 import { allVideos } from "@/data/videos";
 import { api } from "@/lib/api";
+import {
+  resolveStoredVideoVisibility,
+  updateVideoVisibility,
+  type VideoVisibility,
+} from "@/lib/video-service";
 import { AdminKycReviewTab } from "@/components/admin/AdminKycReviewTab";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { getCountryName, UNKNOWN_COUNTRY_CODE } from "@/lib/countries";
@@ -94,6 +100,8 @@ interface ModerationVideo {
   views?: string | number;
   thumbnail_url?: string;
   thumb?: string;
+  visibility?: "public" | "unlisted" | "private";
+  payment_status?: string;
   is_blocked?: boolean | number;
   block_reason?: string;
   ad_earnings?: number;
@@ -170,6 +178,7 @@ function AdminPage() {
   const [videoFilter, setVideoFilter] = useState<"all" | "shorts" | "long" | "blocked">("all");
   const [videoSearch, setVideoSearch] = useState("");
   const [moderatingId, setModeratingId] = useState<string | null>(null);
+  const [updatingVisibilityId, setUpdatingVisibilityId] = useState<string | null>(null);
   const [videoCounts, setVideoCounts] = useState({ total: 0, blocked: 0, shorts: 0, long: 0 });
 
   // Country-wise Video Counts Analytics
@@ -1248,6 +1257,41 @@ function AdminPage() {
     }
   };
 
+  // Point 6: Individual Video Visibility Review & Publishing
+  const handleAdminVisibilityChange = async (
+    video: ModerationVideo,
+    nextVisibility: VideoVisibility,
+  ) => {
+    const isCurrentlyBlocked = Boolean(video.is_blocked);
+    if (isCurrentlyBlocked && nextVisibility === "public") {
+      toast.error("Blocked videos must be unblocked first before publishing.");
+      return;
+    }
+
+    const currentVisibility = resolveStoredVideoVisibility(video.visibility);
+    if (currentVisibility === nextVisibility) return;
+
+    setUpdatingVisibilityId(video.id);
+    try {
+      const updated = await updateVideoVisibility({
+        videoId: video.id,
+        visibility: nextVisibility,
+      });
+      const confirmedVis = resolveStoredVideoVisibility(updated.visibility);
+      setVideos((prev) =>
+        prev.map((item) => (item.id === video.id ? { ...item, visibility: confirmedVis } : item)),
+      );
+      toast.success(
+        `Visibility updated to ${confirmedVis.toUpperCase()} for "${video.title.slice(0, 24)}".`,
+      );
+      await Promise.all([loadModerationVideos(), loadCountryVideoCounts()]);
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to update video visibility.");
+    } finally {
+      setUpdatingVisibilityId(null);
+    }
+  };
+
   // Requirement 8: Bulk Payout Execution
   const toggleSelectAllPayouts = () => {
     if (selectedPayoutIds.length === payoutList.length) {
@@ -2011,6 +2055,7 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                       <th className="pb-3 font-semibold">Creator</th>
                       <th className="pb-3 font-semibold">Ad Earnings</th>
                       <th className="pb-3 font-semibold">Status</th>
+                      <th className="pb-3 font-semibold">Visibility</th>
                       <th className="pb-3 pr-2 text-right font-semibold">Moderation Action</th>
                     </tr>
                   </thead>
@@ -2020,6 +2065,11 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                       const isShort =
                         vid.content_type === "short" ||
                         (vid.duration && vid.duration.startsWith("0:"));
+                      const currentVisibility = resolveStoredVideoVisibility(vid.visibility);
+                      const isUnpaidSponsor =
+                        String(vid.video_type || "").toLowerCase() === "premium" &&
+                        String(vid.payment_status || "").toLowerCase() !== "paid";
+                      const isUpdatingVis = updatingVisibilityId === vid.id;
                       const thumb =
                         vid.thumbnail_url ||
                         vid.thumb ||
@@ -2081,6 +2131,61 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                                 Active
                               </span>
                             )}
+                          </td>
+                          <td className="py-3">
+                            <div className="flex flex-col gap-1.5">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {currentVisibility === "public" ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[11px] font-bold text-emerald-400">
+                                    <Globe className="h-3 w-3" />
+                                    Public
+                                  </span>
+                                ) : currentVisibility === "unlisted" ? (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] font-bold text-amber-300">
+                                    <Link2 className="h-3 w-3" />
+                                    Unlisted
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 rounded-full bg-zinc-500/15 px-2 py-0.5 text-[11px] font-bold text-zinc-300">
+                                    <Lock className="h-3 w-3" />
+                                    Private
+                                  </span>
+                                )}
+                                {isUnpaidSponsor && (
+                                  <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
+                                    Unpaid Sponsor
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <select
+                                  aria-label={`Admin visibility for ${vid.title}`}
+                                  value={currentVisibility}
+                                  disabled={isBlocked || isUpdatingVis}
+                                  onChange={(e) =>
+                                    handleAdminVisibilityChange(
+                                      vid,
+                                      e.target.value as VideoVisibility,
+                                    )
+                                  }
+                                  className="rounded-lg border border-border bg-secondary px-2 py-1 text-[11px] font-semibold text-foreground outline-none transition focus:border-brand disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  <option value="public">Public</option>
+                                  <option value="unlisted">Unlisted</option>
+                                  <option value="private">Private</option>
+                                </select>
+                                {currentVisibility !== "public" && !isBlocked && (
+                                  <button
+                                    type="button"
+                                    disabled={isUpdatingVis}
+                                    onClick={() => handleAdminVisibilityChange(vid, "public")}
+                                    className="rounded-lg bg-emerald-600/20 border border-emerald-500/40 px-2 py-1 text-[11px] font-bold text-emerald-300 hover:bg-emerald-600 hover:text-white transition disabled:opacity-50"
+                                  >
+                                    {isUpdatingVis ? "Saving..." : "Publish"}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
                           </td>
                           <td className="py-3 pr-2 text-right">
                             <button

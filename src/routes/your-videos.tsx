@@ -21,7 +21,12 @@ import {
   CreditCard,
   Megaphone,
   AlertCircle,
+  Globe,
+  Link2,
+  Lock,
+  Ban,
 } from "lucide-react";
+import { toast } from "sonner";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
@@ -31,8 +36,11 @@ import {
   fetchUploadedVideos,
   calculateUserVideoCounts,
   resolveAuthenticatedUserId,
+  resolveStoredVideoVisibility,
+  updateVideoVisibility,
   type UploadedVideo,
   type VideoCategoryCounts,
+  type VideoVisibility,
 } from "@/lib/video-service";
 import { resolveVideoThumbnail, SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-service";
 
@@ -60,6 +68,7 @@ function YourVideosPage() {
   );
 
   const [videos, setVideos] = useState<UploadedVideo[]>([]);
+  const [updatingVisibilityId, setUpdatingVisibilityId] = useState<string | null>(null);
   const [videoFilter, setVideoFilter] = useState<
     "all" | "free_short" | "free_long" | "premium_short" | "premium_long"
   >("all");
@@ -94,6 +103,45 @@ function YourVideosPage() {
       setCounts(c);
     });
   }, [userId]);
+
+  const handleVisibilityChange = async (vid: UploadedVideo, nextVisibility: VideoVisibility) => {
+    if (vid.isBlocked) {
+      toast.error("Blocked videos cannot have their visibility changed or be published.");
+      return;
+    }
+    const currentVisibility = resolveStoredVideoVisibility(vid.visibility);
+    if (currentVisibility === nextVisibility) return;
+
+    setUpdatingVisibilityId(vid.id);
+    try {
+      const updated = await updateVideoVisibility({
+        videoId: vid.id,
+        visibility: nextVisibility,
+      });
+      setVideos((prev) =>
+        prev.map((item) =>
+          item.id === vid.id
+            ? {
+                ...item,
+                visibility: resolveStoredVideoVisibility(updated.visibility),
+                updatedAt: updated.updatedAt,
+              }
+            : item,
+        ),
+      );
+      const label =
+        nextVisibility === "public"
+          ? "Public"
+          : nextVisibility === "unlisted"
+            ? "Unlisted"
+            : "Private";
+      toast.success(`Visibility updated to ${label} for "${vid.title.slice(0, 32)}".`);
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to update video visibility.");
+    } finally {
+      setUpdatingVisibilityId(null);
+    }
+  };
 
   const filteredVideos = videos.filter((v) => {
     if (videoFilter === "free_short") return v.videoType === "free" && v.contentType === "short";
@@ -324,6 +372,7 @@ function YourVideosPage() {
                   <th className="px-4 py-3 whitespace-nowrap">Classification</th>
                   <th className="px-4 py-3 whitespace-nowrap">Content Format</th>
                   <th className="px-4 py-3 whitespace-nowrap">Upload Date</th>
+                  <th className="px-4 py-3 whitespace-nowrap">Visibility</th>
                   <th className="px-4 py-3 whitespace-nowrap">Payment Status</th>
                   <th className="px-4 py-3 whitespace-nowrap">Promotion</th>
                   <th className="px-4 py-3 text-right whitespace-nowrap">Views</th>
@@ -333,6 +382,9 @@ function YourVideosPage() {
                 {filteredVideos.map((vid) => {
                   const isPremium = vid.videoType === "premium";
                   const isShort = vid.contentType === "short";
+                  const isBlocked = Boolean(vid.isBlocked);
+                  const currentVisibility = resolveStoredVideoVisibility(vid.visibility);
+                  const isUpdatingVis = updatingVisibilityId === vid.id;
 
                   return (
                     <tr key={vid.id} className="transition hover:bg-secondary/20">
@@ -401,6 +453,49 @@ function YourVideosPage() {
                       {/* Upload Date */}
                       <td className="px-4 py-3.5 text-muted-foreground whitespace-nowrap">
                         {new Date(vid.createdAt).toLocaleDateString()}
+                      </td>
+
+                      {/* Visibility & Blocked Status */}
+                      <td className="px-4 py-3.5 whitespace-nowrap">
+                        <div className="flex flex-col gap-1.5">
+                          <div className="flex items-center gap-1.5">
+                            {currentVisibility === "public" ? (
+                              <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-400">
+                                <Globe className="h-3 w-3" />
+                                Public
+                              </span>
+                            ) : currentVisibility === "unlisted" ? (
+                              <span className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">
+                                <Link2 className="h-3 w-3" />
+                                Unlisted
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 rounded-md border border-zinc-500/30 bg-zinc-500/10 px-2 py-0.5 text-[10px] font-bold text-zinc-300">
+                                <Lock className="h-3 w-3" />
+                                Private
+                              </span>
+                            )}
+                            {isBlocked && (
+                              <span className="inline-flex items-center gap-1 rounded-md border border-red-500/40 bg-red-500/15 px-2 py-0.5 text-[10px] font-bold text-red-400">
+                                <Ban className="h-3 w-3" />
+                                Blocked
+                              </span>
+                            )}
+                          </div>
+                          <select
+                            aria-label={`Visibility for ${vid.title}`}
+                            value={currentVisibility}
+                            disabled={isBlocked || isUpdatingVis}
+                            onChange={(e) =>
+                              handleVisibilityChange(vid, e.target.value as VideoVisibility)
+                            }
+                            className="rounded-lg border border-border bg-secondary px-2 py-1 text-[11px] font-semibold text-foreground outline-none transition focus:border-brand disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <option value="public">Public</option>
+                            <option value="unlisted">Unlisted</option>
+                            <option value="private">Private</option>
+                          </select>
+                        </div>
                       </td>
 
                       {/* Payment Status */}

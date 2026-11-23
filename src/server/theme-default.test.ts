@@ -272,4 +272,35 @@ describe("FaceTube Task 11: Default Dark Theme Initialization, Preservation & SS
     assert.ok(toggleSource.includes('value: "dark"'));
     assert.ok(toggleSource.includes('value: "system"'));
   });
+
+  it("8. Sonner Toaster reads resolvedTheme from useTheme and preserves explicit theme props", async () => {
+    const sonnerSource = await fs.readFile(
+      path.resolve(process.cwd(), "src/components/ui/sonner.tsx"),
+      "utf8",
+    );
+    const rootSource = await fs.readFile(
+      path.resolve(process.cwd(), "src/routes/__root.tsx"),
+      "utf8",
+    );
+
+    assert.ok(sonnerSource.includes('import { useTheme } from "@/lib/theme-context";'));
+    assert.ok(sonnerSource.includes("const { resolvedTheme } = useTheme();"));
+    assert.ok(sonnerSource.includes("theme={props.theme ?? resolvedTheme}"));
+    assert.ok(sonnerSource.includes('className="toaster group"'));
+    assert.ok(sonnerSource.includes("toastOptions={{"));
+
+    // Spread comes before theme={props.theme ?? resolvedTheme} so an omitted or undefined
+    // theme prop cannot overwrite the resolvedTheme fallback while explicit values still win.
+    const spreadIdx = sonnerSource.indexOf("{...props}");
+    const themePropIdx = sonnerSource.indexOf("theme={props.theme ?? resolvedTheme}");
+    assert.ok(spreadIdx !== -1 && themePropIdx > spreadIdx);
+
+    // Toaster remains mounted inside ThemeProvider with richColors and closeButton preserved.
+    const providerStart = rootSource.indexOf("<ThemeProvider>");
+    const toasterIdx = rootSource.indexOf(
+      '<Toaster position="top-center" richColors closeButton />',
+    );
+    const providerEnd = rootSource.indexOf("</ThemeProvider>");
+    assert.ok(providerStart !== -1 && toasterIdx > providerStart && providerEnd > toasterIdx);
+  });
 });
