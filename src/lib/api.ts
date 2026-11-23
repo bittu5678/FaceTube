@@ -553,14 +553,41 @@ export const api = {
       return apiFetch<{ success: boolean; wallet: any }>(`/wallet/balance.php${q}`);
     },
 
-    getTransactions: async (userId?: string, limit?: number) => {
+    getTransactions: async (
+      userId?: string,
+      limitOrOptions?: number | { limit?: number; page?: number; all?: boolean },
+    ) => {
       const params = new URLSearchParams();
       if (userId) params.set("userId", userId);
-      if (limit) params.set("limit", String(limit));
+      if (typeof limitOrOptions === "number") {
+        if (limitOrOptions > 0) params.set("limit", String(limitOrOptions));
+      } else if (limitOrOptions) {
+        if (limitOrOptions.all) params.set("all", "1");
+        if (limitOrOptions.limit) params.set("limit", String(limitOrOptions.limit));
+        if (limitOrOptions.page) params.set("page", String(limitOrOptions.page));
+      }
       const qs = params.toString();
-      return apiFetch<{ success: boolean; transactions: any[]; total: number }>(
-        `/wallet/transactions.php${qs ? `?${qs}` : ""}`,
-      );
+      return apiFetch<{
+        success: boolean;
+        transactions: any[];
+        total: number;
+        page?: number;
+        limit?: number;
+        totalPages?: number;
+        hasMore?: boolean;
+        summary?: {
+          totalCount: number;
+          directReferralIncome: number;
+          adBoostIncome: number;
+          pendingReferralIncome: number;
+          globalIncome: number;
+          adsenseIncome: number;
+          admobIncome: number;
+          affiliateIncome: number;
+          totalEarned: number;
+          totalWithdrawn: number;
+        };
+      }>(`/wallet/transactions.php${qs ? `?${qs}` : ""}`);
     },
 
     withdraw: async (

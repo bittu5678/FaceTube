@@ -367,18 +367,30 @@ function WalletBalancePage() {
           </div>
         </div>
 
-        {/* Income Streams Breakdown (AdSense, AdMob & Combined Total Ad Earnings) */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
-          {/* 1. Referral Income */}
+        {/* Income Streams Breakdown (Direct Referral, Ad Boost, AdSense, AdMob, Global, Affiliate) */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-4">
+          {/* 1. Direct Referral Income */}
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium flex items-center gap-1">
               <Users className="h-3 w-3 text-rose-400" />
               Referral Income
             </span>
             <p className="text-xl font-bold text-foreground">
-              ₹{wallet ? wallet.referralIncome.toFixed(2) : "0.00"}
+              ₹{wallet ? (wallet.directReferralIncome ?? wallet.referralIncome).toFixed(2) : "0.00"}
             </p>
-            <p className="text-[11px] text-muted-foreground">Earned network commissions</p>
+            <p className="text-[11px] text-muted-foreground">Direct referral commissions</p>
+          </div>
+
+          {/* 1b. Ad Boost / Ads Promotion Income */}
+          <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
+            <span className="text-xs text-muted-foreground font-medium flex items-center gap-1">
+              <ArrowUpRight className="h-3 w-3 text-sky-400" />
+              Ad Boost Income
+            </span>
+            <p className="text-xl font-bold text-sky-400">
+              ₹{wallet ? (wallet.adBoostIncome ?? 0).toFixed(2) : "0.00"}
+            </p>
+            <p className="text-[11px] text-muted-foreground">7-level Ads Promotion</p>
           </div>
 
           {/* 2. Video AdSense */}

@@ -1,17 +1,74 @@
-import { describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { handleApiRequest, resetInMemoryStore } from "./api-handler.ts";
 import { setMysqlPoolForTesting } from "./mysql.ts";
 
 describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests", () => {
   const mockUserId = "FT_GROWTH_TEST_01";
+  const activeUserId = "FT_MULTI_STREAM_USER";
+  let tmpDataDir = "";
+  const origDataDir = process.env["FACETUBE_DATA_DIR"];
+
+  beforeEach(() => {
+    tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "facetube-growth-"));
+    process.env["FACETUBE_DATA_DIR"] = tmpDataDir;
+    const seedStore = {
+      users: [
+        {
+          id: "u-growth-1",
+          user_id: mockUserId,
+          name: "Growth User",
+          email: "growth1@facetube.com",
+          mobile: "9000001001",
+          role: "user",
+          referral_code: null,
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          id: "u-growth-2",
+          user_id: activeUserId,
+          name: "Multi Stream User",
+          email: "multi@facetube.com",
+          mobile: "9000001002",
+          role: "user",
+          referral_code: null,
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      sessions: {
+        tok_growth_1: mockUserId,
+        tok_multi_stream: activeUserId,
+      },
+      walletTransactions: [],
+    };
+    fs.writeFileSync(
+      path.join(tmpDataDir, "facetube_store.json"),
+      JSON.stringify(seedStore, null, 2),
+      "utf-8",
+    );
+    resetInMemoryStore();
+  });
+
+  afterEach(() => {
+    setMysqlPoolForTesting(null);
+    if (origDataDir !== undefined) process.env["FACETUBE_DATA_DIR"] = origDataDir;
+    else delete process.env["FACETUBE_DATA_DIR"];
+    resetInMemoryStore();
+    if (tmpDataDir && fs.existsSync(tmpDataDir)) {
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    }
+  });
 
   it("1. Returns ₹0 for all dates when no transactions exist (strictly no synthetic formulas)", async () => {
     const req = new Request(
       `http://localhost:3000/api/wallet/earnings-history.php?user_id=${mockUserId}&period=7D`,
-      { method: "GET" },
+      {
+        method: "GET",
+        headers: { Authorization: "Bearer tok_growth_1" },
+      },
     );
 
     const res = await handleApiRequest(req);
@@ -46,9 +103,11 @@ describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests
     const res7 = await handleApiRequest(
       new Request(
         `http://localhost:3000/api/wallet/earnings-history?user_id=${mockUserId}&period=7D`,
+        { headers: { Authorization: "Bearer tok_growth_1" } },
       ),
     );
     assert.ok(res7);
+    assert.equal(res7.status, 200);
     const data7 = await res7.json();
     assert.equal(data7.period, "7D");
     assert.equal(data7.history.length, 7);
@@ -57,9 +116,11 @@ describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests
     const res30 = await handleApiRequest(
       new Request(
         `http://localhost:3000/api/wallet/earnings-history?user_id=${mockUserId}&period=30D`,
+        { headers: { Authorization: "Bearer tok_growth_1" } },
       ),
     );
     assert.ok(res30);
+    assert.equal(res30.status, 200);
     const data30 = await res30.json();
     assert.equal(data30.period, "30D");
     assert.equal(data30.history.length, 30);
@@ -68,9 +129,11 @@ describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests
     const res90 = await handleApiRequest(
       new Request(
         `http://localhost:3000/api/wallet/earnings-history?user_id=${mockUserId}&period=90D`,
+        { headers: { Authorization: "Bearer tok_growth_1" } },
       ),
     );
     assert.ok(res90);
+    assert.equal(res90.status, 200);
     const data90 = await res90.json();
     assert.equal(data90.period, "90D");
     assert.equal(data90.history.length, 90);
@@ -79,9 +142,11 @@ describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests
     const res12M = await handleApiRequest(
       new Request(
         `http://localhost:3000/api/wallet/earnings-history?user_id=${mockUserId}&period=12M`,
+        { headers: { Authorization: "Bearer tok_growth_1" } },
       ),
     );
     assert.ok(res12M);
+    assert.equal(res12M.status, 200);
     const data12M = await res12M.json();
     assert.equal(data12M.period, "12M");
     assert.equal(data12M.history.length, 12);
@@ -92,14 +157,13 @@ describe("FaceTube Task 5: Earnings Growth Graph — Real Data & Breakdown Tests
   });
 
   it("3. Correctly categorizes transactions into 5 streams and excludes withdrawals", async () => {
-    const activeUserId = "FT_MULTI_STREAM_USER";
-
-    // Seed mock transactions into the store via payment API or by verifying store behavior
     const testReq = new Request(
       `http://localhost:3000/api/wallet/earnings-history.php?user_id=${activeUserId}&period=7D`,
+      { headers: { Authorization: "Bearer tok_multi_stream" } },
     );
     const testRes = await handleApiRequest(testReq);
     assert.ok(testRes);
+    assert.equal(testRes.status, 200);
     const testData = await testRes.json();
     assert.equal(testData.success, true);
     assert.ok(testData.summary);
@@ -590,7 +654,23 @@ describe("Task 5J-V4-O: PHP Wallet Earnings History Authentication, Ownership & 
 });
 
 describe("Step 9A: Earnings History AdMob Classification, Settled-Only Filtering & PHP/Node Parity", () => {
-  const storePath = path.resolve(process.cwd(), "data/facetube_store.json");
+  let tmpDataDir = "";
+  const origDataDir = process.env["FACETUBE_DATA_DIR"];
+
+  beforeEach(() => {
+    tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "facetube-step9a-"));
+    process.env["FACETUBE_DATA_DIR"] = tmpDataDir;
+  });
+
+  afterEach(() => {
+    setMysqlPoolForTesting(null);
+    if (origDataDir !== undefined) process.env["FACETUBE_DATA_DIR"] = origDataDir;
+    else delete process.env["FACETUBE_DATA_DIR"];
+    resetInMemoryStore();
+    if (tmpDataDir && fs.existsSync(tmpDataDir)) {
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    }
+  });
 
   function todayIsoDate(): string {
     return new Date().toISOString().split("T")[0]!;
@@ -602,100 +682,107 @@ describe("Step 9A: Earnings History AdMob Classification, Settled-Only Filtering
   }
 
   it("1. Classifies admob_income strictly under admob (never referral) and excludes unknown types across 7D and 12M in Node local store", async () => {
-    const rawBackup = fs.existsSync(storePath) ? fs.readFileSync(storePath, "utf-8") : null;
     const testUser = "FT_STEP9A_HIST_01";
     const today = todayIsoDate();
     const ym = currentYearMonth();
 
-    try {
-      if (rawBackup) {
-        const store = JSON.parse(rawBackup);
-        store.walletTransactions = Array.isArray(store.walletTransactions)
-          ? store.walletTransactions
-          : [];
-        store.walletTransactions.push(
-          {
-            id: "led_step9a_admob_1",
-            transaction_id: "TX_STEP9A_ADMOB_1",
-            user_id: testUser,
-            income_type: "admob_income",
-            amount: 450.75,
-            status: "settled",
-            created_at: `${today}T08:00:00.000Z`,
-          },
-          {
-            id: "led_step9a_ref_1",
-            transaction_id: "TX_STEP9A_REF_1",
-            user_id: testUser,
-            income_type: "referral_income",
-            amount: 25.5,
-            status: "settled",
-            created_at: `${today}T09:00:00.000Z`,
-          },
-          {
-            id: "led_step9a_unknown_1",
-            transaction_id: "TX_STEP9A_UNKNOWN_1",
-            user_id: testUser,
-            income_type: "corrupted_unknown_type",
-            amount: 999.0,
-            status: "settled",
-            created_at: `${today}T10:00:00.000Z`,
-          },
-        );
-        fs.writeFileSync(storePath, JSON.stringify(store, null, 2), "utf-8");
-      }
-      resetInMemoryStore();
+    const store = {
+      users: [
+        {
+          id: "u-step9a-1",
+          user_id: testUser,
+          name: "Step9A Hist 1",
+          email: "step9a1@facetube.com",
+          mobile: "9000001011",
+          role: "user",
+          referral_code: null,
+          created_at: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+      sessions: {
+        tok_step9a_1: testUser,
+      },
+      walletTransactions: [
+        {
+          id: "led_step9a_admob_1",
+          transaction_id: "TX_STEP9A_ADMOB_1",
+          user_id: testUser,
+          income_type: "admob_income",
+          amount: 450.75,
+          status: "settled",
+          created_at: `${today}T08:00:00.000Z`,
+        },
+        {
+          id: "led_step9a_ref_1",
+          transaction_id: "TX_STEP9A_REF_1",
+          user_id: testUser,
+          income_type: "referral_income",
+          amount: 25.5,
+          status: "settled",
+          created_at: `${today}T09:00:00.000Z`,
+        },
+        {
+          id: "led_step9a_unknown_1",
+          transaction_id: "TX_STEP9A_UNKNOWN_1",
+          user_id: testUser,
+          income_type: "corrupted_unknown_type",
+          amount: 999.0,
+          status: "settled",
+          created_at: `${today}T10:00:00.000Z`,
+        },
+      ],
+    };
+    fs.writeFileSync(
+      path.join(tmpDataDir, "facetube_store.json"),
+      JSON.stringify(store, null, 2),
+      "utf-8",
+    );
+    resetInMemoryStore();
 
-      const res7d = await handleApiRequest(
-        new Request(
-          `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=7D`,
-        ),
-      );
-      assert.equal(res7d?.status, 200);
-      const body7d = (await res7d?.json()) as any;
-      assert.equal(body7d.summary.admob, 450.75);
-      assert.equal(
-        body7d.summary.referral,
-        25.5,
-        "AdMob and unknown types must NEVER count as referral",
-      );
-      assert.equal(body7d.summary.total_revenue, 476.25);
+    const res7d = await handleApiRequest(
+      new Request(
+        `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=7D`,
+        { headers: { Authorization: "Bearer tok_step9a_1" } },
+      ),
+    );
+    assert.equal(res7d?.status, 200);
+    const body7d = (await res7d?.json()) as any;
+    assert.equal(body7d.summary.admob, 450.75);
+    assert.equal(
+      body7d.summary.referral,
+      25.5,
+      "AdMob and unknown types must NEVER count as referral",
+    );
+    assert.equal(body7d.summary.total_revenue, 476.25);
 
-      const todayPt = body7d.history.find((pt: any) => pt.date === today);
-      assert.ok(todayPt, "Today bucket must exist in 7D timeline");
-      assert.equal(todayPt.admob, 450.75);
-      assert.equal(todayPt.admob_income, 450.75);
-      assert.equal(todayPt.referral, 25.5);
-      assert.equal(todayPt.referral_income, 25.5);
-      assert.equal(todayPt.tx_count, 2, "Only known settled entries increment tx_count");
+    const todayPt = body7d.history.find((pt: any) => pt.date === today);
+    assert.ok(todayPt, "Today bucket must exist in 7D timeline");
+    assert.equal(todayPt.admob, 450.75);
+    assert.equal(todayPt.admob_income, 450.75);
+    assert.equal(todayPt.referral, 25.5);
+    assert.equal(todayPt.referral_income, 25.5);
+    assert.equal(todayPt.tx_count, 2, "Only known settled entries increment tx_count");
 
-      const res12m = await handleApiRequest(
-        new Request(
-          `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=12M`,
-        ),
-      );
-      assert.equal(res12m?.status, 200);
-      const body12m = (await res12m?.json()) as any;
-      assert.equal(body12m.summary.admob, 450.75);
-      assert.equal(body12m.summary.referral, 25.5);
-      assert.equal(body12m.summary.total_revenue, 476.25);
-      const monthPt = body12m.history.find((pt: any) => pt.date === ym);
-      assert.ok(monthPt, "Current month bucket must exist in 12M timeline");
-      assert.equal(monthPt.admob, 450.75);
-      assert.equal(monthPt.admob_income, 450.75);
-      assert.equal(monthPt.referral, 25.5);
-      assert.equal(monthPt.tx_count, 2);
-    } finally {
-      setMysqlPoolForTesting(null);
-      if (rawBackup !== null) {
-        fs.writeFileSync(storePath, rawBackup, "utf-8");
-      }
-      resetInMemoryStore();
-    }
+    const res12m = await handleApiRequest(
+      new Request(
+        `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=12M`,
+        { headers: { Authorization: "Bearer tok_step9a_1" } },
+      ),
+    );
+    assert.equal(res12m?.status, 200);
+    const body12m = (await res12m?.json()) as any;
+    assert.equal(body12m.summary.admob, 450.75);
+    assert.equal(body12m.summary.referral, 25.5);
+    assert.equal(body12m.summary.total_revenue, 476.25);
+    const monthPt = body12m.history.find((pt: any) => pt.date === ym);
+    assert.ok(monthPt, "Current month bucket must exist in 12M timeline");
+    assert.equal(monthPt.admob, 450.75);
+    assert.equal(monthPt.admob_income, 450.75);
+    assert.equal(monthPt.referral, 25.5);
+    assert.equal(monthPt.tx_count, 2);
   });
 
   it("2. Excludes pending and failed ledger entries from settled earnings history in local store and enforces status = settled in Node & PHP SQL", async () => {
-    const rawBackup = fs.existsSync(storePath) ? fs.readFileSync(storePath, "utf-8") : null;
     const origHost = process.env["DB_HOST"];
     const origName = process.env["DB_NAME"];
     const origUser = process.env["DB_USER"];
@@ -704,12 +791,23 @@ describe("Step 9A: Earnings History AdMob Classification, Settled-Only Filtering
     const capturedSql: string[] = [];
 
     try {
-      if (rawBackup) {
-        const store = JSON.parse(rawBackup);
-        store.walletTransactions = Array.isArray(store.walletTransactions)
-          ? store.walletTransactions
-          : [];
-        store.walletTransactions.push(
+      const store = {
+        users: [
+          {
+            id: "u-step9a-2",
+            user_id: testUser,
+            name: "Step9A Hist 2",
+            email: "step9a2@facetube.com",
+            mobile: "9000001012",
+            role: "user",
+            referral_code: null,
+            created_at: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        sessions: {
+          tok_step9a_2: testUser,
+        },
+        walletTransactions: [
           {
             id: "led_step9a_settled",
             transaction_id: "TX_STEP9A_SETTLED",
@@ -737,15 +835,20 @@ describe("Step 9A: Earnings History AdMob Classification, Settled-Only Filtering
             status: "failed",
             created_at: `${today}T10:00:00.000Z`,
           },
-        );
-        fs.writeFileSync(storePath, JSON.stringify(store, null, 2), "utf-8");
-      }
+        ],
+      };
+      fs.writeFileSync(
+        path.join(tmpDataDir, "facetube_store.json"),
+        JSON.stringify(store, null, 2),
+        "utf-8",
+      );
       resetInMemoryStore();
 
       // 2a. Local store excludes pending & failed entries
       const storeRes = await handleApiRequest(
         new Request(
           `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=30D`,
+          { headers: { Authorization: "Bearer tok_step9a_2" } },
         ),
       );
       assert.equal(storeRes?.status, 200);
@@ -780,6 +883,7 @@ describe("Step 9A: Earnings History AdMob Classification, Settled-Only Filtering
       const mysqlDailyRes = await handleApiRequest(
         new Request(
           `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=7D`,
+          { headers: { Authorization: "Bearer tok_step9a_2" } },
         ),
       );
       assert.equal(mysqlDailyRes?.status, 200);
@@ -791,6 +895,7 @@ describe("Step 9A: Earnings History AdMob Classification, Settled-Only Filtering
       const mysql12mRes = await handleApiRequest(
         new Request(
           `http://localhost:3000/api/wallet/earnings-history.php?user_id=${testUser}&period=12M`,
+          { headers: { Authorization: "Bearer tok_step9a_2" } },
         ),
       );
       assert.equal(mysql12mRes?.status, 200);
@@ -832,10 +937,6 @@ describe("Step 9A: Earnings History AdMob Classification, Settled-Only Filtering
       else delete process.env["DB_NAME"];
       if (origUser !== undefined) process.env["DB_USER"] = origUser;
       else delete process.env["DB_USER"];
-      if (rawBackup !== null) {
-        fs.writeFileSync(storePath, rawBackup, "utf-8");
-      }
-      resetInMemoryStore();
     }
   });
 });

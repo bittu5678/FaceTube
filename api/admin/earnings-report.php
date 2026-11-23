@@ -182,8 +182,9 @@ if ($dateMode === 'activity') {
 $whereSql = !empty($whereClauses) ? ('WHERE ' . implode(' AND ', $whereClauses)) : '';
 
 try {
-    // 0. Inspect AdMob schema availability so pre-migration schemas never crash or fabricate data
+    // 0. Inspect AdMob & Ad Boost schema availability so pre-migration schemas never crash or fabricate data
     $hasWalletAdmobCol = true;
+    $hasWalletAdBoostCol = false;
     $hasLedgerAdmobType = true;
     try {
         $schemaStmt = $pdo->query("
@@ -198,6 +199,7 @@ try {
         $schemaRows = $schemaStmt ? $schemaStmt->fetchAll(PDO::FETCH_ASSOC) : [];
         if (!empty($schemaRows)) {
             $hasWalletAdmobCol = false;
+            $hasWalletAdBoostCol = false;
             $hasLedgerAdmobType = false;
             foreach ($schemaRows as $sRow) {
                 $tName = strtolower(trim((string)($sRow['TABLE_NAME'] ?? $sRow['table_name'] ?? '')));
@@ -206,6 +208,9 @@ try {
                 if ($tName === 'wallet_balances' && $cName === 'admob_income') {
                     $hasWalletAdmobCol = true;
                 }
+                if ($tName === 'wallet_balances' && $cName === 'ad_boost_income') {
+                    $hasWalletAdBoostCol = true;
+                }
                 if ($tName === 'income_ledger' && $cName === 'income_type' && str_contains($cType, 'admob_income')) {
                     $hasLedgerAdmobType = true;
                 }
@@ -213,6 +218,7 @@ try {
         }
     } catch (Throwable $_schemaErr) {
         $hasWalletAdmobCol = true;
+        $hasWalletAdBoostCol = false;
         $hasLedgerAdmobType = true;
     }
 
@@ -228,6 +234,7 @@ try {
         $summaryTotalEarnedExpr = "COALESCE(SUM(COALESCE(lt.ledger_total_earned, 0)), 0)";
         $summaryTotalWithdrawnExpr = "COALESCE(SUM(COALESCE(lt.ledger_total_withdrawn, 0)), 0)";
         $summaryReferralExpr = "COALESCE(SUM(COALESCE(lt.ledger_referral_income, 0)), 0)";
+        $summaryAdBoostExpr = "COALESCE(SUM(COALESCE(lt.ledger_ad_boost_income, 0)), 0)";
         $summaryGlobalExpr = "COALESCE(SUM(COALESCE(lt.ledger_global_income, 0)), 0)";
         $summaryAdsenseExpr = "COALESCE(SUM(COALESCE(lt.ledger_adsense_income, 0)), 0)";
         $summaryAdmobExpr = "COALESCE(SUM(COALESCE(lt.ledger_admob_income, 0)), 0)";
@@ -236,6 +243,7 @@ try {
         $rowTotalEarnedExpr = "COALESCE(lt.ledger_total_earned, 0.00)";
         $rowTotalWithdrawnExpr = "COALESCE(lt.ledger_total_withdrawn, 0.00)";
         $rowReferralExpr = "COALESCE(lt.ledger_referral_income, 0.00)";
+        $rowAdBoostExpr = "COALESCE(lt.ledger_ad_boost_income, 0.00)";
         $rowGlobalExpr = "COALESCE(lt.ledger_global_income, 0.00)";
         $rowAdsenseExpr = "COALESCE(lt.ledger_adsense_income, 0.00)";
         $rowAdmobExpr = "COALESCE(lt.ledger_admob_income, 0.00)";
@@ -244,6 +252,9 @@ try {
         $summaryTotalEarnedExpr = "COALESCE(SUM(COALESCE(wb.total_earned, lt.ledger_total_earned, 0)), 0)";
         $summaryTotalWithdrawnExpr = "COALESCE(SUM(COALESCE(wb.total_withdrawn, lt.ledger_total_withdrawn, 0)), 0)";
         $summaryReferralExpr = "COALESCE(SUM(COALESCE(lt.ledger_referral_income, wb.referral_income, 0)), 0)";
+        $summaryAdBoostExpr = $hasWalletAdBoostCol
+            ? "COALESCE(SUM(COALESCE(lt.ledger_ad_boost_income, wb.ad_boost_income, 0)), 0)"
+            : "COALESCE(SUM(COALESCE(lt.ledger_ad_boost_income, 0)), 0)";
         $summaryGlobalExpr = "COALESCE(SUM(COALESCE(lt.ledger_global_income, wb.global_income, 0)), 0)";
         $summaryAdsenseExpr = "COALESCE(SUM(COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0)), 0)";
         $summaryAdmobExpr = $hasWalletAdmobCol
@@ -254,6 +265,9 @@ try {
         $rowTotalEarnedExpr = "COALESCE(wb.total_earned, lt.ledger_total_earned, 0.00)";
         $rowTotalWithdrawnExpr = "COALESCE(wb.total_withdrawn, lt.ledger_total_withdrawn, 0.00)";
         $rowReferralExpr = "COALESCE(lt.ledger_referral_income, wb.referral_income, 0.00)";
+        $rowAdBoostExpr = $hasWalletAdBoostCol
+            ? "COALESCE(lt.ledger_ad_boost_income, wb.ad_boost_income, 0.00)"
+            : "COALESCE(lt.ledger_ad_boost_income, 0.00)";
         $rowGlobalExpr = "COALESCE(lt.ledger_global_income, wb.global_income, 0.00)";
         $rowAdsenseExpr = "COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0.00)";
         $rowAdmobExpr = $hasWalletAdmobCol
@@ -276,34 +290,35 @@ try {
             {$summaryTotalEarnedExpr} AS total_earned,
             {$summaryTotalWithdrawnExpr} AS total_withdrawn,
             {$summaryReferralExpr} AS total_referral_income,
-            COALESCE(SUM(COALESCE(lt.ledger_ad_boost_income, 0)), 0) AS total_ad_boost_income,
+            {$summaryAdBoostExpr} AS total_ad_boost_income,
             {$summaryGlobalExpr} AS total_global_income,
             {$summaryAdsenseExpr} AS total_adsense_income,
             {$summaryAdmobExpr} AS total_admob_income,
             {$summaryAffiliateExpr} AS total_affiliate_income
         FROM users u
-        LEFT JOIN wallet_balances wb ON UPPER(wb.user_id) = UPPER(u.user_id)
+        LEFT JOIN wallet_balances wb ON UPPER(TRIM(wb.user_id)) = UPPER(TRIM(u.user_id))
         LEFT JOIN (
             SELECT 
-                UPPER(user_id) AS user_id,
-                SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission')
-                          AND UPPER(transaction_id) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                UPPER(TRIM(user_id)) AS user_id,
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('referral_income', 'direct_commission')
+                          AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_REF|_PENDING|_%' ESCAPE '|'
+                          AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
                           AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
                          THEN amount ELSE 0 END) AS ledger_referral_income,
-                SUM(CASE WHEN income_type IN ('ad_boost_income', 'marketing_ads')
-                          OR UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
+                          OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
                           OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
                          THEN amount ELSE 0 END) AS ledger_ad_boost_income,
-                SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
-                SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
+                SUM(CASE WHEN COALESCE(income_type, '') = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
+                SUM(CASE WHEN COALESCE(income_type, '') = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
                 {$ledgerAdmobExpr} AS ledger_admob_income,
-                SUM(CASE WHEN income_type IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
-                SUM(CASE WHEN income_type = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
-                SUM(CASE WHEN income_type != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
+                SUM(CASE WHEN COALESCE(income_type, '') = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
+                SUM(CASE WHEN COALESCE(income_type, '') != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
             FROM income_ledger
             WHERE status = 'settled'{$ledgerDateSql}
-            GROUP BY UPPER(user_id)
-        ) lt ON UPPER(lt.user_id) = UPPER(u.user_id)
+            GROUP BY UPPER(TRIM(user_id))
+        ) lt ON UPPER(TRIM(lt.user_id)) = UPPER(TRIM(u.user_id))
         {$whereSql}
     ";
     $stmtSummary = $pdo->prepare($summarySql);
@@ -344,34 +359,35 @@ try {
             {$rowTotalEarnedExpr} AS total_earned,
             {$rowTotalWithdrawnExpr} AS total_withdrawn,
             {$rowReferralExpr} AS referral_income,
-            COALESCE(lt.ledger_ad_boost_income, 0.00) AS ad_boost_income,
+            {$rowAdBoostExpr} AS ad_boost_income,
             {$rowGlobalExpr} AS global_income,
             {$rowAdsenseExpr} AS adsense_income,
             {$rowAdmobExpr} AS admob_income,
             {$rowAffiliateExpr} AS affiliate_income
         FROM users u
-        LEFT JOIN wallet_balances wb ON UPPER(wb.user_id) = UPPER(u.user_id)
+        LEFT JOIN wallet_balances wb ON UPPER(TRIM(wb.user_id)) = UPPER(TRIM(u.user_id))
         LEFT JOIN (
             SELECT 
-                UPPER(user_id) AS user_id,
-                SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission')
-                          AND UPPER(transaction_id) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                UPPER(TRIM(user_id)) AS user_id,
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('referral_income', 'direct_commission')
+                          AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_REF|_PENDING|_%' ESCAPE '|'
+                          AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
                           AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
                          THEN amount ELSE 0 END) AS ledger_referral_income,
-                SUM(CASE WHEN income_type IN ('ad_boost_income', 'marketing_ads')
-                          OR UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
+                          OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
                           OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
                          THEN amount ELSE 0 END) AS ledger_ad_boost_income,
-                SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
-                SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
+                SUM(CASE WHEN COALESCE(income_type, '') = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
+                SUM(CASE WHEN COALESCE(income_type, '') = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
                 {$ledgerAdmobExpr} AS ledger_admob_income,
-                SUM(CASE WHEN income_type IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
-                SUM(CASE WHEN income_type = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
-                SUM(CASE WHEN income_type != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
+                SUM(CASE WHEN COALESCE(income_type, '') = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
+                SUM(CASE WHEN COALESCE(income_type, '') != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
             FROM income_ledger
             WHERE status = 'settled'{$ledgerDateSql}
-            GROUP BY UPPER(user_id)
-        ) lt ON UPPER(lt.user_id) = UPPER(u.user_id)
+            GROUP BY UPPER(TRIM(user_id))
+        ) lt ON UPPER(TRIM(lt.user_id)) = UPPER(TRIM(u.user_id))
         {$whereSql}
         ORDER BY u.created_at DESC
         LIMIT " . intval($limit) . " OFFSET " . intval($offset) . "
@@ -400,6 +416,7 @@ try {
             'Available Balance (INR)',
             'Total Earned (INR)',
             'Referral Income (INR)',
+            'Ad Boost Income (INR)',
             'Global Income (INR)',
             'AdSense Income (INR)',
             'AdMob Income (INR)',
@@ -422,6 +439,7 @@ try {
                 number_format(floatval($r['balance']), 2, '.', ''),
                 number_format(floatval($r['total_earned']), 2, '.', ''),
                 number_format(floatval($r['referral_income']), 2, '.', ''),
+                number_format(floatval($r['ad_boost_income'] ?? 0), 2, '.', ''),
                 number_format(floatval($r['global_income']), 2, '.', ''),
                 number_format($adsenseVal, 2, '.', ''),
                 $admobAvailable ? number_format(floatval($r['admob_income']), 2, '.', '') : 'Unavailable',

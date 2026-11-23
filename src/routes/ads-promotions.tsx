@@ -149,7 +149,7 @@ interface ActiveCampaign {
 }
 
 function AdsPromotionsPage() {
-  const { user, profile, dbUser } = useAuth();
+  const { user, profile, dbUser, allUsers } = useAuth();
 
   const userName =
     profile?.full_name ||
@@ -160,12 +160,28 @@ function AdsPromotionsPage() {
 
   const effectiveUserId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
-  const sponsorId =
-    (profile as any)?.referred_by ||
-    (dbUser as any)?.referred_by ||
-    user?.user_metadata?.["referred_by"] ||
-    "FT810492"; // Direct sponsor ID
-  const sponsorName = (profile as any)?.sponsor_name || "Samantha Chen";
+  const rawReferralCode = (profile?.referral_code ?? dbUser?.referral_code ?? "")
+    .trim()
+    .toUpperCase();
+  const effectiveNormId = effectiveUserId.trim().toUpperCase();
+  const promotionalAliasOwners: Record<string, string> = {
+    FTVIP: "FT102857",
+    CREATOR50: "FT483921",
+  };
+  const resolvedSponsorId = rawReferralCode
+    ? promotionalAliasOwners[rawReferralCode] || rawReferralCode
+    : null;
+  const verifiedSponsorId =
+    resolvedSponsorId && resolvedSponsorId !== effectiveNormId ? resolvedSponsorId : null;
+  const matchedSponsorUser = verifiedSponsorId
+    ? (allUsers || []).find((u) => (u.user_id || "").trim().toUpperCase() === verifiedSponsorId) ||
+      null
+    : null;
+  const sponsorDisplayName =
+    matchedSponsorUser?.full_name ||
+    matchedSponsorUser?.name ||
+    matchedSponsorUser?.username ||
+    null;
 
   // Real channel published videos & dynamic campaigns from backend
   const [userVideos, setUserVideos] = useState<UploadedVideo[]>([]);
@@ -456,7 +472,6 @@ function AdsPromotionsPage() {
         planName: selectedPlan.name,
         durationDays: selectedPlan.days,
         price: selectedPlan.price,
-        ...(sponsorId ? { directReferrerId: sponsorId } : {}),
         onSuccess: async (res: unknown) => {
           const paymentResult = res as { paymentId?: string } | undefined;
           const dedupKey = paymentResult?.paymentId || attemptKey;
@@ -752,10 +767,24 @@ function AdsPromotionsPage() {
               <div className="rounded-xl border border-border bg-secondary/30 p-3.5 flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                  <span className="text-muted-foreground">
-                    Direct Sponsor: <strong className="text-foreground">{sponsorName}</strong> (
-                    {sponsorId})
-                  </span>
+                  {verifiedSponsorId ? (
+                    <span className="text-muted-foreground">
+                      Verified Referral Code Sponsor:{" "}
+                      {sponsorDisplayName ? (
+                        <>
+                          <strong className="text-foreground">{sponsorDisplayName}</strong> (
+                          {verifiedSponsorId})
+                        </>
+                      ) : (
+                        <strong className="text-foreground">{verifiedSponsorId}</strong>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">
+                      Direct Sponsor: <strong className="text-foreground">None linked</strong>{" "}
+                      (Server-verified unassigned share routes to Admin)
+                    </span>
+                  )}
                 </div>
                 <span className="font-bold text-amber-400">10% One-Time Commission</span>
               </div>

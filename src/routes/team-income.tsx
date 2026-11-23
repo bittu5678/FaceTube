@@ -144,7 +144,15 @@ function TeamIncomePage() {
         ledgerRes.status === "fulfilled" && Array.isArray(ledgerRes.value) ? ledgerRes.value : [];
 
       const ledgerDirectSettled = ledgerList
-        .filter((tx) => isSettledDirectPremiumCommission(tx))
+        .filter(
+          (tx) =>
+            isDirectReferralTransaction(tx) &&
+            tx.status === "settled" &&
+            !String(tx.transactionId || "")
+              .trim()
+              .toUpperCase()
+              .startsWith("TX_REF_PENDING_"),
+        )
         .reduce((sum, tx) => sum + (Number(tx.amount) || 0), 0);
 
       const settledAdsTxs = ledgerList.filter(

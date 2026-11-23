@@ -501,7 +501,6 @@ export async function initiateAdsPromotionPayment(params: {
           videoId: params.videoId,
           purpose: "ads_promotion",
           planId: params.planId,
-          referrerUserId: params.directReferrerId ?? null,
           metadata: { planId: params.planId },
         });
 

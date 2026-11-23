@@ -44,6 +44,9 @@ export interface UserWallet {
   totalEarned: number;
   totalWithdrawn: number;
   referralIncome: number;
+  directReferralIncome?: number;
+  adBoostIncome?: number;
+  adsPromotionIncome?: number;
   globalIncome: number;
   adsenseIncome: number;
   admobIncome?: number;
@@ -258,12 +261,24 @@ export async function getUserWallet(userId: string): Promise<UserWallet> {
     const res = await api.wallet.getBalance(norm);
     if (res && res.wallet) {
       const data = res.wallet;
+      const directRef = toFiniteMoney(
+        data.directReferralIncome ??
+          data.direct_referral_income ??
+          data.referral_income ??
+          data.referralIncome,
+      );
+      const adBoost = toFiniteMoney(
+        data.adBoostIncome ?? data.ad_boost_income ?? data.adsPromotionIncome,
+      );
       const wallet: UserWallet = {
         userId: data.user_id || data.userId || norm,
         balance: toFiniteMoney(data.balance),
         totalEarned: toFiniteMoney(data.total_earned ?? data.totalEarned),
         totalWithdrawn: toFiniteMoney(data.total_withdrawn ?? data.totalWithdrawn),
-        referralIncome: toFiniteMoney(data.referral_income ?? data.referralIncome),
+        referralIncome: directRef,
+        directReferralIncome: directRef,
+        adBoostIncome: adBoost,
+        adsPromotionIncome: adBoost,
         globalIncome: toFiniteMoney(data.global_income ?? data.globalIncome),
         adsenseIncome: toFiniteMoney(data.adsense_income ?? data.adsenseIncome),
         admobIncome: toFiniteMoney(data.admob_income ?? data.admobIncome),
@@ -286,6 +301,9 @@ export async function getUserWallet(userId: string): Promise<UserWallet> {
     const cached = wallets[norm]!;
     return {
       ...cached,
+      directReferralIncome: toFiniteMoney(cached.directReferralIncome ?? cached.referralIncome),
+      adBoostIncome: toFiniteMoney(cached.adBoostIncome),
+      adsPromotionIncome: toFiniteMoney(cached.adsPromotionIncome ?? cached.adBoostIncome),
       adsenseIncome: toFiniteMoney(cached.adsenseIncome),
       admobIncome: toFiniteMoney(cached.admobIncome),
       isStale: true,
@@ -299,6 +317,9 @@ export async function getUserWallet(userId: string): Promise<UserWallet> {
     totalEarned: 0,
     totalWithdrawn: 0,
     referralIncome: 0,
+    directReferralIncome: 0,
+    adBoostIncome: 0,
+    adsPromotionIncome: 0,
     globalIncome: 0,
     adsenseIncome: 0,
     admobIncome: 0,
@@ -310,13 +331,43 @@ export async function getUserWallet(userId: string): Promise<UserWallet> {
 }
 
 /**
- * Gets ledger transactions for a user
+ * Gets full ledger transactions for a user across all pages so calculations never truncate at 50/100 rows.
  */
 export async function getUserLedger(userId?: string): Promise<LedgerTransaction[]> {
   try {
-    const res = await api.wallet.getTransactions(userId);
-    if (res && res.transactions && res.transactions.length > 0) {
-      const mapped: LedgerTransaction[] = res.transactions.map((d: any) => ({
+    const collectedRaw: any[] = [];
+    const seenIds = new Set<string>();
+    const pageLimit = 500;
+    const maxPages = 20;
+
+    for (let page = 1; page <= maxPages; page++) {
+      const res = await api.wallet.getTransactions(
+        userId,
+        page === 1 ? { page, limit: pageLimit, all: true } : { page, limit: pageLimit },
+      );
+      const batch = Array.isArray(res?.transactions) ? res.transactions : [];
+      if (batch.length === 0) break;
+
+      let addedInBatch = 0;
+      for (const item of batch) {
+        const key = String(item?.transaction_id || item?.transactionId || item?.id || "").trim();
+        if (key) {
+          if (seenIds.has(key)) continue;
+          seenIds.add(key);
+        }
+        collectedRaw.push(item);
+        addedInBatch++;
+      }
+
+      if (res?.hasMore === false) break;
+      if (res?.totalPages !== undefined && page >= Number(res.totalPages)) break;
+      // Compatibility guard for simple test mocks or endpoints returning the entire set on page 1
+      if (res?.hasMore === undefined && res?.totalPages === undefined) break;
+      if (addedInBatch === 0) break;
+    }
+
+    if (collectedRaw.length > 0) {
+      const mapped: LedgerTransaction[] = collectedRaw.map((d: any) => ({
         id: String(d.id),
         transactionId: d.transaction_id || d.transactionId,
         userId: d.user_id || d.userId,

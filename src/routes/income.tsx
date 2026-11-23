@@ -125,7 +125,10 @@ function IncomePage() {
 
   const streamsWithRealValues = incomeStreams.map((s) => {
     if (s.title === "Referral Income") {
-      return { ...s, balance: `₹${wallet ? wallet.referralIncome.toFixed(2) : "0.00"}` };
+      return {
+        ...s,
+        balance: `₹${wallet ? (wallet.directReferralIncome ?? wallet.referralIncome).toFixed(2) : "0.00"}`,
+      };
     }
     if (s.title === "Global Income") {
       return { ...s, balance: `₹${wallet ? wallet.globalIncome.toFixed(2) : "0.00"}` };
@@ -187,7 +190,7 @@ function IncomePage() {
         <DashboardSummaryCards
           filterCategory="income"
           dynamicOverrides={{
-            "referral-income": `₹${wallet ? wallet.referralIncome.toFixed(2) : "0.00"}`,
+            "referral-income": `₹${wallet ? (wallet.directReferralIncome ?? wallet.referralIncome).toFixed(2) : "0.00"}`,
             "global-income": `₹${wallet ? wallet.globalIncome.toFixed(2) : "0.00"}`,
             "wallet-balance": `₹${wallet ? wallet.balance.toFixed(2) : "0.00"}`,
             "adsense-income": `₹${adEarnings.adsenseIncome.toFixed(2)}`,

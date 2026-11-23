@@ -276,9 +276,9 @@ function DashboardPage() {
     "total-team": referralData ? String(referralData.teamMembersCount) : "0",
     "wallet-balance": wallet ? `₹${wallet.balance.toFixed(2)}` : "₹0.00",
     "referral-income": referralData
-      ? `₹${referralData.referralIncome.toFixed(2)}`
+      ? `₹${(referralData.directReferralIncome ?? referralData.referralIncome).toFixed(2)}`
       : wallet
-        ? `₹${wallet.referralIncome.toFixed(2)}`
+        ? `₹${(wallet.directReferralIncome ?? wallet.referralIncome).toFixed(2)}`
         : "₹0.00",
     "global-income": wallet ? `₹${wallet.globalIncome.toFixed(2)}` : "₹0.00",
     "adsense-income": `₹${adEarnings.adsenseIncome.toFixed(2)}`,

@@ -63,35 +63,48 @@ try {
     // Direct referrals list for member breakdown
     $directReferrals = $downline['membersByLevel'][1] ?? [];
 
-    // 3. Authoritative Direct Premium Upload commission from payment_transactions + settled income_ledger
-    // Excludes not_required/free/pending/failed/unverified payments and Ads Promotion commissions
+    // 3. Authoritative Direct Premium Upload & Referral commission from settled income_ledger
+    // Preserves valid settled ledger entries even when a matching payment_transactions row does not exist;
+    // excludes pending, non-premium matched payments, and Ads Promotion commissions.
     $directCommByMember = [];
     $directReferralIncome = 0.00;
     $stmtDirectLedger = $pdo->prepare("
-        SELECT UPPER(pt.user_id) AS member_user_id,
+        SELECT COALESCE(NULLIF(UPPER(TRIM(il.source_user_id)), ''), NULLIF(UPPER(TRIM(pt.user_id)), ''), '') AS member_user_id,
                COALESCE(SUM(il.amount), 0) AS direct_commission
         FROM income_ledger il
-        INNER JOIN payment_transactions pt
-          ON pt.payment_id = SUBSTRING(il.transaction_id, 8)
+        LEFT JOIN payment_transactions pt
+          ON UPPER(COALESCE(il.transaction_id, '')) LIKE 'TX|_REF|_%' ESCAPE '|'
+         AND UPPER(COALESCE(il.transaction_id, '')) NOT LIKE 'TX|_REF|_PENDING|_%' ESCAPE '|'
+         AND pt.payment_id = SUBSTRING(il.transaction_id, 8)
         WHERE UPPER(il.user_id) = UPPER(?)
           AND il.status = 'settled'
-          AND il.income_type IN ('referral_income', 'direct_commission')
-          AND il.transaction_id LIKE 'TX|_REF|_%' ESCAPE '|'
-          AND il.transaction_id NOT LIKE 'TX|_REF|_PENDING|_%' ESCAPE '|'
+          AND il.amount > 0
+          AND COALESCE(il.income_type, '') IN ('referral_income', 'direct_commission')
+          AND UPPER(COALESCE(il.transaction_id, '')) NOT LIKE 'TX|_REF|_PENDING|_%' ESCAPE '|'
+          AND UPPER(COALESCE(il.transaction_id, '')) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
           AND UPPER(COALESCE(il.special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
-          AND pt.purpose = 'premium_video_upload'
-          AND pt.amount > 0
-          AND COALESCE(NULLIF(TRIM(il.source_user_id), ''), '') != ''
-          AND UPPER(il.source_user_id) = UPPER(pt.user_id)
-        GROUP BY UPPER(pt.user_id)
+          AND (
+              pt.payment_id IS NULL
+              OR (
+                  pt.purpose = 'premium_video_upload'
+                  AND pt.amount > 0
+                  AND (
+                      COALESCE(NULLIF(TRIM(il.source_user_id), ''), '') = ''
+                      OR UPPER(TRIM(il.source_user_id)) = UPPER(TRIM(pt.user_id))
+                  )
+              )
+          )
+        GROUP BY COALESCE(NULLIF(UPPER(TRIM(il.source_user_id)), ''), NULLIF(UPPER(TRIM(pt.user_id)), ''), '')
     ");
     $stmtDirectLedger->execute([$userNormId]);
     $directRows = $stmtDirectLedger->fetchAll(PDO::FETCH_ASSOC);
     foreach ($directRows as $dr) {
         $mIdKey = strtoupper(trim((string)($dr['member_user_id'] ?? '')));
         $amt = round(floatval($dr['direct_commission'] ?? 0), 2);
-        if ($mIdKey !== '' && $amt > 0) {
-            $directCommByMember[$mIdKey] = round(($directCommByMember[$mIdKey] ?? 0.0) + $amt, 2);
+        if ($amt > 0) {
+            if ($mIdKey !== '') {
+                $directCommByMember[$mIdKey] = round(($directCommByMember[$mIdKey] ?? 0.0) + $amt, 2);
+            }
             $directReferralIncome = round($directReferralIncome + $amt, 2);
         }
     }
@@ -104,8 +117,8 @@ try {
         WHERE UPPER(user_id) = UPPER(?)
           AND status = 'settled'
           AND (
-              income_type IN ('ad_boost_income', 'marketing_ads')
-              OR UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+              COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
+              OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
               OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
           )
     ");
@@ -120,7 +133,7 @@ try {
         FROM income_ledger
         WHERE UPPER(user_id) = UPPER(?)
           AND status = 'pending'
-          AND income_type IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+          AND COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
     ");
     $stmtPendingLedger->execute([$userNormId]);
     $pendingRow = $stmtPendingLedger->fetch(PDO::FETCH_ASSOC);

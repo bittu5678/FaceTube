@@ -184,11 +184,20 @@ export async function getReferralDashboardData(
 
   const teamMembersCount = allDescendantIds.size;
 
-  // Calculate direct commission strictly from settled TX_REF_<payment_id> ledger entries
-  // Never infer commission from video counts (especially not_required/free/unverified) and never count Ads Promotion
+  // Calculate direct commission strictly from settled direct referral ledger entries
+  // (excluding pending, failed, and Ads Promotion entries)
   const directCommByMember = new Map<string, number>();
   for (const t of ledger) {
-    if (!isSettledDirectPremiumCommission(t)) continue;
+    if (
+      !isDirectReferralTransaction(t) ||
+      t.status !== "settled" ||
+      String(t.transactionId || "")
+        .trim()
+        .toUpperCase()
+        .startsWith("TX_REF_PENDING_")
+    ) {
+      continue;
+    }
     const srcId = String(t.sourceUserId || "")
       .trim()
       .toUpperCase();

@@ -1732,7 +1732,10 @@ export async function verifyServerPayment(
       // Uniform ₹6 distribution across every transaction (including #11, #21, #31, #41...)
       const isSpecial = false;
 
-      const refId = (referrerUserId || req.referrerUserId || null)?.trim().toUpperCase() || null;
+      // Reject self-referral and never trust client-supplied req.referrerUserId
+      const uploaderNorm = req.userId.trim().toUpperCase();
+      const rawServerRefId = (referrerUserId || null)?.trim().toUpperCase() || null;
+      const refId = rawServerRefId && rawServerRefId !== uploaderNorm ? rawServerRefId : null;
       const hasValidReferrer = Boolean(refId && refId.length > 0);
 
       // Uniform Phase 1.1 Allocation:
@@ -1751,7 +1754,6 @@ export async function verifyServerPayment(
       const taxAndFees = PRICING_CONFIG.PREMIUM_VIDEO.TAX_AND_FEES; // ₹1.00
 
       // Filter eligible previous videos / creators: strictly exclude current uploader and deduplicate
-      const uploaderNorm = req.userId.trim().toUpperCase();
       const eligibleItems: Array<{ userId: string; videoId?: string; adEarnings: number }> = [];
       const seenCreatorKeys = new Set<string>();
       for (const item of eligiblePremiumCreatorIds) {
@@ -1992,11 +1994,16 @@ export async function verifyServerPayment(
       PRICING_CONFIG.ADS_PROMOTION[rawPlanId as AdsPlanId] ||
       PRICING_CONFIG.ADS_PROMOTION["plan-monthly"];
     const amount = plan.price;
-    const refId = (referrerUserId || req.referrerUserId || null)?.trim().toUpperCase() || null;
+    const uploaderNorm = req.userId.trim().toUpperCase();
+    const rawServerRefId = (referrerUserId || null)?.trim().toUpperCase() || null;
+    const refId = rawServerRefId && rawServerRefId !== uploaderNorm ? rawServerRefId : null;
 
-    // Use passed uplines if available, otherwise fallback to single direct sponsor if provided
-    const effectiveUplines =
-      uplines && uplines.length > 0 ? uplines : refId ? [{ level: 1, userId: refId }] : [];
+    // Never trust client-supplied req.referrerUserId; use only server-resolved uplines (or verified direct sponsor if uplines omitted)
+    const effectiveUplines = Array.isArray(uplines)
+      ? uplines.filter((u) => u.userId.trim().toUpperCase() !== uploaderNorm)
+      : refId
+        ? [{ level: 1, userId: refId }]
+        : [];
 
     let customRates: Array<{ level: number; percent: number }> | undefined = undefined;
     const envMkt =

@@ -204,6 +204,7 @@ function AdminPage() {
     totalEarned: 0,
     totalWithdrawn: 0,
     totalReferralIncome: 0,
+    totalAdBoostIncome: 0,
     totalGlobalIncome: 0,
     totalAdsenseIncome: 0,
     totalAdmobIncome: 0,
@@ -260,6 +261,7 @@ function AdminPage() {
               totalEarned: Number(res.summary.totalEarned) || 0,
               totalWithdrawn: Number(res.summary.totalWithdrawn) || 0,
               totalReferralIncome: Number(res.summary.totalReferralIncome) || 0,
+              totalAdBoostIncome: Number(res.summary.totalAdBoostIncome) || 0,
               totalGlobalIncome: Number(res.summary.totalGlobalIncome) || 0,
               totalAdsenseIncome: adsenseTotal,
               totalAdmobIncome: admobAvail ? admobTotal : 0,
@@ -342,6 +344,7 @@ function AdminPage() {
         "Available Balance (INR)",
         "Total Earned (INR)",
         "Referral Income (INR)",
+        "Ad Boost Income (INR)",
         "Global Pool Income (INR)",
         "AdSense Income (INR)",
         "AdMob Income (INR)",
@@ -374,6 +377,7 @@ function AdminPage() {
             (Number(r.balance) || 0).toFixed(2),
             (Number(r.totalEarned) || 0).toFixed(2),
             (Number(r.referralIncome) || 0).toFixed(2),
+            (Number(r.adBoostIncome) || 0).toFixed(2),
             (Number(r.globalIncome) || 0).toFixed(2),
             adsenseVal.toFixed(2),
             admobAvailableForExport ? admobVal.toFixed(2) : "Unavailable",
@@ -2812,7 +2816,7 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                   <BarChart3 className="h-4 w-4 text-brand" />
                   <span>Platform Aggregate Breakdown by Genuine Income Stream</span>
                 </p>
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-7">
                   <div className="rounded-xl border border-border/60 bg-secondary/20 p-3">
                     <span className="text-[10px] uppercase font-bold text-muted-foreground">
                       Referral Income
@@ -2824,7 +2828,22 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                             minimumFractionDigits: 2,
                           })}`}
                     </p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">Sponsor commissions</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">Direct commissions</p>
+                  </div>
+                  <div className="rounded-xl border border-border/60 bg-secondary/20 p-3">
+                    <span className="text-[10px] uppercase font-bold text-muted-foreground">
+                      Ad Boost Income
+                    </span>
+                    <p className="text-base font-black text-sky-400 mt-1">
+                      {earningsReportError
+                        ? "Unavailable"
+                        : `₹${earningsSummary.totalAdBoostIncome.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                          })}`}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      7-level Ads Promotion
+                    </p>
                   </div>
                   <div className="rounded-xl border border-border/60 bg-secondary/20 p-3">
                     <span className="text-[10px] uppercase font-bold text-muted-foreground">
@@ -2942,6 +2961,7 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                           <th className="pb-3 font-semibold">Total Earned</th>
                           <th className="pb-3 font-semibold">Withdrawn</th>
                           <th className="pb-3 font-semibold">Referral</th>
+                          <th className="pb-3 font-semibold">Ad Boost</th>
                           <th className="pb-3 font-semibold">Global Pool</th>
                           <th className="pb-3 font-semibold">AdSense</th>
                           <th className="pb-3 font-semibold">AdMob</th>
@@ -2985,6 +3005,9 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                               </td>
                               <td className="py-3 font-mono text-xs text-foreground">
                                 ₹{Number(u.referralIncome || 0).toFixed(2)}
+                              </td>
+                              <td className="py-3 font-mono text-xs text-sky-400">
+                                ₹{Number(u.adBoostIncome || 0).toFixed(2)}
                               </td>
                               <td className="py-3 font-mono text-xs text-foreground">
                                 ₹{Number(u.globalIncome || 0).toFixed(2)}
