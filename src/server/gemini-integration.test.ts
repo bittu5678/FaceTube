@@ -167,6 +167,21 @@ function createMockPool(options?: {
     async query(sql: string, params: any[] = []) {
       const normalized = sql.replace(/\s+/g, " ").trim();
 
+      if (normalized.includes("FROM INFORMATION_SCHEMA.TABLES")) {
+        return [[{ TABLE_NAME: "uploaded_videos" }, { TABLE_NAME: "video_likes" }]];
+      }
+
+      if (normalized.includes("FROM INFORMATION_SCHEMA.COLUMNS")) {
+        return [
+          [
+            { TABLE_NAME: "uploaded_videos", COLUMN_NAME: "is_blocked" },
+            { TABLE_NAME: "uploaded_videos", COLUMN_NAME: "visibility" },
+            { TABLE_NAME: "uploaded_videos", COLUMN_NAME: "likes" },
+            { TABLE_NAME: "uploaded_videos", COLUMN_NAME: "views" },
+          ],
+        ];
+      }
+
       if (normalized.includes("FROM sessions s") && normalized.includes("INNER JOIN users u")) {
         const tok = String(params[0] || "");
         if (tok === VALID_TOKEN) {

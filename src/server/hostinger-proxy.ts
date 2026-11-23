@@ -56,6 +56,17 @@ export function buildHostingerProxyTargetUrl(originalUrl: string | URL): string 
 }
 
 /**
+ * Returns true if the request pathname targets Nitro's Node-only Gemini AI endpoints (/api/ai/*).
+ * Normalizes repeated slashes and trailing extensions (e.g. /api/ai/chat or /api//ai/chat.php).
+ */
+export function isAiApiPath(pathname: string): boolean {
+  const normalized = String(pathname || "")
+    .replace(/\/+/g, "/")
+    .toLowerCase();
+  return normalized === "/api/ai" || normalized.startsWith("/api/ai/");
+}
+
+/**
  * Checks whether remote Hostinger PHP API mode is explicitly enabled.
  * Defaults to false unless USE_REMOTE_PHP_API === 'true'.
  */
@@ -67,8 +78,23 @@ export function isRemotePhpApiEnabled(env?: Record<string, string | undefined>):
 }
 
 /**
+ * Determines whether a given /api/* pathname should be proxied to Hostinger PHP.
+ * Never proxies /api/ai/* routes, even when USE_REMOTE_PHP_API=true.
+ */
+export function shouldProxyToHostingerPhp(
+  pathname: string,
+  env?: Record<string, string | undefined>,
+): boolean {
+  if (isAiApiPath(pathname)) {
+    return false;
+  }
+  return isRemotePhpApiEnabled(env);
+}
+
+/**
  * Proxies an incoming Request to Hostinger PHP backend.
  * Preserves HTTP method, headers, query strings, and body.
+ * Refuses to proxy /api/ai/* endpoints to Hostinger PHP.
  * Does not log sensitive headers (Authorization, Cookies, etc.).
  * Fails closed with 502 Bad Gateway if upstream connection throws,
  * preventing silent fallback to local in-memory or JSON storage.
@@ -77,7 +103,24 @@ export async function proxyHostingerApiRequest(
   request: Request,
   fetchFn: typeof fetch = fetch,
 ): Promise<Response> {
-  const targetUrl = buildHostingerProxyTargetUrl(request.url);
+  const parsed = new URL(request.url, "http://127.0.0.1:3000");
+  if (isAiApiPath(parsed.pathname)) {
+    return new Response(
+      JSON.stringify({
+        success: false,
+        code: "AI_PROXY_FORBIDDEN",
+        error: "AI endpoints are served by Node and cannot be proxied to Hostinger PHP.",
+      }),
+      {
+        status: 500,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+        },
+      },
+    );
+  }
+
+  const targetUrl = buildHostingerProxyTargetUrl(parsed);
 
   const forwardHeaders = new Headers();
   for (const [key, value] of request.headers.entries()) {

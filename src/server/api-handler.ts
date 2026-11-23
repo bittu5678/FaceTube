@@ -60,8 +60,9 @@ import {
   resolveGeminiConfig,
   runFaceTubeChatbotTurn,
   sanitizeGeminiErrorMessage,
+  scoreCandidateDeterministically,
   summarizeVideoContent,
-  type ChatTurnInput,
+  validateChatRequestPayload,
   type RecommendationCandidateVideo,
 } from "./gemini-service.ts";
 
@@ -206,6 +207,95 @@ export function isTrustedCloudflareIp(rawIp: string): boolean {
     return false;
   }
   return CLOUDFLARE_IP_BLOCKLIST.check(ip, ipVersion === 4 ? "ipv4" : "ipv6");
+}
+
+function parseNormalizedIp(raw: unknown): string | null {
+  let candidate = String(raw || "").trim();
+  if (!candidate) return null;
+  if (candidate.startsWith("[") && candidate.endsWith("]")) {
+    candidate = candidate.slice(1, -1).trim();
+  }
+  candidate = stripIpv4MappedPrefix(candidate);
+  const ipVersion = isIP(candidate);
+  return ipVersion === 4 || ipVersion === 6 ? candidate : null;
+}
+
+/**
+ * Resolves client IP safely for AI rate-limiting/auditing:
+ * - Never trusts X-Forwarded-For / X-Real-IP / Forwarded headers blindly.
+ * - Uses forwarding headers ONLY when immediate peer socket address is a valid IP
+ *   explicitly matched by TRUSTED_PROXY_IPS (IP/CIDR list), walking X-Forwarded-For
+ *   right-to-left past trusted proxy hops.
+ * - Falls back to direct socket address otherwise, and fails safely to "unknown"
+ *   when socket address cannot be determined.
+ */
+export function resolveTrustedAiClientIp(
+  request: Request,
+  env?: Record<string, string | undefined>,
+  requestMeta?: ApiRequestMeta,
+): string {
+  const peerIp = parseNormalizedIp(
+    requestMeta?.remoteAddress ?? readEnvValue(env, "__REMOTE_ADDR__"),
+  );
+  if (!peerIp) {
+    return "unknown";
+  }
+
+  const trustedProxyIpsRaw = readEnvValue(env, "TRUSTED_PROXY_IPS");
+  if (!trustedProxyIpsRaw) {
+    return peerIp;
+  }
+
+  const proxyList = new BlockList();
+  let hasValidProxyEntry = false;
+  for (const candidate of trustedProxyIpsRaw.split(",")) {
+    const clean = stripIpv4MappedPrefix(candidate);
+    if (!clean) continue;
+    const before = clean.includes("/")
+      ? isIP(stripIpv4MappedPrefix(clean.split("/", 2)[0] || ""))
+      : isIP(clean);
+    if (before === 4 || before === 6) {
+      addCidrEntryToBlockList(proxyList, clean);
+      hasValidProxyEntry = true;
+    }
+  }
+
+  if (!hasValidProxyEntry) {
+    return peerIp;
+  }
+
+  const isTrustedHop = (ip: string): boolean => {
+    const ver = isIP(ip);
+    if (ver !== 4 && ver !== 6) return false;
+    return proxyList.check(ip, ver === 4 ? "ipv4" : "ipv6");
+  };
+
+  // Only trust forwarding headers if the direct peer is an explicitly trusted proxy.
+  if (!isTrustedHop(peerIp)) {
+    return peerIp;
+  }
+
+  const rawXff = String(request.headers.get("x-forwarded-for") || "").trim();
+  if (rawXff) {
+    const parts = rawXff.split(",");
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const hopIp = parseNormalizedIp(parts[i]);
+      if (!hopIp) {
+        break;
+      }
+      if (isTrustedHop(hopIp)) {
+        continue;
+      }
+      return hopIp;
+    }
+  }
+
+  const realIp = parseNormalizedIp(request.headers.get("x-real-ip"));
+  if (realIp && !isTrustedHop(realIp)) {
+    return realIp;
+  }
+
+  return peerIp;
 }
 
 export function isTrustedCloudflareRequest(
@@ -354,6 +444,299 @@ export function normalizeServerMediaUrl(
   }
 
   return normalizedPath;
+}
+
+export const RECOMMENDATION_CATALOG_PAGE_SIZE = 100;
+export const RECOMMENDATION_MAX_SCAN_PAGES = 20;
+export const RECOMMENDATION_MAX_MEMORY_CANDIDATES = 120;
+
+const TRUSTED_FACETUBE_MEDIA_HOSTS = new Set([
+  "api.facetube.online",
+  "facetube.online",
+  "www.facetube.online",
+]);
+
+const TRUSTED_CATALOG_CDN_HOSTS = new Set([
+  "images.unsplash.com",
+  "vjs.zencdn.net",
+  "interactive-examples.mdn.mozilla.net",
+]);
+
+function isBlockedLocalOrPrivateHost(hostname: string): boolean {
+  const host = hostname
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "")
+    .toLowerCase();
+  if (
+    !host ||
+    host.includes("%") ||
+    host === "localhost" ||
+    host === "localhost.localdomain" ||
+    host === "metadata" ||
+    host === "metadata.google.internal" ||
+    host === "metadata.goog" ||
+    host === "host.docker.internal" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal") ||
+    host.endsWith(".localdomain")
+  ) {
+    return true;
+  }
+
+  let checkIp = host;
+  if (checkIp.startsWith("::ffff:")) {
+    const mapped = checkIp.slice(7);
+    if (isIP(mapped) === 4) {
+      checkIp = mapped;
+    }
+  }
+
+  const family = isIP(checkIp);
+  if (family === 4) {
+    const parts = checkIp.split(".").map((n) => Number.parseInt(n, 10));
+    if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true;
+    const [a, b, c] = parts as [number, number, number, number];
+    if (a === 0 || a === 10 || a === 127 || a >= 224) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
+    if (a === 192 && b === 88 && c === 99) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return true;
+    if (a === 203 && b === 0 && c === 113) return true;
+    return false;
+  }
+  if (family === 6) {
+    const norm = checkIp.toLowerCase();
+    if (
+      norm === "::" ||
+      norm === "::1" ||
+      norm.startsWith("fe80:") ||
+      norm.startsWith("fc") ||
+      norm.startsWith("fd") ||
+      norm.startsWith("ff")
+    ) {
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+function parseSafeConfiguredOrigin(rawCandidate: string, allowInsecureHttp: boolean): string | null {
+  const trimmed = String(rawCandidate || "").trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.username || parsed.password) return null;
+    if (parsed.protocol !== "https:" && (!allowInsecureHttp || parsed.protocol !== "http:")) {
+      return null;
+    }
+    if (!parsed.hostname) return null;
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function resolveRecommendationMediaOrigin(
+  request?: Request,
+  env?: Record<string, string | undefined>,
+  isProduction?: boolean,
+): string {
+  const readEnvVal = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+  const isProd =
+    isProduction !== undefined
+      ? isProduction
+      : isFailClosedProductionEnv(readEnvVal("APP_ENV"), readEnvVal("NODE_ENV"));
+
+  const envCandidates = [
+    readEnvVal("FACETUBE_API_BASE_URL"),
+    readEnvVal("API_BASE_URL"),
+    readEnvVal("VITE_MEDIA_BASE_URL"),
+    readEnvVal("VITE_API_BASE_URL").replace(/\/api\/?$/i, ""),
+  ];
+  for (const cand of envCandidates) {
+    const origin = parseSafeConfiguredOrigin(cand, !isProd);
+    if (origin) return origin;
+  }
+
+  if (request) {
+    try {
+      const reqUrl = new URL(request.url);
+      const reqHost = reqUrl.hostname.toLowerCase();
+      if (TRUSTED_FACETUBE_MEDIA_HOSTS.has(reqHost)) {
+        return PRODUCTION_API_DOMAIN;
+      }
+      if (!isProd && !reqUrl.username && !reqUrl.password) {
+        if (reqUrl.protocol === "https:" || reqUrl.protocol === "http:") {
+          return reqUrl.origin;
+        }
+      }
+    } catch {
+      // Ignore unparseable request.url
+    }
+  }
+
+  if (isProd) {
+    return PRODUCTION_API_DOMAIN;
+  }
+
+  return "";
+}
+
+/**
+ * Normalizes and security-validates thumbnail, video, and channel logo URLs returned
+ * by /api/ai/recommendations:
+ * - Resolves valid rooted/upload relative paths against the existing configured app origin.
+ * - Preserves valid HTTPS URLs on trusted application/catalog media origins.
+ * - Rejects unsafe schemes (javascript:, data:, blob:, file:, ftp:), embedded credentials,
+ *   protocol-relative URLs, path traversal, private/loopback external targets, malformed URLs,
+ *   and untrusted external origins.
+ */
+export function normalizeRecommendationMediaUrl(
+  rawUrl: unknown,
+  _kind: "video" | "thumbnail" | "logo",
+  request?: Request,
+  env?: Record<string, string | undefined>,
+  isProduction?: boolean,
+): string | null {
+  if (typeof rawUrl !== "string") {
+    return null;
+  }
+
+  let cleaned = rawUrl.trim();
+  const lower = cleaned.toLowerCase();
+  if (
+    !cleaned ||
+    lower === "null" ||
+    lower === "undefined" ||
+    lower === "nan" ||
+    cleaned.includes("[object")
+  ) {
+    return null;
+  }
+
+  for (let i = 0; i < cleaned.length; i++) {
+    const code = cleaned.charCodeAt(i);
+    if (code < 32 || code === 127) return null;
+  }
+  if (/[\s\\]/.test(cleaned)) {
+    return null;
+  }
+
+  // Unnest accidental duplicate origin prefix (e.g. https://api.facetube.onlinehttps://api.facetube.online/...)
+  const nestedMatch = cleaned.match(/^(https?:\/\/[^/]+)(https?:\/\/.+)$/i);
+  if (nestedMatch && nestedMatch[2]) {
+    cleaned = nestedMatch[2].trim();
+    if (!cleaned) return null;
+  }
+
+  // Reject protocol-relative URLs (//evil.com/...)
+  if (cleaned.startsWith("//")) {
+    return null;
+  }
+
+  const readEnvVal = (key: string) => String(env?.[key] ?? process.env[key] ?? "").trim();
+  const isProd =
+    isProduction !== undefined
+      ? isProduction
+      : isFailClosedProductionEnv(readEnvVal("APP_ENV"), readEnvVal("NODE_ENV"));
+  const configuredOrigin = resolveRecommendationMediaOrigin(request, env, isProd);
+
+  // Relative media paths: require rooted "/..." or "uploads/..." without any scheme prefix
+  const hasExplicitScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(cleaned);
+  if (!hasExplicitScheme) {
+    let relPath = cleaned;
+    if (relPath.startsWith("uploads/")) {
+      relPath = `/${relPath}`;
+    } else if (!relPath.startsWith("/")) {
+      return null;
+    }
+
+    const pathOnly = relPath.split(/[?#]/, 1)[0] || "";
+    const segments = pathOnly.split("/");
+    if (segments.some((seg) => seg === "." || seg === "..")) {
+      return null;
+    }
+    try {
+      const decodedSegments = decodeURIComponent(pathOnly).split("/");
+      if (decodedSegments.some((seg) => seg === "." || seg === "..")) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+
+    if (!configuredOrigin) {
+      return null;
+    }
+    try {
+      const resolved = new URL(relPath, configuredOrigin);
+      if (resolved.origin !== configuredOrigin || resolved.username || resolved.password) {
+        return null;
+      }
+      return resolved.toString();
+    } catch {
+      return null;
+    }
+  }
+
+  // Absolute URL validation
+  let parsed: URL;
+  try {
+    parsed = new URL(cleaned);
+  } catch {
+    return null;
+  }
+
+  if (parsed.username || parsed.password) {
+    return null;
+  }
+
+  const protocol = parsed.protocol.toLowerCase();
+  if (protocol !== "https:" && protocol !== "http:") {
+    return null;
+  }
+
+  const matchesConfiguredOrigin = Boolean(configuredOrigin && parsed.origin === configuredOrigin);
+
+  // External HTTP is rejected; local/configured HTTP origin is permitted only in non-production.
+  if (protocol === "http:") {
+    if (isProd || !matchesConfiguredOrigin) {
+      return null;
+    }
+    return parsed.toString();
+  }
+
+  // HTTPS validation
+  const host = parsed.hostname
+    .replace(/^\[|\]$/g, "")
+    .replace(/\.+$/, "")
+    .toLowerCase();
+  if (!host) {
+    return null;
+  }
+
+  if (parsed.port !== "" && parsed.port !== "443" && !matchesConfiguredOrigin) {
+    return null;
+  }
+
+  if (matchesConfiguredOrigin) {
+    return parsed.toString();
+  }
+
+  if (isBlockedLocalOrPrivateHost(host)) {
+    return null;
+  }
+
+  if (TRUSTED_FACETUBE_MEDIA_HOSTS.has(host) || TRUSTED_CATALOG_CDN_HOSTS.has(host)) {
+    return parsed.toString();
+  }
+
+  return null;
 }
 
 export function isMysqlDuplicateKeyError(err: unknown): boolean {
@@ -2557,6 +2940,119 @@ export function calculateDownlineLevelsTs(
     allMembers,
     sanitizedMembers,
   };
+}
+
+interface AiVideoSchemaSupport {
+  hasUploadedVideosTable: boolean;
+  hasIsBlockedCol: boolean;
+  hasVisibilityCol: boolean;
+  hasLikesCol: boolean;
+  hasViewsCol: boolean;
+  hasVideoLikesTable: boolean;
+  hasVideoViewsTable: boolean;
+}
+
+const AI_SCHEMA_CACHE_TTL_MS = 60_000;
+let aiVideoSchemaCache = new WeakMap<
+  object,
+  { checkedAt: number; support: AiVideoSchemaSupport }
+>();
+
+export function resetAiSchemaCacheForTesting(): void {
+  aiVideoSchemaCache = new WeakMap<object, { checkedAt: number; support: AiVideoSchemaSupport }>();
+}
+
+function resolveAiSummaryVisibilityFailClosed(value: unknown): "public" | "unlisted" | "private" {
+  const clean = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (clean === "public") return "public";
+  if (clean === "unlisted") return "unlisted";
+  return "private";
+}
+
+async function resolveAiVideoSchemaSupport(
+  pool: Pool,
+  geminiApiKey?: string,
+): Promise<AiVideoSchemaSupport> {
+  const cacheKey = pool as unknown as object;
+  const cached = aiVideoSchemaCache.get(cacheKey);
+  if (cached && Date.now() - cached.checkedAt < AI_SCHEMA_CACHE_TTL_MS) {
+    return cached.support;
+  }
+
+  let hasUploadedVideosTable = false;
+  let hasVideoLikesTable = false;
+  let hasVideoViewsTable = false;
+  let hasIsBlockedCol = false;
+  let hasVisibilityCol = false;
+  let hasLikesCol = false;
+  let hasViewsCol = false;
+
+  try {
+    const [tblRows]: any = await pool.query(
+      `SELECT TABLE_NAME
+       FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME IN ('uploaded_videos', 'video_likes', 'video_views')`,
+    );
+    if (Array.isArray(tblRows)) {
+      for (const row of tblRows) {
+        const tbl = String(row?.TABLE_NAME ?? row?.table_name ?? "").toLowerCase();
+        if (tbl === "uploaded_videos") hasUploadedVideosTable = true;
+        else if (tbl === "video_likes") hasVideoLikesTable = true;
+        else if (tbl === "video_views") hasVideoViewsTable = true;
+      }
+    }
+
+    const [colRows]: any = await pool.query(
+      `SELECT TABLE_NAME, COLUMN_NAME
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'uploaded_videos'
+         AND COLUMN_NAME IN ('is_blocked', 'visibility', 'likes', 'views')`,
+    );
+    if (Array.isArray(colRows)) {
+      for (const row of colRows) {
+        const tbl = String(row?.TABLE_NAME ?? row?.table_name ?? "").toLowerCase();
+        const col = String(row?.COLUMN_NAME ?? row?.column_name ?? "").toLowerCase();
+        if (tbl && tbl !== "uploaded_videos") continue;
+        if (col === "is_blocked") hasIsBlockedCol = true;
+        else if (col === "visibility") hasVisibilityCol = true;
+        else if (col === "likes") hasLikesCol = true;
+        else if (col === "views") hasViewsCol = true;
+      }
+    }
+  } catch (err) {
+    console.error(
+      "[FaceTube AI Schema Check Error]",
+      sanitizeGeminiErrorMessage(err, geminiApiKey),
+    );
+    throw new GeminiServiceError(
+      503,
+      "AI_SCHEMA_UNAVAILABLE",
+      "AI service is temporarily unavailable while verifying database schema requirements.",
+    );
+  }
+
+  if (!hasUploadedVideosTable || !hasIsBlockedCol || !hasVisibilityCol) {
+    throw new GeminiServiceError(
+      503,
+      "AI_SCHEMA_UNAVAILABLE",
+      "AI service is temporarily unavailable due to missing required video schema.",
+    );
+  }
+
+  const support: AiVideoSchemaSupport = {
+    hasUploadedVideosTable,
+    hasIsBlockedCol,
+    hasVisibilityCol,
+    hasLikesCol,
+    hasViewsCol,
+    hasVideoLikesTable,
+    hasVideoViewsTable,
+  };
+
+  aiVideoSchemaCache.set(cacheKey, { checkedAt: Date.now(), support });
+  return support;
 }
 
 export async function handleApiRequest(
@@ -23669,10 +24165,7 @@ async function dispatchApiRequest(
     const readEnv = (key: string) => readEnvValue(env, key);
     const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
     const pool = getMysqlPool();
-    const rateSubjectIp =
-      stripIpv4MappedPrefix(
-        String(requestMeta?.remoteAddress ?? readEnvValue(env, "__REMOTE_ADDR__") ?? "local"),
-      ) || "local";
+    const rateSubjectIp = resolveTrustedAiClientIp(request, env, requestMeta);
 
     const readJsonBodySafe = async (maxBytes: number): Promise<Record<string, unknown> | null> => {
       const contentLen = Number.parseInt(request.headers.get("content-length") || "0", 10);
@@ -23724,11 +24217,15 @@ async function dispatchApiRequest(
           { status: err.status, headers },
         );
       }
+      console.error(
+        "[FaceTube AI Internal Error]",
+        sanitizeGeminiErrorMessage(err, readEnv("GEMINI_API_KEY")),
+      );
       return jsonResponse(
         {
           success: false,
           code: "AI_INTERNAL_ERROR",
-          error: sanitizeGeminiErrorMessage(err, readEnv("GEMINI_API_KEY")),
+          error: "Internal AI service error",
         },
         500,
       );
@@ -23794,8 +24291,9 @@ async function dispatchApiRequest(
             );
           }
           if (pool) {
+            await resolveAiVideoSchemaSupport(pool, readEnv("GEMINI_API_KEY"));
             const [rows]: any = await pool.query(
-              `SELECT id, user_id, title, description, video_url, category, content_type, duration, visibility, is_blocked
+              `SELECT id, user_id, title, description, video_url, category, content_type, duration, visibility, COALESCE(is_blocked, 0) AS is_blocked
                FROM uploaded_videos WHERE id = ? LIMIT 1`,
               [videoId],
             );
@@ -23817,11 +24315,13 @@ async function dispatchApiRequest(
             .trim()
             .toUpperCase();
           const isOwner =
-            rowOwner === authCheck.effectiveUserId.toUpperCase() ||
-            rowOwner ===
-              String(authCheck.user.id || "")
-                .trim()
-                .toUpperCase();
+            rowOwner.length > 0 &&
+            (rowOwner === authCheck.effectiveUserId.toUpperCase() ||
+              (Boolean(authCheck.user.id) &&
+                rowOwner ===
+                  String(authCheck.user.id || "")
+                    .trim()
+                    .toUpperCase()));
           if (!isOwner && !isAdmin) {
             return jsonResponse(
               {
@@ -23931,6 +24431,7 @@ async function dispatchApiRequest(
 
         let r: any = null;
         if (pool) {
+          await resolveAiVideoSchemaSupport(pool, readEnv("GEMINI_API_KEY"));
           const [rows]: any = await pool.query(
             `SELECT id, user_id, title, description, video_url, video_type, category, duration, payment_status, visibility, COALESCE(is_blocked, 0) AS is_blocked
              FROM uploaded_videos WHERE id = ? LIMIT 1`,
@@ -23947,6 +24448,33 @@ async function dispatchApiRequest(
           return jsonResponse({ success: false, error: "Video not found." }, 404);
         }
 
+        const rowOwner = String(r.user_id ?? "").trim();
+        const authRecordId = authUser?.id ? String(authUser.id).trim() : "";
+        const isOwner = Boolean(
+          authUser &&
+          rowOwner.length > 0 &&
+          ((authUserId.length > 0 && rowOwner.toUpperCase() === authUserId.toUpperCase()) ||
+            (authRecordId.length > 0 && rowOwner.toUpperCase() === authRecordId.toUpperCase())),
+        );
+        const visibility = resolveAiSummaryVisibilityFailClosed(r.visibility);
+
+        // Enforce strict privacy for non-public (unlisted/private/unknown) videos before revealing other attributes
+        if ((visibility === "private" || visibility === "unlisted") && !isOwner && !isAdmin) {
+          if (!authUser) {
+            return jsonResponse(
+              { success: false, error: "Authentication required to summarize this video." },
+              401,
+            );
+          }
+          return jsonResponse(
+            {
+              success: false,
+              error: "Unauthorized: You do not have permission to summarize this video.",
+            },
+            403,
+          );
+        }
+
         if (r.is_blocked) {
           return jsonResponse(
             {
@@ -23957,13 +24485,6 @@ async function dispatchApiRequest(
           );
         }
 
-        const rowOwner = String(r.user_id || "").trim();
-        const isOwner = Boolean(
-          authUser &&
-          (rowOwner.toUpperCase() === authUserId.toUpperCase() ||
-            (authUser.id && rowOwner.toUpperCase() === String(authUser.id).trim().toUpperCase())),
-        );
-        const visibility = resolveStoredVisibilityFailClosed(r.visibility);
         const vType = String(r.video_type || "free")
           .trim()
           .toLowerCase();
@@ -23975,29 +24496,12 @@ async function dispatchApiRequest(
           (vType === "free" && (pStatus === "not_required" || pStatus === "paid")) ||
           (vType === "premium" && pStatus === "paid");
 
-        if (visibility === "private" && !isOwner && !isAdmin) {
-          if (!authUser) {
-            return jsonResponse(
-              { success: false, error: "Authentication required to summarize this private video." },
-              401,
-            );
-          }
-          return jsonResponse(
-            {
-              success: false,
-              error:
-                "Unauthorized: Private videos can only be summarized by their creator or administrators.",
-            },
-            403,
-          );
-        }
-
         if (!isPaymentEligible && !isOwner && !isAdmin) {
           if (!authUser) {
             return jsonResponse(
               {
                 success: false,
-                error: "Authentication required to summarize this unpaid Sponsor video.",
+                error: "Authentication required to summarize this video.",
               },
               401,
             );
@@ -24005,8 +24509,7 @@ async function dispatchApiRequest(
           return jsonResponse(
             {
               success: false,
-              error:
-                "Unauthorized: Unpaid Sponsor videos can only be summarized by their creator or administrators.",
+              error: "Unauthorized: You do not have permission to summarize this video.",
             },
             403,
           );
@@ -24065,17 +24568,7 @@ async function dispatchApiRequest(
         }
 
         const body = await readJsonBodySafe(32 * 1024);
-        const message = typeof body?.["message"] === "string" ? body["message"] : "";
-        const rawHistory = Array.isArray(body?.["history"]) ? body["history"] : [];
-        const history: ChatTurnInput[] = rawHistory
-          .filter((item): item is Record<string, unknown> =>
-            Boolean(item && typeof item === "object"),
-          )
-          .map((item) => ({
-            role: item["role"] === "assistant" ? ("assistant" as const) : ("user" as const),
-            text: typeof item["text"] === "string" ? item["text"] : "",
-          }))
-          .filter((item) => item.text.trim().length > 0);
+        const validatedChat = validateChatRequestPayload(body || {});
 
         const displayName = authCheck.user.channel_name || authCheck.user.name || "FaceTube Member";
         const role: "admin" | "user" =
@@ -24083,8 +24576,8 @@ async function dispatchApiRequest(
 
         const chatRes = await runFaceTubeChatbotTurn({
           env,
-          message,
-          history,
+          message: validatedChat.message,
+          history: validatedChat.history,
           userContext: { displayName, role },
         });
 
@@ -24163,81 +24656,265 @@ async function dispatchApiRequest(
               .slice(0, 10)
           : [];
 
-        // Load only real, non-blocked, public, payment-eligible catalog videos
-        const allEligible: RecommendationCandidateVideo[] = [];
+        // Resolve media URLs securely & normalize relative paths to the configured public origin
+        const normalizeRecVideoUrl = (raw: unknown) =>
+          normalizeRecommendationMediaUrl(raw, "video", request, env, isProduction) || "";
+        const normalizeRecThumbUrl = (raw: unknown) =>
+          normalizeRecommendationMediaUrl(raw, "thumbnail", request, env, isProduction) || "";
+        const normalizeRecLogoUrl = (raw: unknown) =>
+          normalizeRecommendationMediaUrl(raw, "logo", request, env, isProduction);
+
+        const eligibleById = new Map<string, RecommendationCandidateVideo>();
         const likedIdSet = new Set<string>();
+        const topPoolMap = new Map<string, { video: RecommendationCandidateVideo; score: number }>();
+
+        const mapMysqlRowToCandidate = (r: any): RecommendationCandidateVideo => {
+          const active = isAdPromotionActive({
+            is_promoted: r.is_promoted,
+            promotion_expires_at: r.promotion_expires_at,
+          });
+          const channelName = String(
+            r.creator_channel_name || r.creator_name || "FaceTube Creator",
+          );
+          return {
+            id: String(r.id),
+            userId: String(r.user_id || ""),
+            creatorName: channelName,
+            channelName,
+            channelLogoUrl: normalizeRecLogoUrl(r.creator_channel_logo_url ?? null),
+            title: String(r.title || "Untitled Video"),
+            description: String(r.description || ""),
+            videoUrl: normalizeRecVideoUrl(r.video_url),
+            thumbnailUrl: normalizeRecThumbUrl(r.thumbnail_url),
+            videoType: r.video_type === "premium" ? "premium" : "free",
+            contentType: r.content_type === "short" ? "short" : "long",
+            category: String(r.category || "General"),
+            duration: String(r.duration || "0:00"),
+            views: Number(r.views) || 0,
+            likes: Number(r.likes) || 0,
+            paymentStatus: String(r.payment_status || "not_required"),
+            isPromoted: active,
+            visibility: "public",
+            createdAt: String(r.created_at || ""),
+            updatedAt: String(r.updated_at || ""),
+          };
+        };
+
+        const mapStoreVideoToCandidate = (v: ServerStore["videos"][number]): RecommendationCandidateVideo => {
+          const vType = String(v.video_type || "free")
+            .trim()
+            .toLowerCase();
+          const pStatus =
+            String(v.payment_status || "")
+              .trim()
+              .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+          const owner = store.users.find(
+            (u) => u.user_id.toUpperCase() === (v.user_id || "").toUpperCase(),
+          );
+          const channelName = owner?.channel_name || v.creator_name || "FaceTube Creator";
+          return {
+            id: String(v.id),
+            userId: String(v.user_id || ""),
+            creatorName: channelName,
+            channelName,
+            channelLogoUrl: normalizeRecLogoUrl(owner?.channel_logo_url || null),
+            title: String(v.title || "Untitled Video"),
+            description: String(v.description || ""),
+            videoUrl: normalizeRecVideoUrl(v.video_url),
+            thumbnailUrl: normalizeRecThumbUrl(v.thumbnail_url),
+            videoType: vType === "premium" ? "premium" : "free",
+            contentType: v.content_type === "short" ? "short" : "long",
+            category: String(v.category || "General"),
+            duration: String(v.duration || "0:00"),
+            views: Number(v.views) || 0,
+            likes: Number(v.likes) || 0,
+            paymentStatus: pStatus,
+            isPromoted: isAdPromotionActive(v),
+            visibility: "public",
+            createdAt: String(v.created_at || ""),
+            updatedAt: String(v.updated_at || ""),
+          };
+        };
+
+        const signalMaps = {
+          watchedCategories: new Map<string, number>(),
+          likedCategories: new Map<string, number>(),
+          preferredCategories: new Set<string>(
+            preferredCategories.map((c) => c.trim().toLowerCase()).filter(Boolean),
+          ),
+          watchedCreators: new Set<string>(),
+        };
+
+        const registerSignalMetadata = (video: RecommendationCandidateVideo) => {
+          const cat = (video.category || "").trim().toLowerCase();
+          const creator = (video.channelName || video.creatorName || "").trim().toLowerCase();
+          if (watchedIdSet.has(video.id)) {
+            if (cat) {
+              signalMaps.watchedCategories.set(cat, (signalMaps.watchedCategories.get(cat) || 0) + 1);
+            }
+            if (creator) signalMaps.watchedCreators.add(creator);
+          }
+          if (likedIdSet.has(video.id)) {
+            if (cat) {
+              signalMaps.likedCategories.set(cat, (signalMaps.likedCategories.get(cat) || 0) + 1);
+            }
+            if (creator) signalMaps.watchedCreators.add(creator);
+          }
+        };
+
+        const trimTopCandidateBuffer = () => {
+          if (topPoolMap.size <= RECOMMENDATION_MAX_MEMORY_CANDIDATES) return;
+          const sorted = Array.from(topPoolMap.values()).sort((a, b) => b.score - a.score);
+          topPoolMap.clear();
+          for (const entry of sorted.slice(0, RECOMMENDATION_MAX_MEMORY_CANDIDATES)) {
+            topPoolMap.set(entry.video.id, entry);
+          }
+        };
+
+        const considerCandidate = (candidate: RecommendationCandidateVideo) => {
+          if (excludeVideoId && candidate.id === excludeVideoId) return;
+          if (topPoolMap.has(candidate.id)) return;
+          const { score } = scoreCandidateDeterministically(candidate, signalMaps);
+          topPoolMap.set(candidate.id, { video: candidate, score });
+        };
 
         if (pool) {
-          const [rows]: any = await pool.query(
-            `SELECT
-              v.id, v.user_id, v.creator_name, v.title, v.description, v.video_url, v.thumbnail_url,
-              v.video_type, v.content_type, v.category, v.duration, v.views, v.likes,
-              v.payment_status, v.is_promoted, v.visibility, v.promotion_expires_at,
-              v.created_at, v.updated_at,
-              u.channel_logo_url AS creator_channel_logo_url,
-              u.channel_name AS creator_channel_name
-             FROM uploaded_videos v
-             LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
-             WHERE COALESCE(v.is_blocked, 0) = 0
-               AND COALESCE(NULLIF(v.visibility, ''), 'public') = 'public'
-               AND (
-                 (v.video_type = 'free' AND COALESCE(NULLIF(v.payment_status, ''), 'not_required') IN ('not_required', 'paid'))
-                 OR (v.video_type = 'premium' AND v.payment_status = 'paid')
-               )
-             ORDER BY v.created_at DESC
-             LIMIT 100`,
-          );
-          const rowList = Array.isArray(rows) ? rows : [];
-          for (const r of rowList) {
-            const active = isAdPromotionActive({
-              is_promoted: r.is_promoted,
-              promotion_expires_at: r.promotion_expires_at,
-            });
-            const channelName = String(
-              r.creator_channel_name || r.creator_name || "FaceTube Creator",
+          const schema = await resolveAiVideoSchemaSupport(pool, readEnv("GEMINI_API_KEY"));
+          const viewsSelectExpr = schema.hasViewsCol ? "v.views" : "0 AS views";
+          const likesSelectExpr = schema.hasLikesCol ? "v.likes" : "0 AS likes";
+
+          if (authUserId && schema.hasVideoLikesTable) {
+            const [likeRows]: any = await pool.query(
+              `SELECT video_id FROM video_likes WHERE UPPER(user_id) = UPPER(?) LIMIT 50`,
+              [authUserId],
             );
-            allEligible.push({
-              id: String(r.id),
-              userId: String(r.user_id || ""),
-              creatorName: channelName,
-              channelName,
-              channelLogoUrl: r.creator_channel_logo_url
-                ? String(r.creator_channel_logo_url)
-                : null,
-              title: String(r.title || "Untitled Video"),
-              description: String(r.description || ""),
-              videoUrl: String(r.video_url || ""),
-              thumbnailUrl: String(r.thumbnail_url || ""),
-              videoType: r.video_type === "premium" ? "premium" : "free",
-              contentType: r.content_type === "short" ? "short" : "long",
-              category: String(r.category || "General"),
-              duration: String(r.duration || "0:00"),
-              views: Number(r.views) || 0,
-              likes: Number(r.likes) || 0,
-              paymentStatus: String(r.payment_status || "not_required"),
-              isPromoted: active,
-              visibility: "public",
-              createdAt: String(r.created_at || ""),
-              updatedAt: String(r.updated_at || ""),
-            });
+            if (Array.isArray(likeRows)) {
+              for (const lr of likeRows) {
+                if (lr?.video_id) likedIdSet.add(String(lr.video_id));
+              }
+            }
           }
 
-          if (authUserId) {
-            try {
-              const [likeRows]: any = await pool.query(
-                `SELECT video_id FROM video_likes WHERE UPPER(user_id) = UPPER(?) LIMIT 50`,
-                [authUserId],
-              );
-              if (Array.isArray(likeRows)) {
-                for (const lr of likeRows) {
-                  if (lr?.video_id) likedIdSet.add(String(lr.video_id));
-                }
+          const baseSelectCols = `
+            v.id, v.user_id, v.creator_name, v.title, v.description, v.video_url, v.thumbnail_url,
+            v.video_type, v.content_type, v.category, v.duration, ${viewsSelectExpr}, ${likesSelectExpr},
+            v.payment_status, v.is_promoted, v.visibility, v.promotion_expires_at,
+            v.created_at, v.updated_at,
+            u.channel_logo_url AS creator_channel_logo_url,
+            u.channel_name AS creator_channel_name`;
+          const baseEligibilityWhere = `
+            COALESCE(v.is_blocked, 0) = 0
+            AND COALESCE(NULLIF(v.visibility, ''), 'public') = 'public'
+            AND (
+              (v.video_type = 'free' AND COALESCE(NULLIF(v.payment_status, ''), 'not_required') IN ('not_required', 'paid'))
+              OR (v.video_type = 'premium' AND v.payment_status = 'paid')
+            )`;
+
+          // 1. Targeted bounded lookup for watched & liked IDs anywhere in catalog (<= 80 IDs)
+          const signalIds = Array.from(new Set([...watchedIdSet, ...likedIdSet])).slice(0, 80);
+          if (signalIds.length > 0) {
+            const placeholders = signalIds.map(() => "?").join(", ");
+            const [sigRows]: any = await pool.query(
+              `SELECT ${baseSelectCols}
+               FROM uploaded_videos v
+               LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
+               WHERE ${baseEligibilityWhere}
+                 AND v.id IN (${placeholders})
+               LIMIT ?`,
+              [...signalIds, signalIds.length],
+            );
+            const sigList = Array.isArray(sigRows) ? sigRows : [];
+            for (const r of sigList) {
+              const candidate = mapMysqlRowToCandidate(r);
+              if (watchedIdSet.has(candidate.id) || likedIdSet.has(candidate.id)) {
+                eligibleById.set(candidate.id, candidate);
+                registerSignalMetadata(candidate);
               }
-            } catch {
-              // Ignore if video_likes table absent
+            }
+          }
+
+          // 2. Bounded full-catalog paginated scan keeping only top-K candidates in memory
+          const excludeSql = excludeVideoId ? "AND v.id <> ?" : "";
+          const excludeParams = excludeVideoId ? [excludeVideoId] : [];
+          const seenScannedIds = new Set<string>();
+          let pagesScanned = 0;
+          let hitScanCeiling = false;
+
+          while (pagesScanned < RECOMMENDATION_MAX_SCAN_PAGES) {
+            const offset = pagesScanned * RECOMMENDATION_CATALOG_PAGE_SIZE;
+            const [rows]: any = await pool.query(
+              `SELECT ${baseSelectCols}
+               FROM uploaded_videos v
+               LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
+               WHERE ${baseEligibilityWhere}
+                 ${excludeSql}
+               ORDER BY v.created_at DESC, v.id DESC
+               LIMIT ? OFFSET ?`,
+              [...excludeParams, RECOMMENDATION_CATALOG_PAGE_SIZE, offset],
+            );
+            const rowList = Array.isArray(rows) ? rows : [];
+            if (rowList.length === 0) break;
+
+            let newRowsInPage = 0;
+            for (const r of rowList) {
+              const candidate = mapMysqlRowToCandidate(r);
+              if (seenScannedIds.has(candidate.id)) continue;
+              seenScannedIds.add(candidate.id);
+              newRowsInPage += 1;
+
+              if (
+                (watchedIdSet.has(candidate.id) || likedIdSet.has(candidate.id)) &&
+                !eligibleById.has(candidate.id)
+              ) {
+                eligibleById.set(candidate.id, candidate);
+                registerSignalMetadata(candidate);
+              }
+              considerCandidate(candidate);
+            }
+            trimTopCandidateBuffer();
+            pagesScanned += 1;
+
+            // Stop when final partial page reached or mock pool ignored offset
+            if (rowList.length < RECOMMENDATION_CATALOG_PAGE_SIZE || newRowsInPage === 0) {
+              break;
+            }
+            if (pagesScanned >= RECOMMENDATION_MAX_SCAN_PAGES) {
+              hitScanCeiling = true;
+            }
+          }
+
+          // 3. When catalog exceeds scan ceiling, query 1 bounded affinity page for user interests
+          if (hitScanCeiling) {
+            const affinityCats = Array.from(
+              new Set([
+                ...signalMaps.likedCategories.keys(),
+                ...signalMaps.watchedCategories.keys(),
+                ...signalMaps.preferredCategories.values(),
+              ]),
+            ).slice(0, 10);
+            if (affinityCats.length > 0) {
+              const catPlaceholders = affinityCats.map(() => "?").join(", ");
+              const [affRows]: any = await pool.query(
+                `SELECT ${baseSelectCols}
+                 FROM uploaded_videos v
+                 LEFT JOIN users u ON UPPER(u.user_id) = UPPER(v.user_id)
+                 WHERE ${baseEligibilityWhere}
+                   ${excludeSql}
+                   AND LOWER(v.category) IN (${catPlaceholders})
+                 ORDER BY v.is_promoted DESC, v.created_at DESC, v.id DESC
+                 LIMIT 50`,
+                [...excludeParams, ...affinityCats],
+              );
+              const affList = Array.isArray(affRows) ? affRows : [];
+              for (const r of affList) {
+                considerCandidate(mapMysqlRowToCandidate(r));
+              }
+              trimTopCandidateBuffer();
             }
           }
         } else {
+          // Local JSON store dev fallback: apply identical eligibility, signal, and bounded buffer rules
+          const eligibleStoreCandidates: RecommendationCandidateVideo[] = [];
           for (const v of store.videos) {
             if (v.is_blocked) continue;
             if (resolveStoredVisibilityFailClosed(v.visibility) !== "public") continue;
@@ -24253,36 +24930,20 @@ async function dispatchApiRequest(
               (vType === "premium" && pStatus === "paid");
             if (!isPayEligible) continue;
 
-            const owner = store.users.find(
-              (u) => u.user_id.toUpperCase() === (v.user_id || "").toUpperCase(),
-            );
-            const channelName = owner?.channel_name || v.creator_name || "FaceTube Creator";
-            allEligible.push({
-              id: String(v.id),
-              userId: String(v.user_id || ""),
-              creatorName: channelName,
-              channelName,
-              channelLogoUrl: owner?.channel_logo_url || null,
-              title: String(v.title || "Untitled Video"),
-              description: String(v.description || ""),
-              videoUrl: String(v.video_url || ""),
-              thumbnailUrl: String(v.thumbnail_url || ""),
-              videoType: vType === "premium" ? "premium" : "free",
-              contentType: v.content_type === "short" ? "short" : "long",
-              category: String(v.category || "General"),
-              duration: String(v.duration || "0:00"),
-              views: Number(v.views) || 0,
-              likes: Number(v.likes) || 0,
-              paymentStatus: pStatus,
-              isPromoted: isAdPromotionActive(v),
-              visibility: "public",
-              createdAt: String(v.created_at || ""),
-              updatedAt: String(v.updated_at || ""),
-            });
+            const candidate = mapStoreVideoToCandidate(v);
+            if (watchedIdSet.has(candidate.id) || likedIdSet.has(candidate.id)) {
+              eligibleById.set(candidate.id, candidate);
+              registerSignalMetadata(candidate);
+            }
+            eligibleStoreCandidates.push(candidate);
           }
+
+          for (const candidate of eligibleStoreCandidates) {
+            considerCandidate(candidate);
+          }
+          trimTopCandidateBuffer();
         }
 
-        const eligibleById = new Map(allEligible.map((v) => [v.id, v]));
         const watchedVideos = Array.from(watchedIdSet)
           .map((id) => eligibleById.get(id))
           .filter((v): v is RecommendationCandidateVideo => Boolean(v));
@@ -24290,9 +24951,9 @@ async function dispatchApiRequest(
           .map((id) => eligibleById.get(id))
           .filter((v): v is RecommendationCandidateVideo => Boolean(v));
 
-        const candidates = excludeVideoId
-          ? allEligible.filter((v) => v.id !== excludeVideoId)
-          : allEligible;
+        const candidates = Array.from(topPoolMap.values())
+          .sort((a, b) => b.score - a.score)
+          .map((entry) => entry.video);
 
         const ranked = await rankPersonalizedRecommendations({
           env,

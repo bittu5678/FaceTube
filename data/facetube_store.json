@@ -1552,7 +1552,9 @@
     "36e05b611db97aca9725653e198607947a103988bd71e2cb": "FT102857",
     "c32e1bc6a346d703e7854ee7e2bff9ff995bb92d78f33291": "FT102857",
     "c8bf8f5ff9f4a7c5f1ffd95e9dc4a21a65ca1d723e6c4eb4": "FT483921",
-    "ddc0bc2d8917b6144fb06a27bb18aa35901b8859f7eecb44": "FT900431"
+    "ddc0bc2d8917b6144fb06a27bb18aa35901b8859f7eecb44": "FT900431",
+    "15885381442b88a2adce10da9db973c1d0da329e17ea178a": "FT102857",
+    "b286814656f79a42babf95d62650a3a09705d616415ed5f9": "FT483921"
   },
   "videos": [
     {
@@ -2315,7 +2317,7 @@
       "content_type": "long",
       "category": "General",
       "duration": "1:00",
-      "views": 0,
+      "views": 3,
       "likes": 0,
       "payment_status": "not_required",
       "payment_amount": 0,

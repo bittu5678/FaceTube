@@ -94,6 +94,37 @@ export function extractTrustedPeerRemoteAddress(
   return trimmed !== "" ? trimmed : undefined;
 }
 
+export interface ServerApiRoutingDeps {
+  proxyFn?: (request: Request) => Promise<Response>;
+  apiHandlerFn?: (
+    request: Request,
+    env?: Record<string, string | undefined>,
+    requestMeta?: { remoteAddress?: string | undefined },
+  ) => Promise<Response | null>;
+}
+
+export async function routeServerApiRequest(
+  request: Request,
+  envRecord?: Record<string, string | undefined>,
+  ctx?: unknown,
+  deps?: ServerApiRoutingDeps,
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith("/api")) {
+    return null;
+  }
+  const { shouldProxyToHostingerPhp, proxyHostingerApiRequest } =
+    await import("./server/hostinger-proxy.ts");
+  if (shouldProxyToHostingerPhp(url.pathname, envRecord)) {
+    const proxy = deps?.proxyFn ?? proxyHostingerApiRequest;
+    return await proxy(request);
+  }
+  const apiHandler =
+    deps?.apiHandlerFn ?? (await import("./server/api-handler.ts")).handleApiRequest;
+  const remoteAddress = extractTrustedPeerRemoteAddress(request, ctx);
+  return await apiHandler(request, envRecord, remoteAddress ? { remoteAddress } : undefined);
+}
+
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
@@ -105,21 +136,9 @@ export default {
       }
 
       if (url.pathname.startsWith("/api")) {
-        const { isRemotePhpApiEnabled, proxyHostingerApiRequest } =
-          await import("./server/hostinger-proxy.ts");
         const envRecord =
           env && typeof env === "object" ? (env as Record<string, string | undefined>) : undefined;
-        const useRemote = isRemotePhpApiEnabled(envRecord);
-        if (useRemote) {
-          return await proxyHostingerApiRequest(request);
-        }
-        const { handleApiRequest } = await import("./server/api-handler.ts");
-        const remoteAddress = extractTrustedPeerRemoteAddress(request, ctx);
-        const apiResponse = await handleApiRequest(
-          request,
-          envRecord,
-          remoteAddress ? { remoteAddress } : undefined,
-        );
+        const apiResponse = await routeServerApiRequest(request, envRecord, ctx);
         if (apiResponse) return apiResponse;
       }
 
