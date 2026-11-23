@@ -151,40 +151,112 @@ export function evaluateAdsDistribution(
   };
 }
 
+export const KNOWN_PROMOTIONAL_ALIASES: Record<string, string[]> = {
+  FT102857: ["FTVIP"],
+  FT483921: ["CREATOR50"],
+};
+
+export interface SponsorLookupUser {
+  user_id: string;
+  referral_code?: string | null | undefined;
+  name?: string | undefined;
+}
+
 /**
- * Resolves up to 7 distinct valid upline sponsors using referral relationships.
- * Implements strict cycle detection and self-referral prevention.
+ * Resolves a sponsor target user strictly from a referral code using exact user_id
+ * or reverse lookup of KNOWN_PROMOTIONAL_ALIASES.
+ * NEVER matches another user's referral_code field (prevents sibling leakage).
+ * Requires an unambiguous single matching user and rejects self-referrals.
+ */
+export function resolveSponsorFromUsers<T extends SponsorLookupUser>(
+  rawRefCode: string | null | undefined,
+  excludeUserId: string | null | undefined,
+  users: T[],
+): T | null {
+  const refNorm = (rawRefCode || "").trim().toUpperCase();
+  const exclNorm = (excludeUserId || "").trim().toUpperCase();
+
+  if (!refNorm || (exclNorm && refNorm === exclNorm)) {
+    return null;
+  }
+
+  const aliasOwners: string[] = [];
+  for (const [ownerId, aliases] of Object.entries(KNOWN_PROMOTIONAL_ALIASES)) {
+    const ownerNorm = ownerId.trim().toUpperCase();
+    if (aliases.some((a) => a.trim().toUpperCase() === refNorm)) {
+      if (!aliasOwners.includes(ownerNorm)) {
+        aliasOwners.push(ownerNorm);
+      }
+    }
+  }
+
+  let targetUserId: string;
+  if (aliasOwners.length > 0) {
+    if (aliasOwners.length !== 1) {
+      return null;
+    }
+    targetUserId = aliasOwners[0]!;
+    if (exclNorm && targetUserId === exclNorm) {
+      return null;
+    }
+  } else {
+    targetUserId = refNorm;
+  }
+
+  const matches = users.filter((u) => {
+    const uNorm = (u.user_id || "").trim().toUpperCase();
+    if (!uNorm || (exclNorm && uNorm === exclNorm)) return false;
+    return uNorm === targetUserId;
+  });
+
+  if (matches.length !== 1) {
+    return null;
+  }
+
+  return matches[0]!;
+}
+
+/**
+ * Looks up the uploader's direct sponsor unambiguously from users.referral_code.
+ */
+export function resolveDirectSponsorFromUsers<T extends SponsorLookupUser>(
+  uploaderUserId: string | null | undefined,
+  users: T[],
+): T | null {
+  const normUploader = (uploaderUserId || "").trim().toUpperCase();
+  if (!normUploader) return null;
+
+  const uploaderMatches = users.filter(
+    (u) => (u.user_id || "").trim().toUpperCase() === normUploader,
+  );
+  if (uploaderMatches.length !== 1) {
+    return null;
+  }
+
+  const uploader = uploaderMatches[0]!;
+  return resolveSponsorFromUsers(uploader.referral_code, uploader.user_id, users);
+}
+
+/**
+ * Resolves up to 7 distinct valid upline sponsors using strict referral relationships.
+ * Implements strict cycle detection, promotional alias resolution, and sibling-leak prevention.
  */
 export function resolveUplineSponsors(
   uploaderUserId: string,
-  users: Array<{
-    user_id: string;
-    referral_code?: string | null | undefined;
-    name?: string | undefined;
-  }>,
+  users: SponsorLookupUser[],
 ): AdsUplineSponsor[] {
   const normUploader = uploaderUserId.trim().toUpperCase();
+  if (!normUploader) return [];
   const visited = new Set<string>([normUploader]);
   const uplines: AdsUplineSponsor[] = [];
 
   let currentUserId = normUploader;
 
   for (let level = 1; level <= 7; level++) {
-    const currentUser = users.find((u) => u.user_id.toUpperCase() === currentUserId);
-    if (!currentUser || !currentUser.referral_code) break;
-
-    const refCode = currentUser.referral_code.trim().toUpperCase();
-    if (!refCode) break;
-
-    const sponsor = users.find(
-      (u) =>
-        (u.user_id.toUpperCase() === refCode || u.referral_code?.toUpperCase() === refCode) &&
-        u.user_id.toUpperCase() !== currentUserId,
-    );
-
+    const sponsor = resolveDirectSponsorFromUsers(currentUserId, users);
     if (!sponsor) break;
 
-    const sponsorNormId = sponsor.user_id.toUpperCase();
+    const sponsorNormId = sponsor.user_id.trim().toUpperCase();
     if (visited.has(sponsorNormId)) {
       // Loop or repeated sponsor detected — safely terminate chain
       break;

@@ -30,6 +30,7 @@ import {
   type ReferralDashboardData,
   type ReferralMemberSummary,
 } from "@/lib/referral-service";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 export const Route = createFileRoute("/referral-members")({
   head: () => ({
@@ -62,7 +63,7 @@ function ReferralMembersPage() {
   const [copied, setCopied] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
 
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
   const [data, setData] = useState<ReferralDashboardData>({
     directReferralsCount: 0,
@@ -70,11 +71,12 @@ function ReferralMembersPage() {
     referralIncome: 0.0,
     referralCode: userId,
     referralNumber: profile?.mobile || dbUser?.mobile || "",
-    referralLink: `https://facetube.online/register?ref=${userId}`,
+    referralLink: userId ? `https://facetube.online/auth?ref=${encodeURIComponent(userId)}` : "",
     members: [],
   });
 
   useEffect(() => {
+    if (!userId) return;
     getReferralDashboardData(userId).then((res) => {
       setData(res);
     });

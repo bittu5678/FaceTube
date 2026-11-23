@@ -181,6 +181,7 @@ try {
             COALESCE(SUM(COALESCE(wb.total_earned, lt.ledger_total_earned, 0)), 0) AS total_earned,
             COALESCE(SUM(COALESCE(wb.total_withdrawn, lt.ledger_total_withdrawn, 0)), 0) AS total_withdrawn,
             COALESCE(SUM(COALESCE(lt.ledger_referral_income, wb.referral_income, 0)), 0) AS total_referral_income,
+            COALESCE(SUM(COALESCE(lt.ledger_ad_boost_income, 0)), 0) AS total_ad_boost_income,
             COALESCE(SUM(COALESCE(lt.ledger_global_income, wb.global_income, 0)), 0) AS total_global_income,
             COALESCE(SUM(COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0)), 0) AS total_adsense_income,
             COALESCE(SUM(COALESCE(lt.ledger_admob_income, wb.admob_income, 0)), 0) AS total_admob_income,
@@ -190,7 +191,14 @@ try {
         LEFT JOIN (
             SELECT 
                 UPPER(user_id) AS user_id,
-                SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission') THEN amount ELSE 0 END) AS ledger_referral_income,
+                SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission')
+                          AND UPPER(transaction_id) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                         THEN amount ELSE 0 END) AS ledger_referral_income,
+                SUM(CASE WHEN income_type IN ('ad_boost_income', 'marketing_ads')
+                          OR UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                         THEN amount ELSE 0 END) AS ledger_ad_boost_income,
                 SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
                 SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END) AS ledger_admob_income,
@@ -213,6 +221,7 @@ try {
         'totalEarned' => round(floatval($summaryRow['total_earned'] ?? 0), 2),
         'totalWithdrawn' => round(floatval($summaryRow['total_withdrawn'] ?? 0), 2),
         'totalReferralIncome' => round(floatval($summaryRow['total_referral_income'] ?? 0), 2),
+        'totalAdBoostIncome' => round(floatval($summaryRow['total_ad_boost_income'] ?? 0), 2),
         'totalGlobalIncome' => round(floatval($summaryRow['total_global_income'] ?? 0), 2),
         'totalAdsenseIncome' => round(floatval($summaryRow['total_adsense_income'] ?? 0), 2),
         'totalAdmobIncome' => round(floatval($summaryRow['total_admob_income'] ?? 0), 2),
@@ -233,6 +242,7 @@ try {
             COALESCE(wb.total_earned, lt.ledger_total_earned, 0.00) AS total_earned,
             COALESCE(wb.total_withdrawn, lt.ledger_total_withdrawn, 0.00) AS total_withdrawn,
             COALESCE(lt.ledger_referral_income, wb.referral_income, 0.00) AS referral_income,
+            COALESCE(lt.ledger_ad_boost_income, 0.00) AS ad_boost_income,
             COALESCE(lt.ledger_global_income, wb.global_income, 0.00) AS global_income,
             COALESCE(lt.ledger_adsense_income, wb.adsense_income, 0.00) AS adsense_income,
             COALESCE(lt.ledger_admob_income, wb.admob_income, 0.00) AS admob_income,
@@ -242,7 +252,14 @@ try {
         LEFT JOIN (
             SELECT 
                 UPPER(user_id) AS user_id,
-                SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission') THEN amount ELSE 0 END) AS ledger_referral_income,
+                SUM(CASE WHEN income_type IN ('referral_income', 'direct_commission')
+                          AND UPPER(transaction_id) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                         THEN amount ELSE 0 END) AS ledger_referral_income,
+                SUM(CASE WHEN income_type IN ('ad_boost_income', 'marketing_ads')
+                          OR UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                         THEN amount ELSE 0 END) AS ledger_ad_boost_income,
                 SUM(CASE WHEN income_type = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN income_type = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
                 SUM(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END) AS ledger_admob_income,
@@ -325,6 +342,7 @@ try {
             'totalEarned' => round(floatval($r['total_earned']), 2),
             'totalWithdrawn' => round(floatval($r['total_withdrawn']), 2),
             'referralIncome' => round(floatval($r['referral_income']), 2),
+            'adBoostIncome' => round(floatval($r['ad_boost_income'] ?? 0), 2),
             'globalIncome' => round(floatval($r['global_income']), 2),
             'adsenseIncome' => round(floatval($r['adsense_income']), 2),
             'admobIncome' => round(floatval($r['admob_income']), 2),

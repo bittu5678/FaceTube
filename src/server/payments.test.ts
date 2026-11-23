@@ -5419,8 +5419,16 @@ describe("Uniform ₹6 Premium Transaction Distribution (Phase 1)", () => {
           ],
         ];
       }
-      if (normalized.includes("SELECT user_id FROM users WHERE (UPPER(user_id)")) {
-        return [options.hasReferrer ? [{ user_id: "FT900431" }] : []];
+      if (
+        normalized.includes("SELECT user_id FROM users WHERE (UPPER(user_id)") ||
+        (normalized.includes("SELECT user_id, referral_code, name FROM users") &&
+          normalized.includes("UPPER(user_id) != UPPER(?)"))
+      ) {
+        return [
+          options.hasReferrer
+            ? [{ user_id: "FT900431", referral_code: null, name: "Sponsor" }]
+            : [],
+        ];
       }
       if (normalized.includes("FROM uploaded_videos WHERE (video_type = 'premium'")) {
         return [options.eligibleVideos ?? []];
@@ -6197,8 +6205,16 @@ describe("Phase 1.1: Global Pool Pending Reserve & Safe Settlement Tests", () =>
           ],
         ];
       }
-      if (normalized.includes("SELECT user_id FROM users WHERE (UPPER(user_id)")) {
-        return [options.hasReferrer ? [{ user_id: "FT900431" }] : []];
+      if (
+        normalized.includes("SELECT user_id FROM users WHERE (UPPER(user_id)") ||
+        (normalized.includes("SELECT user_id, referral_code, name FROM users") &&
+          normalized.includes("UPPER(user_id) != UPPER(?)"))
+      ) {
+        return [
+          options.hasReferrer
+            ? [{ user_id: "FT900431", referral_code: null, name: "Sponsor" }]
+            : [],
+        ];
       }
       if (normalized.includes("FROM uploaded_videos WHERE (video_type = 'premium'")) {
         if (normalized.includes("UPPER(user_id) != UPPER(?)")) {

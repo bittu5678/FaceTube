@@ -387,8 +387,8 @@ describe("Priority 2: Multi-Level Referral Downline & Team Members Verification"
       );
       assert.match(
         dashboardPhp,
-        /'referralLink'\s*=>\s*'https:\/\/facetube\.online\/register\?ref='\s*\.\s*urlencode\(\$shareCode\)/,
-        "dashboard.php must build referralLink with shareCode",
+        /'referralLink'\s*=>\s*'https:\/\/facetube\.online\/auth\?ref='\s*\.\s*urlencode\(\$shareCode\)/,
+        "dashboard.php must build referralLink with canonical /auth?ref= route and shareCode",
       );
 
       const teamPhp = fs.readFileSync(

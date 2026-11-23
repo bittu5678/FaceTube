@@ -32,11 +32,13 @@ try {
                 'userId' => $userId,
                 'referralCode' => $userId,
                 'referralNumber' => '',
-                'referralLink' => 'https://facetube.online/register?ref=' . urlencode($userId),
+                'referralLink' => 'https://facetube.online/auth?ref=' . urlencode($userId),
                 'directReferralsCount' => 0,
                 'teamMembersCount' => 0,
                 'referralIncome' => 0.00,
                 'directReferralIncome' => 0.00,
+                'adsPromotionIncome' => 0.00,
+                'pendingReferralIncome' => 0.00,
                 'totalReferralIncome' => 0.00,
                 'members' => [],
                 'referralMembers' => [],
@@ -58,16 +60,75 @@ try {
     $directCount = $downline['directCount'];
     $totalTeamCount = $downline['totalTeamCount'];
 
-    // Direct referrals list for video earnings calculation
+    // Direct referrals list for member breakdown
     $directReferrals = $downline['membersByLevel'][1] ?? [];
 
-    // 3. Fetch actual earned referral income from wallet_balances
-    $stmtWallet = $pdo->prepare('SELECT referral_income FROM wallet_balances WHERE UPPER(user_id) = UPPER(?) LIMIT 1');
-    $stmtWallet->execute([$userNormId]);
-    $walletRow = $stmtWallet->fetch();
-    $referralIncome = floatval($walletRow['referral_income'] ?? 0.00);
+    // 3. Authoritative Direct Premium Upload commission from payment_transactions + settled income_ledger
+    // Excludes not_required/free/pending/failed/unverified payments and Ads Promotion commissions
+    $directCommByMember = [];
+    $directReferralIncome = 0.00;
+    $stmtDirectLedger = $pdo->prepare("
+        SELECT UPPER(pt.user_id) AS member_user_id,
+               COALESCE(SUM(il.amount), 0) AS direct_commission
+        FROM income_ledger il
+        INNER JOIN payment_transactions pt
+          ON pt.payment_id = SUBSTRING(il.transaction_id, 8)
+        WHERE UPPER(il.user_id) = UPPER(?)
+          AND il.status = 'settled'
+          AND il.income_type IN ('referral_income', 'direct_commission')
+          AND il.transaction_id LIKE 'TX|_REF|_%' ESCAPE '|'
+          AND il.transaction_id NOT LIKE 'TX|_REF|_PENDING|_%' ESCAPE '|'
+          AND UPPER(COALESCE(il.special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
+          AND pt.purpose = 'premium_video_upload'
+          AND pt.amount > 0
+          AND COALESCE(NULLIF(TRIM(il.source_user_id), ''), '') != ''
+          AND UPPER(il.source_user_id) = UPPER(pt.user_id)
+        GROUP BY UPPER(pt.user_id)
+    ");
+    $stmtDirectLedger->execute([$userNormId]);
+    $directRows = $stmtDirectLedger->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($directRows as $dr) {
+        $mIdKey = strtoupper(trim((string)($dr['member_user_id'] ?? '')));
+        $amt = round(floatval($dr['direct_commission'] ?? 0), 2);
+        if ($mIdKey !== '' && $amt > 0) {
+            $directCommByMember[$mIdKey] = round(($directCommByMember[$mIdKey] ?? 0.0) + $amt, 2);
+            $directReferralIncome = round($directReferralIncome + $amt, 2);
+        }
+    }
 
-    // 4. Calculate member details from actual uploaded video records
+    // 3b. Separately track Ads Promotion commissions (never mixed into directReferralIncome)
+    $adsPromotionIncome = 0.00;
+    $stmtAdsLedger = $pdo->prepare("
+        SELECT COALESCE(SUM(amount), 0) AS ads_income
+        FROM income_ledger
+        WHERE UPPER(user_id) = UPPER(?)
+          AND status = 'settled'
+          AND (
+              income_type IN ('ad_boost_income', 'marketing_ads')
+              OR UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+              OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+          )
+    ");
+    $stmtAdsLedger->execute([$userNormId]);
+    $adsRow = $stmtAdsLedger->fetch(PDO::FETCH_ASSOC);
+    $adsPromotionIncome = round(floatval($adsRow['ads_income'] ?? 0), 2);
+
+    // 3c. Track pending referral entries separately (never counted in settled totals)
+    $pendingReferralIncome = 0.00;
+    $stmtPendingLedger = $pdo->prepare("
+        SELECT COALESCE(SUM(amount), 0) AS pending_income
+        FROM income_ledger
+        WHERE UPPER(user_id) = UPPER(?)
+          AND status = 'pending'
+          AND income_type IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+    ");
+    $stmtPendingLedger->execute([$userNormId]);
+    $pendingRow = $stmtPendingLedger->fetch(PDO::FETCH_ASSOC);
+    $pendingReferralIncome = round(floatval($pendingRow['pending_income'] ?? 0), 2);
+
+    $totalReferralIncome = round($directReferralIncome + $adsPromotionIncome, 2);
+
+    // 4. Calculate member video counts (display only — excluding not_required from paid premium count)
     $members = [];
     $stmtVideos = $pdo->prepare('
         SELECT video_type, payment_status, COUNT(*) as cnt
@@ -90,13 +151,13 @@ try {
             $cnt = intval($vr['cnt'] ?? 0);
             if ($vt === 'free') {
                 $freeCount += $cnt;
-            } elseif ($vt === 'premium' && ($ps === 'paid' || $ps === 'completed' || $ps === 'not_required')) {
+            } elseif ($vt === 'premium' && ($ps === 'paid' || $ps === 'completed')) {
                 $premiumPaidCount += $cnt;
             }
         }
 
-        // Each eligible paid premium video uploaded by direct referral earns ₹1.00
-        $memberComm = floatval($premiumPaidCount * 1.00);
+        // Direct Premium Upload commission derives strictly from authoritative ledger + verified payment records
+        $memberComm = round(floatval($directCommByMember[strtoupper(trim((string)$mUserId))] ?? 0.00), 2);
         $channelName = !empty($r['channelName'])
             ? $r['channelName']
             : (!empty($r['channel_name']) ? $r['channel_name'] : ($r['name'] ?? 'FaceTube Creator'));
@@ -137,12 +198,14 @@ try {
             'userId' => $userNormId,
             'referralCode' => $shareCode,
             'referralNumber' => $user['mobile'] ?? '',
-            'referralLink' => 'https://facetube.online/register?ref=' . urlencode($shareCode),
+            'referralLink' => 'https://facetube.online/auth?ref=' . urlencode($shareCode),
             'directReferralsCount' => $directCount,
             'teamMembersCount' => $totalTeamCount,
-            'referralIncome' => $referralIncome,
-            'directReferralIncome' => $referralIncome,
-            'totalReferralIncome' => $referralIncome,
+            'referralIncome' => $directReferralIncome,
+            'directReferralIncome' => $directReferralIncome,
+            'adsPromotionIncome' => $adsPromotionIncome,
+            'pendingReferralIncome' => $pendingReferralIncome,
+            'totalReferralIncome' => $totalReferralIncome,
             'levelCounts' => $downline['levelCounts'],
             'members' => $members,
             'referralMembers' => $members,

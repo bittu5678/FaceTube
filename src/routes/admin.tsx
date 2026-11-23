@@ -54,6 +54,7 @@ import { allVideos } from "@/data/videos";
 import { api } from "@/lib/api";
 import { AdminKycReviewTab } from "@/components/admin/AdminKycReviewTab";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
+import { getCountryName, UNKNOWN_COUNTRY_CODE } from "@/lib/countries";
 import type { RoleType } from "@/types/auth";
 
 export const Route = createFileRoute("/admin")({
@@ -117,6 +118,27 @@ interface PendingPayout {
   };
 }
 
+interface CountryVideoCountRow {
+  countryCode: string;
+  countryName: string;
+  totalVideos: number;
+  freeVideos: number;
+  premiumVideos: number;
+  activeAdsVideos: number;
+  blockedVideos: number;
+}
+
+interface CountryVideoCountsSummary {
+  totalCountries: number;
+  hasUnknown: boolean;
+  unknownVideos: number;
+  totalVideos: number;
+  freeVideos: number;
+  premiumVideos: number;
+  activeAdsVideos: number;
+  blockedVideos: number;
+}
+
 function AdminPage() {
   const navigate = useNavigate();
   const { user, isAdmin, isLoading, allUsers, updateUserRole, refreshUsers } = useAuth();
@@ -149,6 +171,14 @@ function AdminPage() {
   const [videoSearch, setVideoSearch] = useState("");
   const [moderatingId, setModeratingId] = useState<string | null>(null);
   const [videoCounts, setVideoCounts] = useState({ total: 0, blocked: 0, shorts: 0, long: 0 });
+
+  // Country-wise Video Counts Analytics
+  const [countryVideoCounts, setCountryVideoCounts] = useState<CountryVideoCountRow[]>([]);
+  const [countryCountsSummary, setCountryCountsSummary] =
+    useState<CountryVideoCountsSummary | null>(null);
+  const [countryCountsMigrationPending, setCountryCountsMigrationPending] = useState(false);
+  const [isLoadingCountryCounts, setIsLoadingCountryCounts] = useState(false);
+  const [countryCountsError, setCountryCountsError] = useState<string | null>(null);
 
   // Bulk Payout State (Req 8)
   const [payoutList, setPayoutList] = useState<PendingPayout[]>([]);
@@ -651,6 +681,25 @@ function AdminPage() {
     }
   }, []);
 
+  const loadCountryVideoCounts = useCallback(async () => {
+    setIsLoadingCountryCounts(true);
+    setCountryCountsError(null);
+    try {
+      const res = await api.admin.getVideoCountryCounts();
+      if (res && res.success) {
+        setCountryVideoCounts(Array.isArray(res.countries) ? res.countries : []);
+        setCountryCountsSummary(res.summary ?? null);
+        setCountryCountsMigrationPending(Boolean(res.migrationPending));
+      } else {
+        setCountryCountsError(res?.error || "Failed to load country-wise video counts.");
+      }
+    } catch (err: any) {
+      setCountryCountsError(err?.message || "Failed to load country-wise video counts.");
+    } finally {
+      setIsLoadingCountryCounts(false);
+    }
+  }, []);
+
   const loadPendingPayouts = useCallback(async () => {
     try {
       // Fetch recent withdrawal transactions across users
@@ -1010,6 +1059,7 @@ function AdminPage() {
   useEffect(() => {
     if (isAdmin) {
       loadModerationVideos();
+      loadCountryVideoCounts();
       loadPendingPayouts();
       loadCategories();
       loadEarningsReport();
@@ -1020,6 +1070,7 @@ function AdminPage() {
   }, [
     isAdmin,
     loadModerationVideos,
+    loadCountryVideoCounts,
     loadPendingPayouts,
     loadCategories,
     loadEarningsReport,
@@ -1275,6 +1326,7 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                 onClick={() => {
                   refreshUsers();
                   loadModerationVideos();
+                  loadCountryVideoCounts();
                   loadPendingPayouts();
                   loadCategories();
                   loadEarningsReport();
@@ -1370,6 +1422,186 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
               <p className="mt-1 text-xs text-muted-foreground">Full permission clearance</p>
             </div>
           </div>
+
+          {/* Country-wise Video Counts */}
+          <section
+            aria-label="Country-wise Video Counts"
+            className="mt-6 rounded-2xl border border-border bg-secondary/30 p-5 shadow-card"
+          >
+            <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+              <div className="flex items-start gap-3">
+                <span className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand/10 text-brand">
+                  <Globe className="h-4 w-4" />
+                </span>
+                <div>
+                  <h2 className="text-base font-bold tracking-tight text-foreground">
+                    Country-wise Video Counts
+                  </h2>
+                  <p className="text-xs text-muted-foreground">
+                    Production uploads grouped by server-verified country. Includes public,
+                    unlisted, private, and blocked videos; excludes pending/failed Premium uploads.
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={loadCountryVideoCounts}
+                disabled={isLoadingCountryCounts}
+                className="inline-flex items-center gap-2 self-start rounded-xl border border-border bg-background/70 px-3 py-1.5 text-xs font-semibold text-foreground transition hover:bg-background disabled:opacity-60 sm:self-auto"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${isLoadingCountryCounts ? "animate-spin" : ""}`}
+                />
+                <span>{isLoadingCountryCounts ? "Refreshing..." : "Refresh Counts"}</span>
+              </button>
+            </div>
+
+            {countryCountsMigrationPending && (
+              <div className="mt-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-2 text-xs text-amber-300">
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>
+                  Database column migration is pending; existing videos are shown under Unknown /
+                  Unassigned until migration is applied.
+                </span>
+              </div>
+            )}
+
+            {countryCountsSummary && (
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                <div className="rounded-xl border border-border/70 bg-background/50 px-3.5 py-2.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Total Eligible
+                  </p>
+                  <p className="mt-1 text-lg font-extrabold text-foreground">
+                    {countryCountsSummary.totalVideos.toLocaleString("en-IN")}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border/70 bg-background/50 px-3.5 py-2.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Free Videos
+                  </p>
+                  <p className="mt-1 text-lg font-extrabold text-foreground">
+                    {countryCountsSummary.freeVideos.toLocaleString("en-IN")}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border/70 bg-background/50 px-3.5 py-2.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Eligible Premium
+                  </p>
+                  <p className="mt-1 text-lg font-extrabold text-foreground">
+                    {countryCountsSummary.premiumVideos.toLocaleString("en-IN")}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border/70 bg-background/50 px-3.5 py-2.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Identified Countries
+                  </p>
+                  <p className="mt-1 text-lg font-extrabold text-foreground">
+                    {countryCountsSummary.totalCountries.toLocaleString("en-IN")}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border/70 bg-background/50 px-3.5 py-2.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Active Ads (Non-additive)
+                  </p>
+                  <p className="mt-1 text-lg font-extrabold text-amber-400">
+                    {countryCountsSummary.activeAdsVideos.toLocaleString("en-IN")}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border/70 bg-background/50 px-3.5 py-2.5">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Blocked (In Totals)
+                  </p>
+                  <p className="mt-1 text-lg font-extrabold text-red-400">
+                    {countryCountsSummary.blockedVideos.toLocaleString("en-IN")}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {isLoadingCountryCounts && countryVideoCounts.length === 0 && !countryCountsError ? (
+              <div className="mt-4 flex items-center justify-center gap-2 rounded-xl border border-border/60 bg-background/40 py-8 text-xs text-muted-foreground">
+                <div className="h-4 w-4 animate-spin rounded-full border-2 border-brand border-t-transparent" />
+                <span>Loading country-wise video counts...</span>
+              </div>
+            ) : countryCountsError ? (
+              <div className="mt-4 flex flex-col items-start justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-xs text-destructive sm:flex-row sm:items-center">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <span>{countryCountsError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={loadCountryVideoCounts}
+                  className="rounded-lg border border-destructive/40 bg-background/70 px-3 py-1 font-semibold text-foreground transition hover:bg-background"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : countryVideoCounts.length === 0 ? (
+              <div className="mt-4 rounded-xl border border-border/60 bg-background/40 py-8 text-center text-xs text-muted-foreground">
+                No eligible production videos found to aggregate by country.
+              </div>
+            ) : (
+              <div className="mt-4 overflow-x-auto rounded-xl border border-border/70 bg-background/50">
+                <table className="w-full min-w-[680px] text-left text-xs">
+                  <thead className="border-b border-border/70 bg-secondary/40 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    <tr>
+                      <th className="px-4 py-2.5">Country Name</th>
+                      <th className="px-4 py-2.5">Country Code</th>
+                      <th className="px-4 py-2.5 text-right">Total Videos</th>
+                      <th className="px-4 py-2.5 text-right">Free</th>
+                      <th className="px-4 py-2.5 text-right">Eligible Premium</th>
+                      <th className="px-4 py-2.5 text-right">Active Ads (Non-additive)</th>
+                      <th className="px-4 py-2.5 text-right">Blocked</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/50">
+                    {countryVideoCounts.map((row) => {
+                      const isUnknown = row.countryCode === UNKNOWN_COUNTRY_CODE;
+                      const displayName = isUnknown
+                        ? getCountryName(UNKNOWN_COUNTRY_CODE)
+                        : row.countryName || getCountryName(row.countryCode);
+                      return (
+                        <tr key={row.countryCode} className="transition hover:bg-secondary/30">
+                          <td className="px-4 py-2.5 font-semibold text-foreground">
+                            {displayName}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <span
+                              className={`inline-block rounded-md px-2 py-0.5 font-mono text-[11px] font-semibold ${
+                                isUnknown
+                                  ? "bg-muted text-muted-foreground"
+                                  : "bg-brand/10 text-brand"
+                              }`}
+                            >
+                              {row.countryCode}
+                            </span>
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-bold text-foreground">
+                            {row.totalVideos.toLocaleString("en-IN")}
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-muted-foreground">
+                            {row.freeVideos.toLocaleString("en-IN")}
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-muted-foreground">
+                            {row.premiumVideos.toLocaleString("en-IN")}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-medium text-amber-400">
+                            {row.activeAdsVideos.toLocaleString("en-IN")}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-medium text-red-400">
+                            {row.blockedVideos.toLocaleString("en-IN")}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
 
           {/* Navigation Tabs */}
           <div className="mt-8 flex flex-wrap gap-2 border-b border-border pb-3">

@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS `uploaded_videos` (
   `payment_amount` DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
   `is_promoted` TINYINT(1) NOT NULL DEFAULT 0,
   `visibility` ENUM('public', 'unlisted', 'private') NOT NULL DEFAULT 'public',
+  `country_code` VARCHAR(10) DEFAULT NULL,
   `promotion_plan` VARCHAR(50) DEFAULT NULL,
   `promotion_expires_at` DATETIME DEFAULT NULL,
   `promotion_payment_id` VARCHAR(100) DEFAULT NULL,
@@ -86,6 +87,7 @@ CREATE TABLE IF NOT EXISTS `uploaded_videos` (
   KEY `idx_videos_type_content` (`video_type`, `content_type`),
   KEY `idx_videos_payment_status` (`payment_status`),
   KEY `idx_videos_visibility` (`visibility`),
+  KEY `idx_videos_country_code` (`country_code`),
   KEY `idx_videos_promotion_payment_id` (`promotion_payment_id`),
   KEY `idx_videos_created_at` (`created_at` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

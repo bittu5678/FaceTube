@@ -16,6 +16,7 @@
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../response.php';
+require_once __DIR__ . '/../referrals/downline.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
@@ -903,25 +904,11 @@ try {
         $isSpecial = false;
         $specialTag = 'NORMAL_PREMIUM';
 
-        // Verify direct referral sponsor strictly from users table
+        // Verify direct referral sponsor strictly via trusted downline rules (user_id + promotional aliases only)
         $verifiedReferrerId = null;
-        $stmtUserRef = $pdo->prepare('SELECT id, referral_code FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1');
-        $stmtUserRef->execute([$userId]);
-        $userRow = $stmtUserRef->fetch();
-        $refCode = trim($userRow['referral_code'] ?? '');
-
-        if (!empty($refCode)) {
-            $stmtRef = $pdo->prepare('
-                SELECT user_id FROM users 
-                WHERE (UPPER(user_id) = UPPER(?) OR UPPER(referral_code) = UPPER(?)) 
-                  AND UPPER(user_id) != UPPER(?) 
-                LIMIT 1
-            ');
-            $stmtRef->execute([$refCode, $refCode, $userId]);
-            $refMatch = $stmtRef->fetch();
-            if ($refMatch) {
-                $verifiedReferrerId = $refMatch['user_id'];
-            }
+        $directSponsorMatch = resolveDirectSponsorUserPhp($pdo, $userId);
+        if ($directSponsorMatch && !empty($directSponsorMatch['user_id'])) {
+            $verifiedReferrerId = $directSponsorMatch['user_id'];
         }
 
         // Resolve Admin user identifier from database
@@ -1525,44 +1512,8 @@ try {
         $specialTag = 'ADS_PROMOTION';
         $globalPoolAllocation = 0.00;
 
-        // Resolve up to 7 valid upline sponsors with strict cycle and self-referral prevention
-        $visited = [strtoupper($userId) => true];
-        $uplines = [];
-        $currentUplineId = $userId;
-
-        for ($lvl = 1; $lvl <= 7; $lvl++) {
-            $stmtUpUser = $pdo->prepare('SELECT user_id, referral_code, name FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1');
-            $stmtUpUser->execute([$currentUplineId]);
-            $currUserRow = $stmtUpUser->fetch();
-            if (!$currUserRow) break;
-
-            $uRefCode = trim($currUserRow['referral_code'] ?? '');
-            if (empty($uRefCode)) break;
-
-            $stmtUpMatch = $pdo->prepare('
-                SELECT user_id, referral_code, name FROM users 
-                WHERE (UPPER(user_id) = UPPER(?) OR UPPER(referral_code) = UPPER(?)) 
-                  AND UPPER(user_id) != UPPER(?) 
-                LIMIT 1
-            ');
-            $stmtUpMatch->execute([$uRefCode, $uRefCode, $currentUplineId]);
-            $matchedSponsor = $stmtUpMatch->fetch();
-            if (!$matchedSponsor) break;
-
-            $sNormId = strtoupper($matchedSponsor['user_id']);
-            if (isset($visited[$sNormId])) {
-                // Terminate traversal on loop or already visited sponsor
-                break;
-            }
-
-            $visited[$sNormId] = true;
-            $uplines[$lvl] = [
-                'level' => $lvl,
-                'userId' => $matchedSponsor['user_id'],
-                'name' => $matchedSponsor['name'] ?? 'Creator'
-            ];
-            $currentUplineId = $matchedSponsor['user_id'];
-        }
+        // Resolve up to 7 valid upline sponsors with strict cycle, alias, and sibling-leak prevention
+        $uplines = resolveUplineSponsorsPhp($pdo, $userId, 7);
 
         // Direct Level 1 referrer ID for backward-compatible response
         $verifiedReferrerId = isset($uplines[1]) ? $uplines[1]['userId'] : null;

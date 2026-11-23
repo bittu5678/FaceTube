@@ -102,6 +102,7 @@ export interface UploadedVideo {
   promotionPlan?: string | undefined;
   promotionExpiresAt?: string | undefined;
   visibility?: VideoVisibility | undefined;
+  countryCode?: string | undefined;
   createdAt: string;
   updatedAt: string;
   isStale?: boolean | undefined;
@@ -1055,6 +1056,14 @@ export async function recordNewVideoUpload(params: {
             : resolvedVisibility,
         isPromoted: Boolean(serverVideo["is_promoted"] ?? serverVideo["isPromoted"] ?? false),
         isBlocked: Boolean(serverVideo["is_blocked"] ?? serverVideo["isBlocked"] ?? false),
+        ...(typeof (serverVideo["country_code"] ?? serverVideo["countryCode"]) === "string" &&
+        String(serverVideo["country_code"] ?? serverVideo["countryCode"]).trim() !== ""
+          ? {
+              countryCode: String(serverVideo["country_code"] ?? serverVideo["countryCode"])
+                .trim()
+                .toUpperCase(),
+            }
+          : {}),
       }
     : newVideo;
 

@@ -6,6 +6,7 @@
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../response.php';
+require_once __DIR__ . '/../country-utils.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
@@ -155,16 +156,35 @@ $safeRollback = static function (PDO $conn): void {
     }
 };
 
+$detectedCountryCode = ftResolveTrustedRequestCountryCode();
+$hasCountryCodeCol = false;
+try {
+    $colStmt = $pdo->query("
+        SELECT 1
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'uploaded_videos'
+          AND COLUMN_NAME = 'country_code'
+        LIMIT 1
+    ");
+    if ($colStmt && $colStmt->fetchColumn()) {
+        $hasCountryCodeCol = true;
+    }
+} catch (Throwable $_eCol) {
+    $hasCountryCodeCol = false;
+}
+
 try {
     $pdo->beginTransaction();
 
     // 1. Check existing video ownership before allowing updates
-    $stmtExisting = $pdo->prepare('
-        SELECT id, user_id, visibility, payment_status, payment_id, payment_amount, is_promoted, promotion_plan, promotion_expires_at, created_at
+    $countrySelectSql = $hasCountryCodeCol ? ', country_code' : '';
+    $stmtExisting = $pdo->prepare("
+        SELECT id, user_id, visibility, payment_status, payment_id, payment_amount, is_promoted, promotion_plan, promotion_expires_at, created_at{$countrySelectSql}
         FROM uploaded_videos
         WHERE id = ?
         FOR UPDATE
-    ');
+    ");
     $stmtExisting->execute([$id]);
     $existingVideo = $stmtExisting->fetch();
 
@@ -389,57 +409,110 @@ try {
         $thumbnailUrl = toAbsoluteMediaUrl($thumbnailUrl, 'images');
     }
 
-    // 4. Persist record (never trust client is_promoted on insert or overwrite on update)
-    $stmt = $pdo->prepare('
-        INSERT INTO uploaded_videos (
-            id, user_id, creator_name, title, description, video_url, thumbnail_url,
-            video_type, content_type, category, duration, views, likes,
-            payment_status, payment_id, payment_amount, is_promoted, visibility,
-            created_at, updated_at
-        ) VALUES (
-            ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, 0, 0,
-            ?, ?, ?, 0, ?,
-            NOW(), NOW()
-        )
-        ON DUPLICATE KEY UPDATE
-            creator_name = VALUES(creator_name),
-            title = VALUES(title),
-            description = VALUES(description),
-            video_url = VALUES(video_url),
-            thumbnail_url = VALUES(thumbnail_url),
-            video_type = VALUES(video_type),
-            content_type = VALUES(content_type),
-            category = VALUES(category),
-            duration = VALUES(duration),
-            payment_status = VALUES(payment_status),
-            payment_id = VALUES(payment_id),
-            payment_amount = VALUES(payment_amount),
-            visibility = VALUES(visibility),
-            updated_at = NOW()
-    ');
+    // 4. Persist record (never trust client is_promoted or country_code; preserve original country_code on update)
+    if ($hasCountryCodeCol) {
+        $stmt = $pdo->prepare('
+            INSERT INTO uploaded_videos (
+                id, user_id, creator_name, title, description, video_url, thumbnail_url,
+                video_type, content_type, category, duration, views, likes,
+                payment_status, payment_id, payment_amount, is_promoted, visibility, country_code,
+                created_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, 0, 0,
+                ?, ?, ?, 0, ?, ?,
+                NOW(), NOW()
+            )
+            ON DUPLICATE KEY UPDATE
+                creator_name = VALUES(creator_name),
+                title = VALUES(title),
+                description = VALUES(description),
+                video_url = VALUES(video_url),
+                thumbnail_url = VALUES(thumbnail_url),
+                video_type = VALUES(video_type),
+                content_type = VALUES(content_type),
+                category = VALUES(category),
+                duration = VALUES(duration),
+                payment_status = VALUES(payment_status),
+                payment_id = VALUES(payment_id),
+                payment_amount = VALUES(payment_amount),
+                visibility = VALUES(visibility),
+                updated_at = NOW()
+        ');
 
-    $stmt->execute([
-        $id,
-        $userId,
-        $creatorName,
-        $title,
-        $description,
-        $videoUrl,
-        $thumbnailUrl,
-        $videoType,
-        $contentType,
-        $category,
-        $duration,
-        $paymentStatus,
-        $paymentId,
-        $paymentAmount,
-        $visibility
-    ]);
+        $stmt->execute([
+            $id,
+            $userId,
+            $creatorName,
+            $title,
+            $description,
+            $videoUrl,
+            $thumbnailUrl,
+            $videoType,
+            $contentType,
+            $category,
+            $duration,
+            $paymentStatus,
+            $paymentId,
+            $paymentAmount,
+            $visibility,
+            $detectedCountryCode
+        ]);
+    } else {
+        $stmt = $pdo->prepare('
+            INSERT INTO uploaded_videos (
+                id, user_id, creator_name, title, description, video_url, thumbnail_url,
+                video_type, content_type, category, duration, views, likes,
+                payment_status, payment_id, payment_amount, is_promoted, visibility,
+                created_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, 0, 0,
+                ?, ?, ?, 0, ?,
+                NOW(), NOW()
+            )
+            ON DUPLICATE KEY UPDATE
+                creator_name = VALUES(creator_name),
+                title = VALUES(title),
+                description = VALUES(description),
+                video_url = VALUES(video_url),
+                thumbnail_url = VALUES(thumbnail_url),
+                video_type = VALUES(video_type),
+                content_type = VALUES(content_type),
+                category = VALUES(category),
+                duration = VALUES(duration),
+                payment_status = VALUES(payment_status),
+                payment_id = VALUES(payment_id),
+                payment_amount = VALUES(payment_amount),
+                visibility = VALUES(visibility),
+                updated_at = NOW()
+        ');
+
+        $stmt->execute([
+            $id,
+            $userId,
+            $creatorName,
+            $title,
+            $description,
+            $videoUrl,
+            $thumbnailUrl,
+            $videoType,
+            $contentType,
+            $category,
+            $duration,
+            $paymentStatus,
+            $paymentId,
+            $paymentAmount,
+            $visibility
+        ]);
+    }
 
     $pdo->commit();
 
     $persistedIsPromoted = $existingVideo ? (bool)$existingVideo['is_promoted'] : false;
+    $persistedCountryCode = $existingVideo
+        ? ftNormalizeCountryCode($existingVideo['country_code'] ?? null)
+        : ($hasCountryCodeCol ? $detectedCountryCode : FT_UNKNOWN_COUNTRY_CODE);
 
     jsonResponse([
         'success' => true,
@@ -462,6 +535,8 @@ try {
             'category' => $category,
             'duration' => $duration,
             'visibility' => $visibility,
+            'countryCode' => $persistedCountryCode,
+            'country_code' => $persistedCountryCode,
             'paymentStatus' => $paymentStatus,
             'payment_status' => $paymentStatus,
             'paymentId' => $paymentId,

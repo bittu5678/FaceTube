@@ -263,7 +263,7 @@ describe("Regression Tests: Stale Data Fallback & Withdrawal Error Resilience", 
             referralIncome: 350,
             referralCode: "FTVIP",
             referralNumber: "9876543210",
-            referralLink: "https://facetube.online/register?ref=FTVIP",
+            referralLink: "https://facetube.online/auth?ref=FTVIP",
             members: [],
           },
         });

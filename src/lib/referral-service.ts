@@ -2,7 +2,12 @@ import { api } from "./api";
 import { resolveMediaUrl } from "./media-url";
 import { getLocalDbUsers } from "./user-service";
 import { getStoredVideos } from "./video-service";
-import { getUserLedger } from "./ledger-service";
+import {
+  getUserLedger,
+  isAdsPromotionTransaction,
+  isDirectReferralTransaction,
+  isSettledDirectPremiumCommission,
+} from "./ledger-service";
 
 export interface ReferralMemberSummary {
   id: string;
@@ -18,14 +23,19 @@ export interface ReferralMemberSummary {
   freeVideosCount: number;
   premiumVideosCount: number;
   totalVideosCount: number;
-  directCommissionEarned: number; // ₹1 per premium video
+  directCommissionEarned: number;
   access: "Granted" | "Restricted";
 }
 
 export interface ReferralDashboardData {
   directReferralsCount: number;
   teamMembersCount: number; // MUST be labeled Team Members
-  referralIncome: number; // Total direct commission in ₹
+  referralIncome: number; // Verified Direct Premium Upload commission in ₹
+  directReferralIncome?: number | undefined;
+  adsPromotionIncome?: number | undefined;
+  pendingReferralIncome?: number | undefined;
+  totalReferralIncome?: number | undefined;
+  levelCounts?: Record<string, number> | undefined;
   referralCode: string;
   referralNumber: string;
   referralLink: string;
@@ -34,7 +44,7 @@ export interface ReferralDashboardData {
 }
 
 /**
- * Calculates referral network data from the actual database/users/videos records
+ * Calculates referral network data from the actual database/users/ledger records
  */
 export async function getReferralDashboardData(
   currentUserId: string,
@@ -45,13 +55,28 @@ export async function getReferralDashboardData(
     const res = await api.referrals.getDashboard(normId);
     if (res && res.dashboard) {
       const d = res.dashboard;
+      const directIncome = Number(d.directReferralIncome ?? d.referralIncome) || 0;
+      const adsIncome = Number(d.adsPromotionIncome) || 0;
+      const pendingIncome = Number(d.pendingReferralIncome) || 0;
+      const totalIncome =
+        d.totalReferralIncome !== undefined
+          ? Number(d.totalReferralIncome) || 0
+          : Math.round((directIncome + adsIncome) * 100) / 100;
+      const refCode = d.referralCode || normId;
+
       return {
         directReferralsCount: Number(d.directReferralsCount) || 0,
         teamMembersCount: Number(d.teamMembersCount) || 0,
-        referralIncome: Number(d.referralIncome) || 0,
-        referralCode: d.referralCode || normId,
+        referralIncome: directIncome,
+        directReferralIncome: directIncome,
+        adsPromotionIncome: adsIncome,
+        pendingReferralIncome: pendingIncome,
+        totalReferralIncome: totalIncome,
+        levelCounts: d.levelCounts,
+        referralCode: refCode,
         referralNumber: d.referralNumber || normId,
-        referralLink: d.referralLink || `https://facetube.online/register?ref=${normId}`,
+        referralLink:
+          d.referralLink || `https://facetube.online/auth?ref=${encodeURIComponent(refCode)}`,
         members: (d.members || []).map((m: any) => {
           const rawChannelName =
             typeof (m.channelName ?? m.channel_name) === "string"
@@ -113,12 +138,14 @@ export async function getReferralDashboardData(
       Boolean(u.referral_code && mySponsorCodes.has(u.referral_code.toUpperCase())),
   );
 
-  const directUserIds = new Set(directUsers.map((u) => u.user_id.toUpperCase()));
-
   // Calculate multi-level downline across Levels 1–10 for fallback
   const visited = new Set<string>([normId]);
   let currentParents: string[] = [];
   const allDescendantIds = new Set<string>();
+  const levelCounts: Record<string, number> = {};
+  for (let lvl = 1; lvl <= 10; lvl++) {
+    levelCounts[String(lvl)] = 0;
+  }
 
   for (const u of directUsers) {
     const uid = u.user_id.toUpperCase();
@@ -126,6 +153,7 @@ export async function getReferralDashboardData(
     allDescendantIds.add(uid);
     currentParents.push(uid);
   }
+  levelCounts["1"] = directUsers.length;
 
   for (let lvl = 2; lvl <= 10; lvl++) {
     if (currentParents.length === 0) break;
@@ -151,44 +179,56 @@ export async function getReferralDashboardData(
       allDescendantIds.add(uid);
       currentParents.push(uid);
     }
+    levelCounts[String(lvl)] = nextLevelUsers.length;
   }
 
   const teamMembersCount = allDescendantIds.size;
 
-  // Calculate direct commission from real ledger / premium video records
-  let directCommissionTotal = 0;
-  const referralTransactions = ledger.filter(
-    (t) => t.incomeType === "referral_income" || t.incomeType === "direct_commission",
-  );
-
-  if (referralTransactions.length > 0) {
-    directCommissionTotal = referralTransactions.reduce((acc, curr) => acc + curr.amount, 0);
-  } else {
-    // If no ledger entry yet, check referred members' actual paid premium videos
-    for (const v of allVideos) {
-      if (
-        directUserIds.has(v.userId.toUpperCase()) &&
-        v.videoType === "premium" &&
-        v.paymentStatus === "paid"
-      ) {
-        directCommissionTotal += 1.0;
-      }
-    }
+  // Calculate direct commission strictly from settled TX_REF_<payment_id> ledger entries
+  // Never infer commission from video counts (especially not_required/free/unverified) and never count Ads Promotion
+  const directCommByMember = new Map<string, number>();
+  for (const t of ledger) {
+    if (!isSettledDirectPremiumCommission(t)) continue;
+    const srcId = String(t.sourceUserId || "")
+      .trim()
+      .toUpperCase();
+    if (!srcId) continue;
+    directCommByMember.set(
+      srcId,
+      Math.round(((directCommByMember.get(srcId) || 0) + (Number(t.amount) || 0)) * 100) / 100,
+    );
   }
 
+  const adsPromotionIncome =
+    Math.round(
+      ledger
+        .filter((t) => isAdsPromotionTransaction(t) && t.status === "settled")
+        .reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0) * 100,
+    ) / 100;
+
+  const pendingReferralIncome =
+    Math.round(
+      ledger
+        .filter(
+          (t) =>
+            (isDirectReferralTransaction(t) || isAdsPromotionTransaction(t)) &&
+            t.status === "pending",
+        )
+        .reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0) * 100,
+    ) / 100;
+
   // Build member rows from genuine direct users only
+  let directCommissionTotal = 0;
   const members: ReferralMemberSummary[] = directUsers.map((m) => {
-    const memberVideos = allVideos.filter(
-      (v) => v.userId.toUpperCase() === m.user_id.toUpperCase(),
-    );
+    const mIdUpper = m.user_id.toUpperCase();
+    const memberVideos = allVideos.filter((v) => v.userId.toUpperCase() === mIdUpper);
     const freeCount = memberVideos.filter((v) => v.videoType === "free").length;
     const premiumCount = memberVideos.filter(
-      (v) =>
-        v.videoType === "premium" &&
-        (v.paymentStatus === "paid" || v.paymentStatus === "not_required"),
+      (v) => v.videoType === "premium" && v.paymentStatus === "paid",
     ).length;
 
-    const directComm = premiumCount * 1.0;
+    const directComm = Math.round((directCommByMember.get(mIdUpper) || 0) * 100) / 100;
+    directCommissionTotal = Math.round((directCommissionTotal + directComm) * 100) / 100;
     const rawChannelName = typeof m.channel_name === "string" ? m.channel_name.trim() : "";
     const channelName = rawChannelName || m.name || "FaceTube Creator";
     const rawLogo = typeof m.channel_logo_url === "string" ? m.channel_logo_url.trim() : "";
@@ -219,12 +259,17 @@ export async function getReferralDashboardData(
   const directReferralsCount = directUsers.length;
   const referralNumber = currentUserRecord?.mobile || "";
   const referralCode = shareCode;
-  const referralLink = `https://facetube.online/register?ref=${encodeURIComponent(referralCode)}`;
+  const referralLink = `https://facetube.online/auth?ref=${encodeURIComponent(referralCode)}`;
 
   return {
     directReferralsCount,
     teamMembersCount,
     referralIncome: directCommissionTotal,
+    directReferralIncome: directCommissionTotal,
+    adsPromotionIncome,
+    pendingReferralIncome,
+    totalReferralIncome: Math.round((directCommissionTotal + adsPromotionIncome) * 100) / 100,
+    levelCounts,
     referralCode,
     referralNumber,
     referralLink,

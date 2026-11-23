@@ -26,7 +26,7 @@ export interface LedgerTransaction {
   fee?: number | undefined;
   netAmount?: number | undefined;
   status: "settled" | "pending" | "failed";
-  specialTag?: "SPECIAL_GLOBAL_RULE" | "SPECIAL_TRANSACTION" | undefined;
+  specialTag?: "SPECIAL_GLOBAL_RULE" | "SPECIAL_TRANSACTION" | (string & {}) | undefined;
   description: string;
   batchId?: string | undefined;
   batch_id?: string | undefined;
@@ -86,6 +86,85 @@ export function calculateTotalAdEarnings(
     admobIncome,
     totalAdEarnings,
   };
+}
+
+/**
+ * Identifies multi-level Ads Promotion commission ledger entries across
+ * both canonical ('ad_boost_income') and legacy ('referral_income' with TX_ADS_L* / ADS_REF_L*) schemas.
+ */
+export function isAdsPromotionTransaction(
+  tx: Pick<LedgerTransaction, "incomeType" | "transactionId" | "specialTag">,
+): boolean {
+  const incomeType = String(tx.incomeType || "")
+    .trim()
+    .toLowerCase();
+  const txId = String(tx.transactionId || "")
+    .trim()
+    .toUpperCase();
+  const specialTag = String(tx.specialTag || "")
+    .trim()
+    .toUpperCase();
+
+  return (
+    incomeType === "ad_boost_income" ||
+    incomeType === "marketing_ads" ||
+    txId.startsWith("TX_ADS_L") ||
+    specialTag.startsWith("ADS_REF_L")
+  );
+}
+
+/**
+ * Extracts level 1-7 from an Ads Promotion transaction when encoded in transactionId or specialTag.
+ */
+export function extractAdsPromotionLevel(
+  tx: Pick<LedgerTransaction, "transactionId" | "specialTag">,
+): number | null {
+  const txId = String(tx.transactionId || "")
+    .trim()
+    .toUpperCase();
+  const specialTag = String(tx.specialTag || "")
+    .trim()
+    .toUpperCase();
+  const match = txId.match(/^TX_ADS_L(\d+)_/) || specialTag.match(/^ADS_REF_L(\d+)/);
+  if (!match) return null;
+  const lvl = Number(match[1]);
+  return Number.isInteger(lvl) && lvl >= 1 && lvl <= 7 ? lvl : null;
+}
+
+/**
+ * Identifies Direct Premium Upload referral ledger entries, strictly excluding
+ * Ads Promotion commissions.
+ */
+export function isDirectReferralTransaction(
+  tx: Pick<LedgerTransaction, "incomeType" | "transactionId" | "specialTag">,
+): boolean {
+  const incomeType = String(tx.incomeType || "")
+    .trim()
+    .toLowerCase();
+  if (incomeType !== "referral_income" && incomeType !== "direct_commission") {
+    return false;
+  }
+  return !isAdsPromotionTransaction(tx);
+}
+
+/**
+ * Identifies settled Direct Premium Upload commission transactions with authoritative TX_REF_<payment_id> format.
+ */
+export function isSettledDirectPremiumCommission(
+  tx: Pick<
+    LedgerTransaction,
+    "incomeType" | "transactionId" | "specialTag" | "status" | "sourceUserId"
+  >,
+): boolean {
+  if (!isDirectReferralTransaction(tx)) return false;
+  if (tx.status !== "settled") return false;
+  const txId = String(tx.transactionId || "")
+    .trim()
+    .toUpperCase();
+  if (!txId.startsWith("TX_REF_") || txId.startsWith("TX_REF_PENDING_")) {
+    return false;
+  }
+  return Boolean(tx.sourceUserId && String(tx.sourceUserId).trim() !== "");
 }
 
 const LOCAL_STORAGE_LEDGER_KEY = "facetube_income_ledger_v3";
@@ -244,9 +323,9 @@ export async function getUserLedger(userId?: string): Promise<LedgerTransaction[
         sourceUserId: d.source_user_id || d.sourceUserId || undefined,
         sourceUserName: d.source_user_name || d.sourceUserName || undefined,
         videoId: d.video_id || d.videoId || undefined,
-        incomeType: (d.income_type || d.incomeType) as IncomeType,
+        incomeType: (d.income_type || d.incomeType || d.type) as IncomeType,
         amount: Number(d.amount) || 0,
-        status: d.status || "settled",
+        status: String(d.status || "settled").toLowerCase() as LedgerTransaction["status"],
         specialTag: d.special_tag || d.specialTag || undefined,
         description: d.description || "",
         batchId: d.batch_id || d.batchId || undefined,

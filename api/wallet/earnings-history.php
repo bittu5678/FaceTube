@@ -128,7 +128,12 @@ try {
     if ($period === '12M') {
         $stmt = $pdo->prepare('
             SELECT DATE_FORMAT(created_at, "%Y-%m") as period_key,
-                   income_type,
+                   CASE
+                       WHEN income_type IN ("referral_income", "direct_commission")
+                        AND (UPPER(transaction_id) LIKE "TX|_ADS|_L%" ESCAPE "|" OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|")
+                       THEN "ad_boost_income"
+                       ELSE income_type
+                   END as income_type,
                    SUM(amount) as total_amount,
                    COUNT(*) as tx_count
             FROM income_ledger
@@ -136,7 +141,13 @@ try {
               AND income_type != "withdrawal"
               AND status = "settled"
               AND created_at >= DATE_SUB(DATE_FORMAT(CURDATE(), "%Y-%m-01"), INTERVAL 11 MONTH)
-            GROUP BY DATE_FORMAT(created_at, "%Y-%m"), income_type
+            GROUP BY DATE_FORMAT(created_at, "%Y-%m"),
+                     CASE
+                         WHEN income_type IN ("referral_income", "direct_commission")
+                          AND (UPPER(transaction_id) LIKE "TX|_ADS|_L%" ESCAPE "|" OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|")
+                         THEN "ad_boost_income"
+                         ELSE income_type
+                     END
             ORDER BY period_key ASC
         ');
         if ($stmt === false) {
@@ -174,7 +185,12 @@ try {
     } else {
         $stmt = $pdo->prepare('
             SELECT DATE(created_at) as period_key,
-                   income_type,
+                   CASE
+                       WHEN income_type IN ("referral_income", "direct_commission")
+                        AND (UPPER(transaction_id) LIKE "TX|_ADS|_L%" ESCAPE "|" OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|")
+                       THEN "ad_boost_income"
+                       ELSE income_type
+                   END as income_type,
                    SUM(amount) as total_amount,
                    COUNT(*) as tx_count
             FROM income_ledger
@@ -182,7 +198,13 @@ try {
               AND income_type != "withdrawal"
               AND status = "settled"
               AND created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
-            GROUP BY DATE(created_at), income_type
+            GROUP BY DATE(created_at),
+                     CASE
+                         WHEN income_type IN ("referral_income", "direct_commission")
+                          AND (UPPER(transaction_id) LIKE "TX|_ADS|_L%" ESCAPE "|" OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|")
+                         THEN "ad_boost_income"
+                         ELSE income_type
+                     END
             ORDER BY period_key ASC
         ');
         if ($stmt === false) {

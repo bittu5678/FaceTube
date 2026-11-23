@@ -871,6 +871,33 @@ export const api = {
       });
     },
 
+    getVideoCountryCounts: async () => {
+      return apiFetch<{
+        success: boolean;
+        countries: Array<{
+          countryCode: string;
+          countryName: string;
+          totalVideos: number;
+          freeVideos: number;
+          premiumVideos: number;
+          activeAdsVideos: number;
+          blockedVideos: number;
+        }>;
+        summary: {
+          totalCountries: number;
+          hasUnknown: boolean;
+          unknownVideos: number;
+          totalVideos: number;
+          freeVideos: number;
+          premiumVideos: number;
+          activeAdsVideos: number;
+          blockedVideos: number;
+        };
+        migrationPending?: boolean;
+        error?: string;
+      }>("/admin/video-country-counts.php");
+    },
+
     bulkPayout: async (params: {
       payouts: Array<{ userId: string; amount: number; transactionId?: string }>;
       notes?: string;

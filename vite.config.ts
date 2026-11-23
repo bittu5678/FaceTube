@@ -114,7 +114,9 @@ function facetubeApiDevPlugin(): Plugin {
               response = await proxyHostingerApiRequest(webReq);
             } else {
               const { handleApiRequest } = await import("./src/server/api-handler.ts");
-              response = await handleApiRequest(webReq);
+              response = await handleApiRequest(webReq, undefined, {
+                remoteAddress: req.socket?.remoteAddress,
+              });
             }
             if (response) {
               res.statusCode = response.status;

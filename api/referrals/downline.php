@@ -29,6 +29,133 @@ if (!function_exists('getKnownPromotionalAliases')) {
     }
 }
 
+if (!function_exists('resolveSponsorTargetUserIdPhp')) {
+    /**
+     * Resolves a sponsor user strictly by exact user_id or reverse lookup of KNOWN_PROMOTIONAL_ALIASES.
+     * NEVER matches another user's referral_code field (prevents sibling leakage).
+     * Requires an unambiguous single matching user and blocks self-referrals.
+     */
+    function resolveSponsorTargetUserIdPhp($pdo, $rawRefCode, $excludeUserId = '') {
+        $refNorm = strtoupper(trim((string)$rawRefCode));
+        $exclNorm = strtoupper(trim((string)$excludeUserId));
+
+        if ($refNorm === '' || ($exclNorm !== '' && $refNorm === $exclNorm)) {
+            return null;
+        }
+
+        $knownAliases = getKnownPromotionalAliases();
+        $aliasOwners = [];
+        foreach ($knownAliases as $ownerId => $aliases) {
+            $ownerNorm = strtoupper(trim((string)$ownerId));
+            if ($ownerNorm === '' || !is_array($aliases)) continue;
+            foreach ($aliases as $alias) {
+                if (strtoupper(trim((string)$alias)) === $refNorm) {
+                    $aliasOwners[] = $ownerNorm;
+                    break;
+                }
+            }
+        }
+        $aliasOwners = array_values(array_unique($aliasOwners));
+
+        $targetUserId = null;
+        if (!empty($aliasOwners)) {
+            if (count($aliasOwners) !== 1) {
+                return null;
+            }
+            $targetUserId = $aliasOwners[0];
+            if ($exclNorm !== '' && $targetUserId === $exclNorm) {
+                return null;
+            }
+        } else {
+            $targetUserId = $refNorm;
+        }
+
+        if ($exclNorm !== '') {
+            $stmt = $pdo->prepare('
+                SELECT user_id, referral_code, name
+                FROM users
+                WHERE UPPER(user_id) = UPPER(?)
+                  AND UPPER(user_id) != UPPER(?)
+                LIMIT 2
+            ');
+            $stmt->execute([$targetUserId, $exclNorm]);
+        } else {
+            $stmt = $pdo->prepare('
+                SELECT user_id, referral_code, name
+                FROM users
+                WHERE UPPER(user_id) = UPPER(?)
+                LIMIT 2
+            ');
+            $stmt->execute([$targetUserId]);
+        }
+
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (!is_array($rows) || count($rows) !== 1) {
+            return null;
+        }
+
+        return $rows[0];
+    }
+}
+
+if (!function_exists('resolveDirectSponsorUserPhp')) {
+    /**
+     * Looks up the uploader's direct sponsor unambiguously from users.referral_code.
+     */
+    function resolveDirectSponsorUserPhp($pdo, $userId) {
+        $userNorm = strtoupper(trim((string)$userId));
+        if ($userNorm === '') {
+            return null;
+        }
+        $stmtUserRef = $pdo->prepare('SELECT id, user_id, referral_code FROM users WHERE UPPER(user_id) = UPPER(?) LIMIT 1');
+        $stmtUserRef->execute([$userNorm]);
+        $userRow = $stmtUserRef->fetch(PDO::FETCH_ASSOC);
+        if (!$userRow) {
+            return null;
+        }
+        $refCode = trim((string)($userRow['referral_code'] ?? ''));
+        if ($refCode === '') {
+            return null;
+        }
+        return resolveSponsorTargetUserIdPhp($pdo, $refCode, (string)($userRow['user_id'] ?? $userNorm));
+    }
+}
+
+if (!function_exists('resolveUplineSponsorsPhp')) {
+    /**
+     * Resolves up to $maxLevels distinct valid upline sponsors with strict cycle and sibling-leak prevention.
+     */
+    function resolveUplineSponsorsPhp($pdo, $uploaderUserId, $maxLevels = 7) {
+        $normUploader = strtoupper(trim((string)$uploaderUserId));
+        if ($normUploader === '') {
+            return [];
+        }
+        $visited = [$normUploader => true];
+        $uplines = [];
+        $currentUplineId = $normUploader;
+
+        for ($lvl = 1; $lvl <= $maxLevels; $lvl++) {
+            $matchedSponsor = resolveDirectSponsorUserPhp($pdo, $currentUplineId);
+            if (!$matchedSponsor || empty($matchedSponsor['user_id'])) {
+                break;
+            }
+            $sNormId = strtoupper(trim((string)$matchedSponsor['user_id']));
+            if (isset($visited[$sNormId])) {
+                break;
+            }
+            $visited[$sNormId] = true;
+            $uplines[$lvl] = [
+                'level' => $lvl,
+                'userId' => $matchedSponsor['user_id'],
+                'name' => $matchedSponsor['name'] ?? 'Creator',
+            ];
+            $currentUplineId = $matchedSponsor['user_id'];
+        }
+
+        return $uplines;
+    }
+}
+
 if (!function_exists('calculateDownlineLevels')) {
     function calculateDownlineLevels($pdo, $rootUserId, $maxLevels = 10) {
         $rootNorm = strtoupper(trim((string)$rootUserId));
