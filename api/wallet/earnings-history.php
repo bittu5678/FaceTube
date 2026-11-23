@@ -129,8 +129,9 @@ try {
         $stmt = $pdo->prepare('
             SELECT DATE_FORMAT(created_at, "%Y-%m") as period_key,
                    CASE
-                       WHEN income_type IN ("referral_income", "direct_commission")
-                        AND (UPPER(transaction_id) LIKE "TX|_ADS|_L%" ESCAPE "|" OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|")
+                       WHEN COALESCE(income_type, "") IN ("ad_boost_income", "marketing_ads")
+                         OR UPPER(COALESCE(transaction_id, "")) LIKE "TX|_ADS|_L%" ESCAPE "|"
+                         OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|"
                        THEN "ad_boost_income"
                        ELSE income_type
                    END as income_type,
@@ -143,8 +144,9 @@ try {
               AND created_at >= DATE_SUB(DATE_FORMAT(CURDATE(), "%Y-%m-01"), INTERVAL 11 MONTH)
             GROUP BY DATE_FORMAT(created_at, "%Y-%m"),
                      CASE
-                         WHEN income_type IN ("referral_income", "direct_commission")
-                          AND (UPPER(transaction_id) LIKE "TX|_ADS|_L%" ESCAPE "|" OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|")
+                         WHEN COALESCE(income_type, "") IN ("ad_boost_income", "marketing_ads")
+                           OR UPPER(COALESCE(transaction_id, "")) LIKE "TX|_ADS|_L%" ESCAPE "|"
+                           OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|"
                          THEN "ad_boost_income"
                          ELSE income_type
                      END
@@ -186,8 +188,9 @@ try {
         $stmt = $pdo->prepare('
             SELECT DATE(created_at) as period_key,
                    CASE
-                       WHEN income_type IN ("referral_income", "direct_commission")
-                        AND (UPPER(transaction_id) LIKE "TX|_ADS|_L%" ESCAPE "|" OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|")
+                       WHEN COALESCE(income_type, "") IN ("ad_boost_income", "marketing_ads")
+                         OR UPPER(COALESCE(transaction_id, "")) LIKE "TX|_ADS|_L%" ESCAPE "|"
+                         OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|"
                        THEN "ad_boost_income"
                        ELSE income_type
                    END as income_type,
@@ -200,8 +203,9 @@ try {
               AND created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
             GROUP BY DATE(created_at),
                      CASE
-                         WHEN income_type IN ("referral_income", "direct_commission")
-                          AND (UPPER(transaction_id) LIKE "TX|_ADS|_L%" ESCAPE "|" OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|")
+                         WHEN COALESCE(income_type, "") IN ("ad_boost_income", "marketing_ads")
+                           OR UPPER(COALESCE(transaction_id, "")) LIKE "TX|_ADS|_L%" ESCAPE "|"
+                           OR UPPER(COALESCE(special_tag, "")) LIKE "ADS|_REF|_L%" ESCAPE "|"
                          THEN "ad_boost_income"
                          ELSE income_type
                      END

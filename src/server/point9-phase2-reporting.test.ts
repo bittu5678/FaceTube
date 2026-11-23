@@ -881,9 +881,9 @@ describe("FaceTube Point 9 – Phase 2: Referral & Earnings Reporting Fixes", ()
         }),
       );
       const nodeZeroBody = (await nodeZeroRes?.json()) as any;
-      // Confirms exact audited quirk: parseFloat("0") || 15.0 -> 15.0 and parseInt("0",10) || 10 -> 10
-      assert.equal(nodeZeroBody.settings.marketing_income_percentage, 15.0);
-      assert.equal(nodeZeroBody.settings.ads_referral_rates["2"], 10);
+      // Verify explicit 0% settings remain 0 instead of falling back to defaults
+      assert.equal(nodeZeroBody.settings.marketing_income_percentage, 0);
+      assert.equal(nodeZeroBody.settings.ads_referral_rates["2"], 0);
     });
   });
 

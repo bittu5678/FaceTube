@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ComponentType } from "react";
 import {
   Compass,
   Flame,
@@ -13,18 +13,23 @@ import {
   HeartPulse,
   Trophy,
   Theater,
+  Tag,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { VideoCard } from "@/components/videohub/VideoCard";
 import { AdMobBanner } from "@/components/admob/AdMobBanner";
 import {
+  buildExploreCategoryList,
   buildPublicFeedVideos,
-  fetchUploadedVideos,
   deriveCreatorsFromVideos,
+  fetchUploadedVideos,
+  filterExploreVideos,
+  getAvailableCategories,
   isPubliclyCacheableVideo,
   parseCatalogViews,
   type UploadedVideo,
+  VIDEO_CATEGORIES,
 } from "@/lib/video-service";
 
 export const Route = createFileRoute("/explore")({
@@ -40,55 +45,45 @@ export const Route = createFileRoute("/explore")({
   component: ExplorePage,
 });
 
-const exploreCategories = [
-  { label: "Trending", icon: Flame, color: "text-amber-500 bg-amber-500/10 border-amber-500/20" },
-  { label: "Music", icon: Music, color: "text-red-500 bg-red-500/10 border-red-500/20" },
-  {
-    label: "Gaming",
-    icon: Gamepad2,
-    color: "text-purple-500 bg-purple-500/10 border-purple-500/20",
-  },
-  {
-    label: "Movies & Shows",
-    icon: Clapperboard,
-    color: "text-blue-500 bg-blue-500/10 border-blue-500/20",
-  },
-  {
-    label: "News",
-    icon: Newspaper,
-    color: "text-emerald-500 bg-emerald-500/10 border-emerald-500/20",
-  },
-  {
-    label: "Podcasts",
-    icon: Podcast,
-    color: "text-indigo-500 bg-indigo-500/10 border-indigo-500/20",
-  },
-  {
-    label: "Learning",
-    icon: GraduationCap,
-    color: "text-cyan-500 bg-cyan-500/10 border-cyan-500/20",
-  },
-  {
-    label: "Health",
-    icon: HeartPulse,
-    color: "text-rose-500 bg-rose-500/10 border-rose-500/20",
-  },
-  {
-    label: "Sports",
-    icon: Trophy,
-    color: "text-orange-500 bg-orange-500/10 border-orange-500/20",
-  },
-  {
-    label: "Drama",
-    icon: Theater,
-    color: "text-violet-500 bg-violet-500/10 border-violet-500/20",
-  },
-];
+interface ExploreCategoryMeta {
+  icon: ComponentType<{ className?: string }>;
+  color: string;
+}
+
+const EXPLORE_CATEGORY_META: Record<string, ExploreCategoryMeta> = {
+  trending: { icon: Flame, color: "text-amber-500 bg-amber-500/10 border-amber-500/20" },
+  music: { icon: Music, color: "text-red-500 bg-red-500/10 border-red-500/20" },
+  gaming: { icon: Gamepad2, color: "text-purple-500 bg-purple-500/10 border-purple-500/20" },
+  movie: { icon: Clapperboard, color: "text-blue-500 bg-blue-500/10 border-blue-500/20" },
+  entertainment: { icon: Clapperboard, color: "text-blue-500 bg-blue-500/10 border-blue-500/20" },
+  blog: { icon: Newspaper, color: "text-emerald-500 bg-emerald-500/10 border-emerald-500/20" },
+  news: { icon: Newspaper, color: "text-emerald-500 bg-emerald-500/10 border-emerald-500/20" },
+  podcasts: { icon: Podcast, color: "text-indigo-500 bg-indigo-500/10 border-indigo-500/20" },
+  education: { icon: GraduationCap, color: "text-cyan-500 bg-cyan-500/10 border-cyan-500/20" },
+  coding: { icon: GraduationCap, color: "text-cyan-500 bg-cyan-500/10 border-cyan-500/20" },
+  ai: { icon: Sparkles, color: "text-cyan-500 bg-cyan-500/10 border-cyan-500/20" },
+  health: { icon: HeartPulse, color: "text-rose-500 bg-rose-500/10 border-rose-500/20" },
+  sports: { icon: Trophy, color: "text-orange-500 bg-orange-500/10 border-orange-500/20" },
+  drama: { icon: Theater, color: "text-violet-500 bg-violet-500/10 border-violet-500/20" },
+};
+
+function getExploreCategoryMeta(label: string): ExploreCategoryMeta {
+  const key = label.trim().toLowerCase();
+  return (
+    EXPLORE_CATEGORY_META[key] ?? {
+      icon: Tag,
+      color: "text-brand bg-brand/10 border-brand/20",
+    }
+  );
+}
 
 function ExplorePage() {
   const [selectedTag, setSelectedTag] = useState<string>("Trending");
   const [searchQuery, setSearchQuery] = useState("");
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
+  const [availableCategories, setAvailableCategories] = useState<string[]>(() => [
+    ...VIDEO_CATEGORIES,
+  ]);
 
   useEffect(() => {
     let isMounted = true;
@@ -108,6 +103,34 @@ function ExplorePage() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    const loadCategories = () => {
+      getAvailableCategories()
+        .then((cats) => {
+          if (isMounted && Array.isArray(cats) && cats.length > 0) {
+            setAvailableCategories(cats);
+          }
+        })
+        .catch(() => {});
+    };
+    loadCategories();
+    window.addEventListener("facetube:categories-updated", loadCategories);
+    return () => {
+      isMounted = false;
+      window.removeEventListener("facetube:categories-updated", loadCategories);
+    };
+  }, []);
+
+  const exploreCategories = useMemo(
+    () =>
+      buildExploreCategoryList(availableCategories).map((label) => ({
+        label,
+        ...getExploreCategoryMeta(label),
+      })),
+    [availableCategories],
+  );
 
   const eligibleVideos = useMemo(() => buildPublicFeedVideos(uploadedVideos), [uploadedVideos]);
 
@@ -133,41 +156,14 @@ function ExplorePage() {
     }));
   }, [uploadedVideos]);
 
-  const filteredVideos = useMemo(() => {
-    return eligibleVideos.filter((v) => {
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        return (
-          v.title.toLowerCase().includes(q) ||
-          v.channel.toLowerCase().includes(q) ||
-          v.category.toLowerCase().includes(q)
-        );
-      }
-      if (selectedTag === "Trending") return true;
-      if (selectedTag === "Music") return v.category === "Music";
-      if (selectedTag === "Gaming") return v.category === "Gaming";
-      if (selectedTag === "Movies & Shows") {
-        return v.category === "Movie" || v.category === "Entertainment";
-      }
-      if (selectedTag === "News") return v.category === "News" || v.category === "Blog";
-      if (selectedTag === "Learning") {
-        return (
-          v.category === "Coding" ||
-          v.category === "AI" ||
-          v.category === "React" ||
-          v.category === "Education"
-        );
-      }
-      if (selectedTag === "Podcasts") return v.category === "Podcasts";
-      if (selectedTag === "Health") return (v.category || "").trim().toLowerCase() === "health";
-      if (selectedTag === "Sports") {
-        const norm = (v.category || "").trim().toLowerCase();
-        return norm === "sports" || norm === "sport";
-      }
-      if (selectedTag === "Drama") return (v.category || "").trim().toLowerCase() === "drama";
-      return true;
-    });
-  }, [eligibleVideos, searchQuery, selectedTag]);
+  const filteredVideos = useMemo(
+    () =>
+      filterExploreVideos(eligibleVideos, {
+        selectedTag,
+        searchQuery,
+      }),
+    [eligibleVideos, searchQuery, selectedTag],
+  );
 
   return (
     <VideoHubLayout query={searchQuery} onQueryChange={setSearchQuery}>
@@ -191,7 +187,7 @@ function ExplorePage() {
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
           {exploreCategories.map((cat) => {
             const Icon = cat.icon;
-            const isSelected = selectedTag === cat.label;
+            const isSelected = selectedTag.trim().toLowerCase() === cat.label.trim().toLowerCase();
             return (
               <button
                 key={cat.label}

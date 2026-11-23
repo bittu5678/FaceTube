@@ -37,6 +37,8 @@ try {
                 'teamMembersCount' => 0,
                 'referralIncome' => 0.00,
                 'directReferralIncome' => 0.00,
+                'attributedDirectReferralIncome' => 0.00,
+                'unattributedDirectReferralIncome' => 0.00,
                 'adsPromotionIncome' => 0.00,
                 'pendingReferralIncome' => 0.00,
                 'totalReferralIncome' => 0.00,
@@ -66,11 +68,22 @@ try {
     // 3. Authoritative Direct Premium Upload & Referral commission from settled income_ledger
     // Preserves valid settled ledger entries even when a matching payment_transactions row does not exist;
     // excludes pending, non-premium matched payments, and Ads Promotion commissions.
+    $directMemberIdSet = [];
+    foreach ($directReferrals as $drMember) {
+        $dmId = strtoupper(trim((string)($drMember['user_id'] ?? ($drMember['userId'] ?? ''))));
+        if ($dmId !== '') {
+            $directMemberIdSet[$dmId] = true;
+        }
+    }
+
     $directCommByMember = [];
-    $directReferralIncome = 0.00;
+    $attributedDirectReferralIncome = 0.00;
+    $unattributedDirectReferralIncome = 0.00;
+    $seenDirectTxKeys = [];
     $stmtDirectLedger = $pdo->prepare("
-        SELECT COALESCE(NULLIF(UPPER(TRIM(il.source_user_id)), ''), NULLIF(UPPER(TRIM(pt.user_id)), ''), '') AS member_user_id,
-               COALESCE(SUM(il.amount), 0) AS direct_commission
+        SELECT COALESCE(NULLIF(UPPER(TRIM(il.transaction_id)), ''), '') AS dedup_tx_id,
+               MAX(COALESCE(NULLIF(UPPER(TRIM(il.source_user_id)), ''), NULLIF(UPPER(TRIM(pt.user_id)), ''), '')) AS member_user_id,
+               MAX(il.amount) AS direct_commission
         FROM income_ledger il
         LEFT JOIN payment_transactions pt
           ON UPPER(COALESCE(il.transaction_id, '')) LIKE 'TX|_REF|_%' ESCAPE '|'
@@ -94,32 +107,51 @@ try {
                   )
               )
           )
-        GROUP BY COALESCE(NULLIF(UPPER(TRIM(il.source_user_id)), ''), NULLIF(UPPER(TRIM(pt.user_id)), ''), '')
+        GROUP BY COALESCE(NULLIF(UPPER(TRIM(il.transaction_id)), ''), CONCAT('ID_', il.id))
     ");
     $stmtDirectLedger->execute([$userNormId]);
     $directRows = $stmtDirectLedger->fetchAll(PDO::FETCH_ASSOC);
     foreach ($directRows as $dr) {
+        $dedupTxId = strtoupper(trim((string)($dr['dedup_tx_id'] ?? '')));
+        if ($dedupTxId !== '') {
+            if (isset($seenDirectTxKeys[$dedupTxId])) {
+                continue;
+            }
+            $seenDirectTxKeys[$dedupTxId] = true;
+        }
         $mIdKey = strtoupper(trim((string)($dr['member_user_id'] ?? '')));
         $amt = round(floatval($dr['direct_commission'] ?? 0), 2);
         if ($amt > 0) {
-            if ($mIdKey !== '') {
+            if ($mIdKey !== '' && isset($directMemberIdSet[$mIdKey])) {
                 $directCommByMember[$mIdKey] = round(($directCommByMember[$mIdKey] ?? 0.0) + $amt, 2);
+            } else {
+                $unattributedDirectReferralIncome = round($unattributedDirectReferralIncome + $amt, 2);
             }
-            $directReferralIncome = round($directReferralIncome + $amt, 2);
         }
     }
 
     // 3b. Separately track Ads Promotion commissions (never mixed into directReferralIncome)
     $adsPromotionIncome = 0.00;
     $stmtAdsLedger = $pdo->prepare("
-        SELECT COALESCE(SUM(amount), 0) AS ads_income
-        FROM income_ledger
-        WHERE UPPER(user_id) = UPPER(?)
-          AND status = 'settled'
+        SELECT COALESCE(SUM(l_ads.amount), 0) AS ads_income
+        FROM income_ledger l_ads
+        WHERE UPPER(l_ads.user_id) = UPPER(?)
+          AND l_ads.status = 'settled'
+          AND l_ads.amount > 0
           AND (
-              COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
-              OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
-              OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+              COALESCE(l_ads.income_type, '') IN ('ad_boost_income', 'marketing_ads')
+              OR UPPER(COALESCE(l_ads.transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+              OR UPPER(COALESCE(l_ads.special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+          )
+          AND (
+              COALESCE(NULLIF(UPPER(TRIM(l_ads.transaction_id)), ''), '') = ''
+              OR l_ads.id = (
+                  SELECT MIN(l2.id)
+                  FROM income_ledger l2
+                  WHERE UPPER(l2.user_id) = UPPER(l_ads.user_id)
+                    AND l2.status = 'settled'
+                    AND UPPER(TRIM(l2.transaction_id)) = UPPER(TRIM(l_ads.transaction_id))
+              )
           )
     ");
     $stmtAdsLedger->execute([$userNormId]);
@@ -129,17 +161,30 @@ try {
     // 3c. Track pending referral entries separately (never counted in settled totals)
     $pendingReferralIncome = 0.00;
     $stmtPendingLedger = $pdo->prepare("
-        SELECT COALESCE(SUM(amount), 0) AS pending_income
-        FROM income_ledger
-        WHERE UPPER(user_id) = UPPER(?)
-          AND status = 'pending'
-          AND COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+        SELECT COALESCE(SUM(l_pend.amount), 0) AS pending_income
+        FROM income_ledger l_pend
+        WHERE UPPER(l_pend.user_id) = UPPER(?)
+          AND l_pend.status = 'pending'
+          AND l_pend.amount > 0
+          AND (
+              COALESCE(l_pend.income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+              OR UPPER(COALESCE(l_pend.transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+              OR UPPER(COALESCE(l_pend.special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+          )
+          AND (
+              COALESCE(NULLIF(UPPER(TRIM(l_pend.transaction_id)), ''), '') = ''
+              OR l_pend.id = (
+                  SELECT MIN(l2.id)
+                  FROM income_ledger l2
+                  WHERE UPPER(l2.user_id) = UPPER(l_pend.user_id)
+                    AND l2.status = 'pending'
+                    AND UPPER(TRIM(l2.transaction_id)) = UPPER(TRIM(l_pend.transaction_id))
+              )
+          )
     ");
     $stmtPendingLedger->execute([$userNormId]);
     $pendingRow = $stmtPendingLedger->fetch(PDO::FETCH_ASSOC);
     $pendingReferralIncome = round(floatval($pendingRow['pending_income'] ?? 0), 2);
-
-    $totalReferralIncome = round($directReferralIncome + $adsPromotionIncome, 2);
 
     // 4. Calculate member video counts (display only — excluding not_required from paid premium count)
     $members = [];
@@ -171,6 +216,7 @@ try {
 
         // Direct Premium Upload commission derives strictly from authoritative ledger + verified payment records
         $memberComm = round(floatval($directCommByMember[strtoupper(trim((string)$mUserId))] ?? 0.00), 2);
+        $attributedDirectReferralIncome = round($attributedDirectReferralIncome + $memberComm, 2);
         $channelName = !empty($r['channelName'])
             ? $r['channelName']
             : (!empty($r['channel_name']) ? $r['channel_name'] : ($r['name'] ?? 'FaceTube Creator'));
@@ -205,6 +251,9 @@ try {
         ];
     }
 
+    $directReferralIncome = round($attributedDirectReferralIncome + $unattributedDirectReferralIncome, 2);
+    $totalReferralIncome = round($directReferralIncome + $adsPromotionIncome, 2);
+
     jsonResponse([
         'success' => true,
         'dashboard' => [
@@ -216,6 +265,8 @@ try {
             'teamMembersCount' => $totalTeamCount,
             'referralIncome' => $directReferralIncome,
             'directReferralIncome' => $directReferralIncome,
+            'attributedDirectReferralIncome' => $attributedDirectReferralIncome,
+            'unattributedDirectReferralIncome' => $unattributedDirectReferralIncome,
             'adsPromotionIncome' => $adsPromotionIncome,
             'pendingReferralIncome' => $pendingReferralIncome,
             'totalReferralIncome' => $totalReferralIncome,

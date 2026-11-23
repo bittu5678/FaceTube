@@ -78,6 +78,61 @@ export async function getAvailableCategories(): Promise<string[]> {
   return [...VIDEO_CATEGORIES];
 }
 
+export function buildExploreCategoryList(availableCategories: readonly string[]): string[] {
+  const seen = new Set<string>(["trending"]);
+  const result = ["Trending"];
+
+  for (const rawCat of availableCategories) {
+    const trimmed = String(rawCat || "").trim();
+    if (!trimmed) continue;
+    const norm = trimmed.toLowerCase();
+    if (norm === "all" || seen.has(norm)) continue;
+    seen.add(norm);
+    result.push(trimmed);
+  }
+
+  return result;
+}
+
+export function filterExploreVideos<
+  T extends {
+    title: string;
+    channel: string;
+    category?: string | null | undefined;
+  },
+>(videos: readonly T[], options: { selectedTag: string; searchQuery?: string | undefined }): T[] {
+  const q = String(options.searchQuery || "")
+    .trim()
+    .toLowerCase();
+  const normalizedTag = String(options.selectedTag || "Trending")
+    .trim()
+    .toLowerCase();
+
+  return videos.filter((v) => {
+    const normalizedCat = String(v.category || "General")
+      .trim()
+      .toLowerCase();
+
+    if (q) {
+      const matchesSearch =
+        v.title.toLowerCase().includes(q) ||
+        v.channel.toLowerCase().includes(q) ||
+        normalizedCat.includes(q);
+      if (!matchesSearch) return false;
+    }
+
+    if (!normalizedTag || normalizedTag === "trending" || normalizedTag === "all") {
+      return true;
+    }
+
+    if (normalizedTag === "sports") {
+      return normalizedCat === "sports" || normalizedCat === "sport";
+    }
+
+    return normalizedCat === normalizedTag;
+  });
+}
+
 export interface UploadedVideo {
   id: string;
   userId: string; // e.g. "FT102857" or UUID

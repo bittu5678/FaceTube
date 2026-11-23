@@ -3058,6 +3058,79 @@ async function resolveAiVideoSchemaSupport(
   return support;
 }
 
+const DATA_IMAGE_EXT_BY_MIME: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
+
+export async function resolvePersistedVideoThumbnail(params: {
+  vidId: string;
+  category: string;
+  rawThumbnailUrl?: unknown;
+  rawThumbnailUrlAlt?: unknown;
+}): Promise<string> {
+  const fallbackThumbnailUrl = getCategoryFallbackThumbnail(params.category);
+  const sanitizedThumbnail =
+    sanitizeOptionalThumbnailUrl(params.rawThumbnailUrl) ||
+    sanitizeOptionalThumbnailUrl(params.rawThumbnailUrlAlt);
+  const candidateThumbnail = sanitizedThumbnail || fallbackThumbnailUrl;
+
+  if (!candidateThumbnail.toLowerCase().startsWith("data:image/")) {
+    return candidateThumbnail;
+  }
+
+  const dataMatch = candidateThumbnail.match(
+    /^data:(image\/[a-z0-9+.-]+)(?:;[^,]*)?;base64,(.+)$/i,
+  );
+  if (!dataMatch || !dataMatch[1] || !dataMatch[2]) {
+    return fallbackThumbnailUrl;
+  }
+
+  const mimeType = dataMatch[1].toLowerCase();
+  const base64Payload = dataMatch[2].trim();
+
+  // Never save SVG bytes under a .jpg extension; preserve safe inline SVG data URIs directly.
+  if (mimeType === "image/svg+xml") {
+    try {
+      const svgBuffer = Buffer.from(base64Payload, "base64");
+      if (svgBuffer.length === 0) {
+        return fallbackThumbnailUrl;
+      }
+      const decodedSvg = svgBuffer.toString("utf8");
+      if (!/<svg[\s>]/i.test(decodedSvg) || /<script\b/i.test(decodedSvg)) {
+        return fallbackThumbnailUrl;
+      }
+      return `data:image/svg+xml;base64,${base64Payload}`;
+    } catch {
+      return fallbackThumbnailUrl;
+    }
+  }
+
+  const imgExt = DATA_IMAGE_EXT_BY_MIME[mimeType];
+  if (!imgExt) {
+    return fallbackThumbnailUrl;
+  }
+
+  try {
+    const buffer = Buffer.from(base64Payload, "base64");
+    if (buffer.length > 0) {
+      const imgUploadDir = path.resolve(process.cwd(), "uploads", "images");
+      await fs.promises.mkdir(imgUploadDir, { recursive: true });
+      const safeVidId = params.vidId.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const imgFileName = `thumb_${safeVidId}.${imgExt}`;
+      await fs.promises.writeFile(path.join(imgUploadDir, imgFileName), buffer);
+      return `/uploads/images/${imgFileName}`;
+    }
+  } catch (imgErr) {
+    console.warn("Base64 thumbnail save error:", imgErr);
+  }
+
+  return fallbackThumbnailUrl;
+}
+
 export async function handleApiRequest(
   request: Request,
   env?: Record<string, string | undefined>,
@@ -8382,35 +8455,12 @@ async function dispatchApiRequest(
             verifiedPaymentAmount = 6.0;
           }
 
-          const fallbackThumbnailUrl = getCategoryFallbackThumbnail(category);
-          const sanitizedThumbnail =
-            sanitizeOptionalThumbnailUrl(body.thumbnail_url) ||
-            sanitizeOptionalThumbnailUrl(body.thumbnailUrl);
-          let finalThumbnailUrl = sanitizedThumbnail || fallbackThumbnailUrl;
-
-          if (finalThumbnailUrl.startsWith("data:image/")) {
-            try {
-              const parts = finalThumbnailUrl.split(",");
-              if (parts.length === 2 && parts[1]) {
-                const buffer = Buffer.from(parts[1], "base64");
-                if (buffer.length > 0) {
-                  const imgUploadDir = path.resolve(process.cwd(), "uploads", "images");
-                  await fs.promises.mkdir(imgUploadDir, { recursive: true });
-                  const safeVidId = vidId.replace(/[^a-zA-Z0-9_-]/g, "_");
-                  const imgFileName = `thumb_${safeVidId}.jpg`;
-                  await fs.promises.writeFile(path.join(imgUploadDir, imgFileName), buffer);
-                  finalThumbnailUrl = `/uploads/images/${imgFileName}`;
-                } else {
-                  finalThumbnailUrl = fallbackThumbnailUrl;
-                }
-              } else {
-                finalThumbnailUrl = fallbackThumbnailUrl;
-              }
-            } catch (imgErr) {
-              console.warn("Base64 thumbnail save error:", imgErr);
-              finalThumbnailUrl = fallbackThumbnailUrl;
-            }
-          }
+          const finalThumbnailUrl = await resolvePersistedVideoThumbnail({
+            vidId,
+            category,
+            rawThumbnailUrl: body.thumbnail_url,
+            rawThumbnailUrlAlt: body.thumbnailUrl,
+          });
 
           if (hasCountryCodeCol) {
             await conn.query(
@@ -8744,35 +8794,12 @@ async function dispatchApiRequest(
         verifiedPaymentAmount = 6.0;
       }
 
-      const fallbackThumbnailUrl = getCategoryFallbackThumbnail(category);
-      const sanitizedThumbnail =
-        sanitizeOptionalThumbnailUrl(body.thumbnail_url) ||
-        sanitizeOptionalThumbnailUrl(body.thumbnailUrl);
-      let finalThumbnailUrl = sanitizedThumbnail || fallbackThumbnailUrl;
-
-      if (finalThumbnailUrl.startsWith("data:image/")) {
-        try {
-          const parts = finalThumbnailUrl.split(",");
-          if (parts.length === 2 && parts[1]) {
-            const buffer = Buffer.from(parts[1], "base64");
-            if (buffer.length > 0) {
-              const imgUploadDir = path.resolve(process.cwd(), "uploads", "images");
-              await fs.promises.mkdir(imgUploadDir, { recursive: true });
-              const safeVidId = vidId.replace(/[^a-zA-Z0-9_-]/g, "_");
-              const imgFileName = `thumb_${safeVidId}.jpg`;
-              await fs.promises.writeFile(path.join(imgUploadDir, imgFileName), buffer);
-              finalThumbnailUrl = `/uploads/images/${imgFileName}`;
-            } else {
-              finalThumbnailUrl = fallbackThumbnailUrl;
-            }
-          } else {
-            finalThumbnailUrl = fallbackThumbnailUrl;
-          }
-        } catch (imgErr) {
-          console.warn("Base64 thumbnail save error:", imgErr);
-          finalThumbnailUrl = fallbackThumbnailUrl;
-        }
-      }
+      const finalThumbnailUrl = await resolvePersistedVideoThumbnail({
+        vidId,
+        category,
+        rawThumbnailUrl: body.thumbnail_url,
+        rawThumbnailUrlAlt: body.thumbnailUrl,
+      });
 
       const nowIso = new Date().toISOString();
       const storedCountryCode = existingStoreVideo
@@ -10759,7 +10786,12 @@ async function dispatchApiRequest(
             }
             continue;
           }
-          if (st !== "" && st !== "settled") continue;
+          const isSettledStatus =
+            st === "" ||
+            st === "settled" ||
+            st === "completed" ||
+            (tType === "withdrawal" && st === "approved");
+          if (!isSettledStatus) continue;
 
           if (tType === "withdrawal") {
             totalWithdrawn += Math.abs(amt);
@@ -10834,6 +10866,7 @@ async function dispatchApiRequest(
         if (rows) {
           let totalCount = rows.length;
           let summary = summarizeTransactionsList(rows);
+          let summaryComputed = false;
 
           if (usedSource === "income_ledger") {
             try {
@@ -10857,12 +10890,21 @@ async function dispatchApiRequest(
                      THEN amount ELSE 0 END), 0) AS ad_boost_income,
                    COALESCE(SUM(CASE
                      WHEN status = 'pending'
-                      AND COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+                      AND (
+                        COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+                        OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                        OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                      )
                      THEN amount ELSE 0 END), 0) AS pending_referral_income,
                    COALESCE(SUM(CASE WHEN status = 'settled' AND COALESCE(income_type, '') = 'global_income' THEN amount ELSE 0 END), 0) AS global_income,
                    COALESCE(SUM(CASE WHEN status = 'settled' AND COALESCE(income_type, '') = 'adsense_income' THEN amount ELSE 0 END), 0) AS adsense_income,
                    COALESCE(SUM(CASE WHEN status = 'settled' AND COALESCE(income_type, '') = 'admob_income' THEN amount ELSE 0 END), 0) AS admob_income,
-                   COALESCE(SUM(CASE WHEN status = 'settled' AND COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END), 0) AS affiliate_income,
+                   COALESCE(SUM(CASE
+                     WHEN status = 'settled'
+                      AND COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income')
+                      AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                      AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                     THEN amount ELSE 0 END), 0) AS affiliate_income,
                    COALESCE(SUM(CASE WHEN status = 'settled' AND COALESCE(income_type, '') = 'withdrawal' THEN ABS(amount) ELSE 0 END), 0) AS total_withdrawn,
                    COALESCE(SUM(CASE WHEN status = 'settled' AND COALESCE(income_type, '') NOT IN ('withdrawal', 'ads_promotion_fee') THEN amount ELSE 0 END), 0) AS total_earned
                  FROM income_ledger ${whereSql}`,
@@ -10884,22 +10926,59 @@ async function dispatchApiRequest(
                   totalEarned: r2(agg.total_earned),
                   totalWithdrawn: r2(agg.total_withdrawn),
                 };
+                summaryComputed = true;
               }
             } catch (_eAgg) {
-              // Keep row-derived fallback summary
+              // Fall through to full-dataset row summary
+            }
+
+            if (!summaryComputed && !fetchAll) {
+              try {
+                const [allLedgerRows]: any = await pool.query(
+                  `SELECT * FROM income_ledger ${whereSql}`,
+                  baseParams,
+                );
+                if (Array.isArray(allLedgerRows) && allLedgerRows.length > 0) {
+                  totalCount = Math.max(allLedgerRows.length, rows.length);
+                  summary = summarizeTransactionsList(allLedgerRows);
+                  summary.totalCount = totalCount;
+                }
+              } catch (_eAllLedger) {
+                // Keep page-row summary
+              }
             }
           } else {
-            try {
-              const [cRows]: any = await pool.query(
-                `SELECT COUNT(*) AS total_count FROM wallet_transactions ${whereSql}`,
-                baseParams,
-              );
-              if (cRows?.[0]?.total_count !== undefined) {
-                totalCount = Math.max(Number(cRows[0].total_count) || 0, rows.length);
-                summary.totalCount = totalCount;
+            let wtSummaryComputed = fetchAll;
+            if (!fetchAll) {
+              try {
+                const [allWtRows]: any = await pool.query(
+                  `SELECT * FROM wallet_transactions ${whereSql}`,
+                  baseParams,
+                );
+                if (Array.isArray(allWtRows) && allWtRows.length > 0) {
+                  totalCount = Math.max(allWtRows.length, rows.length);
+                  summary = summarizeTransactionsList(allWtRows);
+                  summary.totalCount = totalCount;
+                  wtSummaryComputed = true;
+                }
+              } catch (_eAllWt) {
+                // Fall back to COUNT(*) query below
               }
-            } catch (_eCnt) {
-              // ignore
+            }
+
+            if (!wtSummaryComputed) {
+              try {
+                const [cRows]: any = await pool.query(
+                  `SELECT COUNT(*) AS total_count FROM wallet_transactions ${whereSql}`,
+                  baseParams,
+                );
+                if (cRows?.[0]?.total_count !== undefined) {
+                  totalCount = Math.max(Number(cRows[0].total_count) || 0, rows.length);
+                  summary.totalCount = totalCount;
+                }
+              } catch (_eCnt) {
+                // ignore
+              }
             }
           }
 
@@ -11613,14 +11692,28 @@ async function dispatchApiRequest(
             );
             const downline = calculateDownlineLevelsTs(userId, allDbUsers || [], 10);
 
+            const directMembers = downline.membersByLevel[1] || [];
+            const directMemberIdSet = new Set(
+              directMembers
+                .map((m) =>
+                  String(m.userId || "")
+                    .trim()
+                    .toUpperCase(),
+                )
+                .filter(Boolean),
+            );
+
             // Authoritative Direct Premium Upload & Referral commission from settled income_ledger
             // Preserves valid settled ledger entries even when a matching payment_transactions row does not exist;
-            // excludes pending, non-premium matched payments, and Ads Promotion commissions.
+            // deduplicates duplicate ledger rows / join fan-out and excludes pending, non-premium matched payments, and Ads Promotion commissions.
             const directCommByMember = new Map<string, number>();
-            let directReferralIncome = 0;
+            const seenDirectTxKeys = new Set<string>();
+            let attributedDirectReferralIncome = 0;
+            let unattributedDirectReferralIncome = 0;
             const [directRows] = await pool.query<any[]>(
-              `SELECT COALESCE(NULLIF(UPPER(TRIM(il.source_user_id)), ''), NULLIF(UPPER(TRIM(pt.user_id)), ''), '') AS member_user_id,
-                      COALESCE(SUM(il.amount), 0) AS direct_commission
+              `SELECT COALESCE(NULLIF(UPPER(TRIM(il.transaction_id)), ''), '') AS dedup_tx_id,
+                      MAX(COALESCE(NULLIF(UPPER(TRIM(il.source_user_id)), ''), NULLIF(UPPER(TRIM(pt.user_id)), ''), '')) AS member_user_id,
+                      MAX(il.amount) AS direct_commission
                FROM income_ledger il
                LEFT JOIN payment_transactions pt
                  ON UPPER(COALESCE(il.transaction_id, '')) LIKE 'TX|_REF|_%' ESCAPE '|'
@@ -11644,35 +11737,55 @@ async function dispatchApiRequest(
                      )
                    )
                  )
-               GROUP BY COALESCE(NULLIF(UPPER(TRIM(il.source_user_id)), ''), NULLIF(UPPER(TRIM(pt.user_id)), ''), '')`,
+               GROUP BY COALESCE(NULLIF(UPPER(TRIM(il.transaction_id)), ''), CONCAT('ID_', il.id))`,
               [userId],
             );
             for (const dr of directRows || []) {
+              const dedupTxId = String(dr.dedup_tx_id || "")
+                .trim()
+                .toUpperCase();
+              if (dedupTxId) {
+                if (seenDirectTxKeys.has(dedupTxId)) continue;
+                seenDirectTxKeys.add(dedupTxId);
+              }
               const mKey = String(dr.member_user_id || "")
                 .trim()
                 .toUpperCase();
               const amt = Math.round((Number(dr.direct_commission) || 0) * 100) / 100;
               if (amt > 0) {
-                if (mKey) {
+                if (mKey && directMemberIdSet.has(mKey)) {
                   directCommByMember.set(
                     mKey,
                     Math.round(((directCommByMember.get(mKey) || 0) + amt) * 100) / 100,
                   );
+                } else {
+                  unattributedDirectReferralIncome =
+                    Math.round((unattributedDirectReferralIncome + amt) * 100) / 100;
                 }
-                directReferralIncome = Math.round((directReferralIncome + amt) * 100) / 100;
               }
             }
 
             // Separately track settled Ads Promotion commissions (never mixed into directReferralIncome)
             const [adsRows] = await pool.query<any[]>(
-              `SELECT COALESCE(SUM(amount), 0) AS ads_income
-               FROM income_ledger
-               WHERE UPPER(user_id) = UPPER(?)
-                 AND status = 'settled'
+              `SELECT COALESCE(SUM(l_ads.amount), 0) AS ads_income
+               FROM income_ledger l_ads
+               WHERE UPPER(l_ads.user_id) = UPPER(?)
+                 AND l_ads.status = 'settled'
+                 AND l_ads.amount > 0
                  AND (
-                   COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
-                   OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
-                   OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                   COALESCE(l_ads.income_type, '') IN ('ad_boost_income', 'marketing_ads')
+                   OR UPPER(COALESCE(l_ads.transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                   OR UPPER(COALESCE(l_ads.special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                 )
+                 AND (
+                   COALESCE(NULLIF(UPPER(TRIM(l_ads.transaction_id)), ''), '') = ''
+                   OR l_ads.id = (
+                     SELECT MIN(l2.id)
+                     FROM income_ledger l2
+                     WHERE UPPER(l2.user_id) = UPPER(l_ads.user_id)
+                       AND l2.status = 'settled'
+                       AND UPPER(TRIM(l2.transaction_id)) = UPPER(TRIM(l_ads.transaction_id))
+                   )
                  )`,
               [userId],
             );
@@ -11681,21 +11794,33 @@ async function dispatchApiRequest(
 
             // Separately track pending referral entries (never counted in settled totals)
             const [pendingRows] = await pool.query<any[]>(
-              `SELECT COALESCE(SUM(amount), 0) AS pending_income
-               FROM income_ledger
-               WHERE UPPER(user_id) = UPPER(?)
-                 AND status = 'pending'
-                 AND COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')`,
+              `SELECT COALESCE(SUM(l_pend.amount), 0) AS pending_income
+               FROM income_ledger l_pend
+               WHERE UPPER(l_pend.user_id) = UPPER(?)
+                 AND l_pend.status = 'pending'
+                 AND l_pend.amount > 0
+                 AND (
+                   COALESCE(l_pend.income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+                   OR UPPER(COALESCE(l_pend.transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                   OR UPPER(COALESCE(l_pend.special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                 )
+                 AND (
+                   COALESCE(NULLIF(UPPER(TRIM(l_pend.transaction_id)), ''), '') = ''
+                   OR l_pend.id = (
+                     SELECT MIN(l2.id)
+                     FROM income_ledger l2
+                     WHERE UPPER(l2.user_id) = UPPER(l_pend.user_id)
+                       AND l2.status = 'pending'
+                       AND UPPER(TRIM(l2.transaction_id)) = UPPER(TRIM(l_pend.transaction_id))
+                   )
+                 )`,
               [userId],
             );
             const pendingReferralIncome =
               Math.round((Number(pendingRows?.[0]?.pending_income) || 0) * 100) / 100;
-            const totalReferralIncome =
-              Math.round((directReferralIncome + adsPromotionIncome) * 100) / 100;
 
             // Compute video counts for display (excluding not_required from paid count)
             // Direct commission derives strictly from authoritative ledger + verified payments
-            const directMembers = downline.membersByLevel[1] || [];
             const members = await Promise.all(
               directMembers.map(async (r) => {
                 const [vRows] = await pool.query<any[]>(
@@ -11723,6 +11848,8 @@ async function dispatchApiRequest(
                         .toUpperCase(),
                     ) || 0) * 100,
                   ) / 100;
+                attributedDirectReferralIncome =
+                  Math.round((attributedDirectReferralIncome + comm) * 100) / 100;
                 const channelName = r.channelName || r.name || "FaceTube Creator";
                 const channelLogoUrl = r.channelLogoUrl ?? null;
                 return {
@@ -11748,6 +11875,13 @@ async function dispatchApiRequest(
               }),
             );
 
+            const directReferralIncome =
+              Math.round(
+                (attributedDirectReferralIncome + unattributedDirectReferralIncome) * 100,
+              ) / 100;
+            const totalReferralIncome =
+              Math.round((directReferralIncome + adsPromotionIncome) * 100) / 100;
+
             return jsonResponse({
               success: true,
               dashboard: {
@@ -11759,6 +11893,8 @@ async function dispatchApiRequest(
                 teamMembersCount: downline.totalTeamCount,
                 referralIncome: directReferralIncome,
                 directReferralIncome,
+                attributedDirectReferralIncome,
+                unattributedDirectReferralIncome,
                 adsPromotionIncome,
                 pendingReferralIncome,
                 totalReferralIncome,
@@ -11781,6 +11917,8 @@ async function dispatchApiRequest(
               teamMembersCount: 0,
               referralIncome: 0,
               directReferralIncome: 0,
+              attributedDirectReferralIncome: 0,
+              unattributedDirectReferralIncome: 0,
               adsPromotionIncome: 0,
               pendingReferralIncome: 0,
               totalReferralIncome: 0,
@@ -11847,10 +11985,21 @@ async function dispatchApiRequest(
         }
       }
 
+      const directMembers = downline.membersByLevel[1] || [];
+      const directMemberIdSet = new Set(
+        directMembers
+          .map((m) =>
+            String(m.userId || "")
+              .trim()
+              .toUpperCase(),
+          )
+          .filter(Boolean),
+      );
       const directCommByMember = new Map<string, number>();
       const seenLedgerKeys = new Set<string>();
       const seenPaymentIds = new Set<string>();
-      let directReferralIncome = 0;
+      let attributedDirectReferralIncome = 0;
+      let unattributedDirectReferralIncome = 0;
       let adsPromotionIncome = 0;
       let pendingReferralIncome = 0;
       const targetSponsorNorm = userId.trim().toUpperCase();
@@ -11869,7 +12018,9 @@ async function dispatchApiRequest(
           seenLedgerKeys.add(ledgerDedupKey);
         }
 
-        const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "").trim();
+        const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "")
+          .trim()
+          .toLowerCase();
         const tagUpper = String(tx["special_tag"] || tx["specialTag"] || "")
           .trim()
           .toUpperCase();
@@ -11882,8 +12033,8 @@ async function dispatchApiRequest(
         const isAdsEntry =
           tType === "ad_boost_income" ||
           tType === "marketing_ads" ||
-          ((tType === "referral_income" || tType === "direct_commission") &&
-            (txIdUpper.startsWith("TX_ADS_L") || tagUpper.startsWith("ADS_REF_L")));
+          txIdUpper.startsWith("TX_ADS_L") ||
+          tagUpper.startsWith("ADS_REF_L");
 
         const isReferralEntry =
           isAdsEntry || tType === "referral_income" || tType === "direct_commission";
@@ -11927,19 +12078,17 @@ async function dispatchApiRequest(
           }
         }
 
-        if (memberKey) {
+        if (memberKey && directMemberIdSet.has(memberKey)) {
           directCommByMember.set(
             memberKey,
             Math.round(((directCommByMember.get(memberKey) || 0) + amt) * 100) / 100,
           );
+        } else {
+          unattributedDirectReferralIncome =
+            Math.round((unattributedDirectReferralIncome + amt) * 100) / 100;
         }
-        directReferralIncome = Math.round((directReferralIncome + amt) * 100) / 100;
       }
 
-      const totalReferralIncome =
-        Math.round((directReferralIncome + adsPromotionIncome) * 100) / 100;
-
-      const directMembers = downline.membersByLevel[1] || [];
       const members = directMembers.map((r) => {
         const uVideos = (store.videos || []).filter(
           (v) => v.user_id.toUpperCase() === r.userId.toUpperCase(),
@@ -11956,6 +12105,8 @@ async function dispatchApiRequest(
                 .toUpperCase(),
             ) || 0) * 100,
           ) / 100;
+        attributedDirectReferralIncome =
+          Math.round((attributedDirectReferralIncome + comm) * 100) / 100;
         const channelName = r.channelName || r.name || "FaceTube Creator";
         const channelLogoUrl = r.channelLogoUrl ?? null;
         return {
@@ -11980,6 +12131,11 @@ async function dispatchApiRequest(
         };
       });
 
+      const directReferralIncome =
+        Math.round((attributedDirectReferralIncome + unattributedDirectReferralIncome) * 100) / 100;
+      const totalReferralIncome =
+        Math.round((directReferralIncome + adsPromotionIncome) * 100) / 100;
+
       return jsonResponse({
         success: true,
         dashboard: {
@@ -11991,6 +12147,8 @@ async function dispatchApiRequest(
           teamMembersCount: downline.totalTeamCount,
           referralIncome: directReferralIncome,
           directReferralIncome,
+          attributedDirectReferralIncome,
+          unattributedDirectReferralIncome,
           adsPromotionIncome,
           pendingReferralIncome,
           totalReferralIncome,
@@ -14551,8 +14709,9 @@ async function dispatchApiRequest(
           const [queryRows] = await pool.query(
             `SELECT DATE_FORMAT(created_at, '%Y-%m') as period_key,
                     CASE
-                      WHEN income_type IN ('referral_income', 'direct_commission')
-                       AND (UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|' OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|')
+                      WHEN COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
+                        OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                        OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
                       THEN 'ad_boost_income'
                       ELSE income_type
                     END as income_type,
@@ -14560,13 +14719,14 @@ async function dispatchApiRequest(
                     COUNT(*) as tx_count
              FROM income_ledger
              WHERE UPPER(user_id) = UPPER(?)
-               AND income_type != 'withdrawal'
+               AND COALESCE(income_type, '') != 'withdrawal'
                AND status = 'settled'
                AND created_at >= DATE_SUB(DATE_FORMAT(CURDATE(), '%Y-%m-01'), INTERVAL 11 MONTH)
              GROUP BY DATE_FORMAT(created_at, '%Y-%m'),
                       CASE
-                        WHEN income_type IN ('referral_income', 'direct_commission')
-                         AND (UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|' OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|')
+                        WHEN COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
+                          OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
                         THEN 'ad_boost_income'
                         ELSE income_type
                       END
@@ -14578,8 +14738,9 @@ async function dispatchApiRequest(
           const [queryRows] = await pool.query(
             `SELECT DATE(created_at) as period_key,
                     CASE
-                      WHEN income_type IN ('referral_income', 'direct_commission')
-                       AND (UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|' OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|')
+                      WHEN COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
+                        OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                        OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
                       THEN 'ad_boost_income'
                       ELSE income_type
                     END as income_type,
@@ -14587,13 +14748,14 @@ async function dispatchApiRequest(
                     COUNT(*) as tx_count
              FROM income_ledger
              WHERE UPPER(user_id) = UPPER(?)
-               AND income_type != 'withdrawal'
+               AND COALESCE(income_type, '') != 'withdrawal'
                AND status = 'settled'
                AND created_at >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
              GROUP BY DATE(created_at),
                       CASE
-                        WHEN income_type IN ('referral_income', 'direct_commission')
-                         AND (UPPER(transaction_id) LIKE 'TX|_ADS|_L%' ESCAPE '|' OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|')
+                        WHEN COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
+                          OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
                         THEN 'ad_boost_income'
                         ELSE income_type
                       END
@@ -14766,14 +14928,20 @@ async function dispatchApiRequest(
 
         for (const tx of matchingTxs) {
           const amt = Number(tx["amount"]) || 0;
-          const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "");
-          const txIdUpper = String(tx["transaction_id"] || tx["transactionId"] || "").toUpperCase();
-          const tagUpper = String(tx["special_tag"] || tx["specialTag"] || "").toUpperCase();
+          const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "")
+            .trim()
+            .toLowerCase();
+          const txIdUpper = String(tx["transaction_id"] || tx["transactionId"] || "")
+            .trim()
+            .toUpperCase();
+          const tagUpper = String(tx["special_tag"] || tx["specialTag"] || "")
+            .trim()
+            .toUpperCase();
           const isAdsTx =
             tType === "ad_boost_income" ||
             tType === "marketing_ads" ||
-            ((tType === "referral_income" || tType === "direct_commission") &&
-              (txIdUpper.startsWith("TX_ADS_L") || tagUpper.startsWith("ADS_REF_L")));
+            txIdUpper.startsWith("TX_ADS_L") ||
+            tagUpper.startsWith("ADS_REF_L");
           if (tType === "global_income") {
             glb += amt;
             matchedCount++;
@@ -14783,11 +14951,11 @@ async function dispatchApiRequest(
           } else if (tType === "admob_income") {
             adm += amt;
             matchedCount++;
-          } else if (tType === "affiliate_income" || tType === "marketing_income") {
-            aff += amt;
-            matchedCount++;
           } else if (isAdsTx) {
             boost += amt;
+            matchedCount++;
+          } else if (tType === "affiliate_income" || tType === "marketing_income") {
+            aff += amt;
             matchedCount++;
           } else if (tType === "referral_income" || tType === "direct_commission") {
             ref += amt;
@@ -14851,14 +15019,20 @@ async function dispatchApiRequest(
 
         for (const tx of matchingTxs) {
           const amt = Number(tx["amount"]) || 0;
-          const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "");
-          const txIdUpper = String(tx["transaction_id"] || tx["transactionId"] || "").toUpperCase();
-          const tagUpper = String(tx["special_tag"] || tx["specialTag"] || "").toUpperCase();
+          const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "")
+            .trim()
+            .toLowerCase();
+          const txIdUpper = String(tx["transaction_id"] || tx["transactionId"] || "")
+            .trim()
+            .toUpperCase();
+          const tagUpper = String(tx["special_tag"] || tx["specialTag"] || "")
+            .trim()
+            .toUpperCase();
           const isAdsTx =
             tType === "ad_boost_income" ||
             tType === "marketing_ads" ||
-            ((tType === "referral_income" || tType === "direct_commission") &&
-              (txIdUpper.startsWith("TX_ADS_L") || tagUpper.startsWith("ADS_REF_L")));
+            txIdUpper.startsWith("TX_ADS_L") ||
+            tagUpper.startsWith("ADS_REF_L");
           if (tType === "global_income") {
             glb += amt;
             matchedCount++;
@@ -14868,11 +15042,11 @@ async function dispatchApiRequest(
           } else if (tType === "admob_income") {
             adm += amt;
             matchedCount++;
-          } else if (tType === "affiliate_income" || tType === "marketing_income") {
-            aff += amt;
-            matchedCount++;
           } else if (isAdsTx) {
             boost += amt;
+            matchedCount++;
+          } else if (tType === "affiliate_income" || tType === "marketing_income") {
+            aff += amt;
             matchedCount++;
           } else if (tType === "referral_income" || tType === "direct_commission") {
             ref += amt;
@@ -17481,7 +17655,11 @@ async function dispatchApiRequest(
           );
           for (const r of rows || []) {
             if (r.setting_key === "marketing_income_percentage") {
-              marketingPct = parseFloat(r.setting_value) || 15.0;
+              const rawVal = String(r.setting_value ?? "").trim();
+              const parsedPct = rawVal !== "" ? Number(rawVal) : NaN;
+              if (Number.isFinite(parsedPct) && parsedPct >= 0 && parsedPct <= 100) {
+                marketingPct = parsedPct;
+              }
             } else if (r.setting_key === "adsense_client_id") {
               adsenseClientId = String(r.setting_value || "");
             } else if (r.setting_key === "adsense_slot_watch") {
@@ -17494,7 +17672,11 @@ async function dispatchApiRequest(
               adsenseEnabled = r.setting_value === "1" || r.setting_value === "true";
             } else if (/^ads_referral_rate_l([1-7])$/.test(r.setting_key)) {
               const lvl = parseInt(r.setting_key.replace("ads_referral_rate_l", ""), 10);
-              adsRates[lvl] = parseInt(r.setting_value, 10) || adsRates[lvl] || 0;
+              const rawVal = String(r.setting_value ?? "").trim();
+              const parsedRate = rawVal !== "" ? Number(rawVal) : NaN;
+              if (Number.isFinite(parsedRate) && parsedRate >= 0 && parsedRate <= 100) {
+                adsRates[lvl] = parsedRate;
+              }
             }
           }
         } catch {
@@ -24039,7 +24221,10 @@ async function dispatchApiRequest(
                 SUM(CASE WHEN COALESCE(income_type, '') = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN COALESCE(income_type, '') = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
                 ${ledgerAdmobExpr} AS ledger_admob_income,
-                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income')
+                          AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                         THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN COALESCE(income_type, '') = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN COALESCE(income_type, '') != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
               FROM income_ledger
@@ -24108,7 +24293,10 @@ async function dispatchApiRequest(
                 SUM(CASE WHEN COALESCE(income_type, '') = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN COALESCE(income_type, '') = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
                 ${ledgerAdmobExpr} AS ledger_admob_income,
-                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income')
+                          AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                         THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN COALESCE(income_type, '') = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN COALESCE(income_type, '') != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
               FROM income_ledger
@@ -24278,14 +24466,20 @@ async function dispatchApiRequest(
 
         for (const tx of settledTxs) {
           const amt = Number(tx["amount"]) || 0;
-          const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "");
-          const txIdUpper = String(tx["transaction_id"] || tx["transactionId"] || "").toUpperCase();
-          const tagUpper = String(tx["special_tag"] || tx["specialTag"] || "").toUpperCase();
+          const tType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "")
+            .trim()
+            .toLowerCase();
+          const txIdUpper = String(tx["transaction_id"] || tx["transactionId"] || "")
+            .trim()
+            .toUpperCase();
+          const tagUpper = String(tx["special_tag"] || tx["specialTag"] || "")
+            .trim()
+            .toUpperCase();
           const isAdsTx =
             tType === "ad_boost_income" ||
             tType === "marketing_ads" ||
-            ((tType === "referral_income" || tType === "direct_commission") &&
-              (txIdUpper.startsWith("TX_ADS_L") || tagUpper.startsWith("ADS_REF_L")));
+            txIdUpper.startsWith("TX_ADS_L") ||
+            tagUpper.startsWith("ADS_REF_L");
           if (tType === "withdrawal") {
             totalWithdrawn += Math.abs(amt);
           } else if (isAdsTx) {

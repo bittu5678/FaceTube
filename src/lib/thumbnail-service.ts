@@ -241,9 +241,26 @@ export async function uploadThumbnailDataUrl(dataUrl: string, category?: string)
       return fallback;
     }
 
+    if (dataUrl.toLowerCase().startsWith("data:image/svg+xml")) {
+      return dataUrl;
+    }
+
+    const mimeMatch = dataUrl.match(/^data:(image\/[a-z0-9+.-]+)(?:;[^,]*)?;base64,/i);
+    const mimeType = (mimeMatch?.[1] || "image/jpeg").toLowerCase();
+    const extByMime: Record<string, string> = {
+      "image/jpeg": "jpg",
+      "image/jpg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+    };
+    const ext = extByMime[mimeType];
+    if (!ext) {
+      return fallback;
+    }
+
     const res = await fetch(dataUrl);
     const blob = await res.blob();
-    const imageFile = new File([blob], `thumb_${Date.now()}.jpg`, { type: "image/jpeg" });
+    const imageFile = new File([blob], `thumb_${Date.now()}.${ext}`, { type: mimeType });
 
     const { api } = await import("./api");
     const uploadRes = await api.uploads.uploadImage(imageFile);

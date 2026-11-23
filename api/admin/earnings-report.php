@@ -312,7 +312,10 @@ try {
                 SUM(CASE WHEN COALESCE(income_type, '') = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN COALESCE(income_type, '') = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
                 {$ledgerAdmobExpr} AS ledger_admob_income,
-                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income')
+                          AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                         THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN COALESCE(income_type, '') = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN COALESCE(income_type, '') != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
             FROM income_ledger
@@ -381,7 +384,10 @@ try {
                 SUM(CASE WHEN COALESCE(income_type, '') = 'global_income' THEN amount ELSE 0 END) AS ledger_global_income,
                 SUM(CASE WHEN COALESCE(income_type, '') = 'adsense_income' THEN amount ELSE 0 END) AS ledger_adsense_income,
                 {$ledgerAdmobExpr} AS ledger_admob_income,
-                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income') THEN amount ELSE 0 END) AS ledger_affiliate_income,
+                SUM(CASE WHEN COALESCE(income_type, '') IN ('affiliate_income', 'marketing_income')
+                          AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                          AND UPPER(COALESCE(special_tag, '')) NOT LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                         THEN amount ELSE 0 END) AS ledger_affiliate_income,
                 SUM(CASE WHEN COALESCE(income_type, '') = 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_withdrawn,
                 SUM(CASE WHEN COALESCE(income_type, '') != 'withdrawal' THEN amount ELSE 0 END) AS ledger_total_earned
             FROM income_ledger

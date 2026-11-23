@@ -364,7 +364,7 @@ describe("FaceTube — Referral Commission Phase 1 Regression Suite", () => {
   // 2. Referral Commission Reporting (No premiumCount × ₹1, No not_required)
   // =========================================================================
   describe("2. Authoritative Referral Commission Reporting", () => {
-    it("Node Store referrals/dashboard counts only verified paid TX_REF_ settled entries, excludes not_required & Ads Promotion, and reconciles totals", async () => {
+    it("Node Store referrals/dashboard preserves valid settled TX_REF_ orphan entries (LEFT JOIN parity), excludes not_required, pending & Ads Promotion, and reconciles totals", async () => {
       const seedStore = {
         users: [
           {
@@ -514,18 +514,24 @@ describe("FaceTube — Referral Commission Phase 1 Regression Suite", () => {
       assert.equal(data.success, true);
 
       const d = data.dashboard;
-      assert.equal(d.directReferralIncome, 1.0, "Only verified paid settled TX_REF_ counts");
-      assert.equal(d.referralIncome, 1.0);
+      assert.equal(
+        d.directReferralIncome,
+        2.0,
+        "Verified paid TX_REF_ plus valid settled orphan TX_REF_ entries count under LEFT JOIN behavior",
+      );
+      assert.equal(d.referralIncome, 2.0);
+      assert.equal(d.attributedDirectReferralIncome, 2.0);
+      assert.equal(d.unattributedDirectReferralIncome, 0);
       assert.equal(d.adsPromotionIncome, 10.0, "Ads promotion tracked separately");
       assert.equal(d.pendingReferralIncome, 1.0, "Pending tracked separately");
-      assert.equal(d.totalReferralIncome, 11.0);
+      assert.equal(d.totalReferralIncome, 12.0);
 
       const m1 = d.members.find((m: any) => m.userId === "FT_MEM_1");
       const m2 = d.members.find((m: any) => m.userId === "FT_MEM_2");
       assert.equal(m1.premiumVideosCount, 1, "not_required must be excluded from premium count");
       assert.equal(m1.directCommissionEarned, 1.0);
       assert.equal(m2.premiumVideosCount, 0, "not_required and pending must be 0");
-      assert.equal(m2.directCommissionEarned, 0);
+      assert.equal(m2.directCommissionEarned, 1.0);
 
       const memberSum = d.members.reduce(
         (acc: number, m: any) => acc + m.directCommissionEarned,
@@ -587,7 +593,7 @@ describe("FaceTube — Referral Commission Phase 1 Regression Suite", () => {
               ],
             ];
           }
-          if (normalized.includes("INNER JOIN payment_transactions pt")) {
+          if (normalized.includes("LEFT JOIN payment_transactions pt")) {
             return [[{ member_user_id: "FT_ALICE", direct_commission: 2.0 }]];
           }
           if (normalized.includes("AS ads_income FROM income_ledger")) {
@@ -625,8 +631,10 @@ describe("FaceTube — Referral Commission Phase 1 Regression Suite", () => {
       assert.equal(body.dashboard.members[0].directCommissionEarned, 2.0);
       assert.equal(body.dashboard.referralLink, "https://facetube.online/auth?ref=FTVIP");
 
-      const joinQuery = capturedSql.find((s) => s.includes("INNER JOIN payment_transactions pt"));
-      assert.ok(joinQuery, "Must join income_ledger with payment_transactions");
+      const joinQuery = capturedSql.find((s) => s.includes("LEFT JOIN payment_transactions pt"));
+      assert.ok(joinQuery, "Must LEFT JOIN income_ledger with payment_transactions");
+      assert.doesNotMatch(joinQuery, /INNER\s+JOIN\s+payment_transactions/i);
+      assert.match(joinQuery, /pt\.payment_id IS NULL/i);
       assert.match(joinQuery, /pt\.purpose = 'premium_video_upload'/);
       assert.match(joinQuery, /ESCAPE '\|'/);
     });
@@ -758,7 +766,9 @@ describe("FaceTube — Referral Commission Phase 1 Regression Suite", () => {
         path.resolve(process.cwd(), "api/referrals/dashboard.php"),
         "utf-8",
       );
-      assert.match(dashPhp, /INNER JOIN payment_transactions pt/);
+      assert.match(dashPhp, /LEFT\s+JOIN\s+payment_transactions\s+pt/i);
+      assert.doesNotMatch(dashPhp, /INNER\s+JOIN\s+payment_transactions/i);
+      assert.match(dashPhp, /pt\.payment_id\s+IS\s+NULL/i);
       assert.match(dashPhp, /pt\.purpose = 'premium_video_upload'/);
       assert.match(dashPhp, /'adsPromotionIncome'\s*=>\s*\$adsPromotionIncome/);
       assert.match(dashPhp, /'pendingReferralIncome'\s*=>\s*\$pendingReferralIncome/);

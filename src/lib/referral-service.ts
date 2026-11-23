@@ -32,6 +32,8 @@ export interface ReferralDashboardData {
   teamMembersCount: number; // MUST be labeled Team Members
   referralIncome: number; // Verified Direct Premium Upload commission in ₹
   directReferralIncome?: number | undefined;
+  attributedDirectReferralIncome?: number | undefined;
+  unattributedDirectReferralIncome?: number | undefined;
   adsPromotionIncome?: number | undefined;
   pendingReferralIncome?: number | undefined;
   totalReferralIncome?: number | undefined;
@@ -64,11 +66,62 @@ export async function getReferralDashboardData(
           : Math.round((directIncome + adsIncome) * 100) / 100;
       const refCode = d.referralCode || normId;
 
+      const mappedMembers = (d.members || []).map((m: any) => {
+        const rawChannelName =
+          typeof (m.channelName ?? m.channel_name) === "string"
+            ? String(m.channelName ?? m.channel_name).trim()
+            : "";
+        const rawName = typeof m.name === "string" ? m.name.trim() : "";
+        const channelName = rawChannelName || rawName || "FaceTube Creator";
+        const rawLogo = m.channelLogoUrl ?? m.channel_logo_url;
+        const channelLogoUrl =
+          typeof rawLogo === "string" && rawLogo.trim() !== ""
+            ? resolveMediaUrl(rawLogo) || null
+            : null;
+
+        return {
+          id: m.id,
+          userId: m.userId || m.user_id,
+          name: m.name,
+          channelName,
+          channelLogoUrl,
+          email: m.email,
+          mobile: m.mobile,
+          joinedAt: m.joinedAt || m.created_at || "Recent",
+          status: m.status || "Active",
+          tier: m.tier || "Creator Pro",
+          freeVideosCount: Number(m.freeVideosCount) || 0,
+          premiumVideosCount: Number(m.premiumVideosCount) || 0,
+          totalVideosCount: Number(m.totalVideosCount) || 0,
+          directCommissionEarned: Number(m.directCommissionEarned) || 0,
+          access: m.access || "Granted",
+        };
+      });
+
+      const computedMemberSum =
+        Math.round(
+          mappedMembers.reduce(
+            (acc: number, m: ReferralMemberSummary) =>
+              acc + (Number(m.directCommissionEarned) || 0),
+            0,
+          ) * 100,
+        ) / 100;
+      const attributedIncome =
+        d.attributedDirectReferralIncome !== undefined
+          ? Number(d.attributedDirectReferralIncome) || 0
+          : computedMemberSum;
+      const unattributedIncome =
+        d.unattributedDirectReferralIncome !== undefined
+          ? Number(d.unattributedDirectReferralIncome) || 0
+          : Math.max(0, Math.round((directIncome - attributedIncome) * 100) / 100);
+
       return {
         directReferralsCount: Number(d.directReferralsCount) || 0,
         teamMembersCount: Number(d.teamMembersCount) || 0,
         referralIncome: directIncome,
         directReferralIncome: directIncome,
+        attributedDirectReferralIncome: attributedIncome,
+        unattributedDirectReferralIncome: unattributedIncome,
         adsPromotionIncome: adsIncome,
         pendingReferralIncome: pendingIncome,
         totalReferralIncome: totalIncome,
@@ -77,37 +130,7 @@ export async function getReferralDashboardData(
         referralNumber: d.referralNumber || normId,
         referralLink:
           d.referralLink || `https://facetube.online/auth?ref=${encodeURIComponent(refCode)}`,
-        members: (d.members || []).map((m: any) => {
-          const rawChannelName =
-            typeof (m.channelName ?? m.channel_name) === "string"
-              ? String(m.channelName ?? m.channel_name).trim()
-              : "";
-          const rawName = typeof m.name === "string" ? m.name.trim() : "";
-          const channelName = rawChannelName || rawName || "FaceTube Creator";
-          const rawLogo = m.channelLogoUrl ?? m.channel_logo_url;
-          const channelLogoUrl =
-            typeof rawLogo === "string" && rawLogo.trim() !== ""
-              ? resolveMediaUrl(rawLogo) || null
-              : null;
-
-          return {
-            id: m.id,
-            userId: m.userId || m.user_id,
-            name: m.name,
-            channelName,
-            channelLogoUrl,
-            email: m.email,
-            mobile: m.mobile,
-            joinedAt: m.joinedAt || m.created_at || "Recent",
-            status: m.status || "Active",
-            tier: m.tier || "Creator Pro",
-            freeVideosCount: Number(m.freeVideosCount) || 0,
-            premiumVideosCount: Number(m.premiumVideosCount) || 0,
-            totalVideosCount: Number(m.totalVideosCount) || 0,
-            directCommissionEarned: Number(m.directCommissionEarned) || 0,
-            access: m.access || "Granted",
-          };
-        }),
+        members: mappedMembers,
         isStale: false,
       };
     }
@@ -184,10 +207,26 @@ export async function getReferralDashboardData(
 
   const teamMembersCount = allDescendantIds.size;
 
-  // Calculate direct commission strictly from settled direct referral ledger entries
-  // (excluding pending, failed, and Ads Promotion entries)
-  const directCommByMember = new Map<string, number>();
+  // Deduplicate ledger entries so duplicate transaction_id rows never inflate totals
+  const dedupedLedger: typeof ledger = [];
+  const seenLedgerKeys = new Set<string>();
   for (const t of ledger) {
+    const dedupKey = String(t.transactionId || t.id || "")
+      .trim()
+      .toUpperCase();
+    if (dedupKey) {
+      if (seenLedgerKeys.has(dedupKey)) continue;
+      seenLedgerKeys.add(dedupKey);
+    }
+    dedupedLedger.push(t);
+  }
+
+  // Calculate direct commission strictly from settled direct referral ledger entries
+  // (excluding pending, failed, and Ads Promotion entries) and reconcile attributed vs unattributed rows.
+  const directMemberIdSet = new Set(directUsers.map((m) => m.user_id.trim().toUpperCase()));
+  const directCommByMember = new Map<string, number>();
+  let unattributedDirectReferralIncome = 0;
+  for (const t of dedupedLedger) {
     if (
       !isDirectReferralTransaction(t) ||
       t.status !== "settled" ||
@@ -198,26 +237,32 @@ export async function getReferralDashboardData(
     ) {
       continue;
     }
+    const amt = Math.round((Number(t.amount) || 0) * 100) / 100;
+    if (amt <= 0) continue;
     const srcId = String(t.sourceUserId || "")
       .trim()
       .toUpperCase();
-    if (!srcId) continue;
-    directCommByMember.set(
-      srcId,
-      Math.round(((directCommByMember.get(srcId) || 0) + (Number(t.amount) || 0)) * 100) / 100,
-    );
+    if (srcId && directMemberIdSet.has(srcId)) {
+      directCommByMember.set(
+        srcId,
+        Math.round(((directCommByMember.get(srcId) || 0) + amt) * 100) / 100,
+      );
+    } else {
+      unattributedDirectReferralIncome =
+        Math.round((unattributedDirectReferralIncome + amt) * 100) / 100;
+    }
   }
 
   const adsPromotionIncome =
     Math.round(
-      ledger
+      dedupedLedger
         .filter((t) => isAdsPromotionTransaction(t) && t.status === "settled")
         .reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0) * 100,
     ) / 100;
 
   const pendingReferralIncome =
     Math.round(
-      ledger
+      dedupedLedger
         .filter(
           (t) =>
             (isDirectReferralTransaction(t) || isAdsPromotionTransaction(t)) &&
@@ -227,7 +272,7 @@ export async function getReferralDashboardData(
     ) / 100;
 
   // Build member rows from genuine direct users only
-  let directCommissionTotal = 0;
+  let attributedDirectReferralIncome = 0;
   const members: ReferralMemberSummary[] = directUsers.map((m) => {
     const mIdUpper = m.user_id.toUpperCase();
     const memberVideos = allVideos.filter((v) => v.userId.toUpperCase() === mIdUpper);
@@ -237,7 +282,8 @@ export async function getReferralDashboardData(
     ).length;
 
     const directComm = Math.round((directCommByMember.get(mIdUpper) || 0) * 100) / 100;
-    directCommissionTotal = Math.round((directCommissionTotal + directComm) * 100) / 100;
+    attributedDirectReferralIncome =
+      Math.round((attributedDirectReferralIncome + directComm) * 100) / 100;
     const rawChannelName = typeof m.channel_name === "string" ? m.channel_name.trim() : "";
     const channelName = rawChannelName || m.name || "FaceTube Creator";
     const rawLogo = typeof m.channel_logo_url === "string" ? m.channel_logo_url.trim() : "";
@@ -265,6 +311,8 @@ export async function getReferralDashboardData(
     };
   });
 
+  const directCommissionTotal =
+    Math.round((attributedDirectReferralIncome + unattributedDirectReferralIncome) * 100) / 100;
   const directReferralsCount = directUsers.length;
   const referralNumber = currentUserRecord?.mobile || "";
   const referralCode = shareCode;
@@ -275,6 +323,8 @@ export async function getReferralDashboardData(
     teamMembersCount,
     referralIncome: directCommissionTotal,
     directReferralIncome: directCommissionTotal,
+    attributedDirectReferralIncome,
+    unattributedDirectReferralIncome,
     adsPromotionIncome,
     pendingReferralIncome,
     totalReferralIncome: Math.round((directCommissionTotal + adsPromotionIncome) * 100) / 100,

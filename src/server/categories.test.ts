@@ -1,21 +1,64 @@
-import { describe, it, before } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { handleApiRequest } from "./api-handler";
-import { buildDashboardCategoryCatalog } from "../lib/dashboard-categories";
-import { VIDEO_CATEGORIES, getAvailableCategories } from "../lib/video-service";
+import { handleApiRequest, resetInMemoryStore } from "./api-handler.ts";
+import { setMysqlPoolForTesting } from "./mysql.ts";
+import { buildDashboardCategoryCatalog } from "../lib/dashboard-categories.ts";
+import {
+  VIDEO_CATEGORIES,
+  buildExploreCategoryList,
+  filterExploreVideos,
+  getAvailableCategories,
+} from "../lib/video-service.ts";
 import {
   CATEGORY_THUMBNAILS,
   getCategoryFallbackThumbnail,
   resolveVideoThumbnail,
-} from "../lib/thumbnail-service";
+  uploadThumbnailDataUrl,
+} from "../lib/thumbnail-service.ts";
 
 describe("Priority 3: Admin Category Management & Verification Tests", () => {
   let adminToken = "";
   let userToken = "";
+  let tmpDataDir = "";
+  const createdDiskFiles: string[] = [];
+
+  const origDataDir = process.env["FACETUBE_DATA_DIR"];
+  const origNodeEnv = process.env["NODE_ENV"];
+  const origDbHost = process.env["DB_HOST"];
+  const origDbName = process.env["DB_NAME"];
+  const origDbUser = process.env["DB_USER"];
+  const origDbPassword = process.env["DB_PASSWORD"];
+  const origMysqlHost = process.env["MYSQL_HOST"];
+  const origMysqlDatabase = process.env["MYSQL_DATABASE"];
+  const origMysqlUser = process.env["MYSQL_USER"];
+  const origMysqlPassword = process.env["MYSQL_PASSWORD"];
+
+  function clearDbEnvVars(): void {
+    delete process.env["DB_HOST"];
+    delete process.env["DB_NAME"];
+    delete process.env["DB_USER"];
+    delete process.env["DB_PASSWORD"];
+    delete process.env["MYSQL_HOST"];
+    delete process.env["MYSQL_DATABASE"];
+    delete process.env["MYSQL_USER"];
+    delete process.env["MYSQL_PASSWORD"];
+  }
+
+  function restoreEnvVar(key: string, val: string | undefined): void {
+    if (val !== undefined) process.env[key] = val;
+    else delete process.env[key];
+  }
 
   before(async () => {
+    tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "facetube-categories-test-"));
+    process.env["FACETUBE_DATA_DIR"] = tmpDataDir;
+    clearDbEnvVars();
+    setMysqlPoolForTesting(null);
+    resetInMemoryStore();
+
     // 1. Authenticate as Admin (FT102857 / admin@facetube.com)
     const adminLoginReq = new Request("http://localhost:3000/api/auth/login", {
       method: "POST",
@@ -39,6 +82,35 @@ describe("Priority 3: Admin Category Management & Verification Tests", () => {
     const userData = await userLoginRes.json();
     assert.ok(userData.token, "User login must return a session token");
     userToken = userData.token;
+  });
+
+  afterEach(async () => {
+    setMysqlPoolForTesting(null);
+    clearDbEnvVars();
+    while (createdDiskFiles.length > 0) {
+      const target = createdDiskFiles.pop();
+      if (target) {
+        await fs.promises.rm(target, { force: true }).catch(() => undefined);
+      }
+    }
+  });
+
+  after(() => {
+    setMysqlPoolForTesting(null);
+    resetInMemoryStore();
+    restoreEnvVar("FACETUBE_DATA_DIR", origDataDir);
+    restoreEnvVar("NODE_ENV", origNodeEnv);
+    restoreEnvVar("DB_HOST", origDbHost);
+    restoreEnvVar("DB_NAME", origDbName);
+    restoreEnvVar("DB_USER", origDbUser);
+    restoreEnvVar("DB_PASSWORD", origDbPassword);
+    restoreEnvVar("MYSQL_HOST", origMysqlHost);
+    restoreEnvVar("MYSQL_DATABASE", origMysqlDatabase);
+    restoreEnvVar("MYSQL_USER", origMysqlUser);
+    restoreEnvVar("MYSQL_PASSWORD", origMysqlPassword);
+    if (tmpDataDir && fs.existsSync(tmpDataDir)) {
+      fs.rmSync(tmpDataDir, { recursive: true, force: true });
+    }
   });
 
   // Test Suite 1: Category Listing
@@ -657,18 +729,10 @@ describe("Priority 3: Admin Category Management & Verification Tests", () => {
         path.resolve(process.cwd(), "src/routes/explore.tsx"),
         "utf-8",
       );
-      for (const label of ["Health", "Sports", "Drama"]) {
-        assert.match(
-          exploreSrc,
-          new RegExp(`label:\\s*"${label}"`),
-          `Explore pills must include ${label}`,
-        );
-        assert.match(
-          exploreSrc,
-          new RegExp(`selectedTag === "${label}"`),
-          `Explore filter logic must handle ${label}`,
-        );
-      }
+      assert.match(exploreSrc, /getAvailableCategories\(/);
+      assert.match(exploreSrc, /facetube:categories-updated/);
+      assert.match(exploreSrc, /buildExploreCategoryList\(/);
+      assert.match(exploreSrc, /filterExploreVideos\(/);
     });
 
     it("provides distinct, offline-safe fallback thumbnails for Health, Sports, and Drama in both TS and PHP", () => {
@@ -719,6 +783,334 @@ describe("Priority 3: Admin Category Management & Verification Tests", () => {
         "Podcasts & Talk Shows",
         "Medical & Healthcare",
       ]);
+    });
+  });
+
+  // Test Suite 9: Phase 1 Minimum Safe Fixes Regression Suite
+  describe("9. Phase 1 Category Migration, Thumbnail SVG Safety, Dynamic Explore & Test Isolation", () => {
+    it("verifies database/migrations/20261127_seed_health_sports_drama_categories.sql is idempotent and non-destructive", () => {
+      const migrationPath = path.resolve(
+        process.cwd(),
+        "database/migrations/20261127_seed_health_sports_drama_categories.sql",
+      );
+      assert.ok(fs.existsSync(migrationPath), "Health/Sports/Drama migration SQL file must exist");
+      const sql = fs.readFileSync(migrationPath, "utf-8");
+
+      assert.match(sql, /DO NOT EXECUTE ON PRODUCTION WITHOUT SIGN-OFF/i);
+      assert.match(sql, /utf8mb4_unicode_ci/i);
+      assert.match(sql, /INSERT IGNORE INTO `categories` \(`name`, `slug`, `created_by`\) VALUES/i);
+      assert.match(sql, /\('Health',\s*'health',\s*'SYSTEM'\)/);
+      assert.match(sql, /\('Sports',\s*'sports',\s*'SYSTEM'\)/);
+      assert.match(sql, /\('Drama',\s*'drama',\s*'SYSTEM'\)/);
+      assert.equal(/ON DUPLICATE KEY UPDATE|DROP TABLE|DELETE FROM|TRUNCATE/i.test(sql), false);
+
+      const valueRows = [...sql.matchAll(/\('([^']+)',\s*'([^']+)',\s*'SYSTEM'\)/g)];
+      assert.equal(valueRows.length, 3, "Migration must seed exactly 3 new categories");
+      const names = valueRows.map((m) => m[1]?.toLowerCase());
+      const slugs = valueRows.map((m) => m[2]?.toLowerCase());
+      assert.equal(new Set(names).size, 3);
+      assert.equal(new Set(slugs).size, 3);
+    });
+
+    it("never saves SVG fallback thumbnails with a .jpg extension in local-store /api/videos/create", async () => {
+      for (const cat of ["Health", "Sports", "Drama"] as const) {
+        const expectedSvg = CATEGORY_THUMBNAILS[cat];
+        assert.ok(expectedSvg && expectedSvg.startsWith("data:image/svg+xml;base64,"));
+
+        // Case A: thumbnail_url omitted
+        const vidOmitted = `svg-omitted-${cat.toLowerCase()}-${Date.now()}`;
+        const resOmitted = await handleApiRequest(
+          new Request("http://localhost:3000/api/videos/create", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${userToken}`,
+            },
+            body: JSON.stringify({
+              id: vidOmitted,
+              user_id: "FT483921",
+              creator_name: "Alex Rivera",
+              title: `${cat} Omitted Thumb`,
+              video_url: "/uploads/videos/sample_svg_test.mp4",
+              video_type: "free",
+              content_type: "long",
+              category: cat,
+            }),
+          }),
+        );
+        assert.ok(resOmitted);
+        assert.equal(resOmitted.status, 201);
+        const bodyOmitted = await resOmitted.json();
+        assert.equal(bodyOmitted.video.thumbnail_url, expectedSvg);
+        assert.equal(
+          fs.existsSync(
+            path.resolve(process.cwd(), "uploads", "images", `thumb_${vidOmitted}.jpg`),
+          ),
+          false,
+          `SVG fallback for ${cat} must NEVER be saved as .jpg`,
+        );
+
+        // Case B: data:image/svg+xml;base64 sent by client fallback
+        const vidSupplied = `svg-supplied-${cat.toLowerCase()}-${Date.now()}`;
+        const resSupplied = await handleApiRequest(
+          new Request("http://localhost:3000/api/videos/create", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${userToken}`,
+            },
+            body: JSON.stringify({
+              id: vidSupplied,
+              user_id: "FT483921",
+              creator_name: "Alex Rivera",
+              title: `${cat} Client SVG Fallback`,
+              video_url: "/uploads/videos/sample_svg_test.mp4",
+              thumbnail_url: expectedSvg,
+              video_type: "free",
+              content_type: "long",
+              category: cat,
+            }),
+          }),
+        );
+        assert.ok(resSupplied);
+        assert.equal(resSupplied.status, 201);
+        const bodySupplied = await resSupplied.json();
+        assert.equal(bodySupplied.video.thumbnail_url, expectedSvg);
+        assert.equal(
+          fs.existsSync(
+            path.resolve(process.cwd(), "uploads", "images", `thumb_${vidSupplied}.jpg`),
+          ),
+          false,
+          `Supplied SVG fallback for ${cat} must NEVER be saved as .jpg`,
+        );
+      }
+    });
+
+    it("saves custom raster data:image/png thumbnails with .png extension and keeps SVG fallback safe in uploadThumbnailDataUrl", async () => {
+      const tinyPngBase64 =
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+      const vidId = `png-custom-${Date.now()}`;
+      const res = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${userToken}`,
+          },
+          body: JSON.stringify({
+            id: vidId,
+            user_id: "FT483921",
+            creator_name: "Alex Rivera",
+            title: "Health Custom PNG Cover",
+            video_url: "/uploads/videos/sample_png.mp4",
+            thumbnail_url: tinyPngBase64,
+            video_type: "free",
+            content_type: "long",
+            category: "Health",
+          }),
+        }),
+      );
+      assert.ok(res);
+      assert.equal(res.status, 201);
+      const data = await res.json();
+      assert.equal(data.video.thumbnail_url, `/uploads/images/thumb_${vidId}.png`);
+      const pngPath = path.resolve(process.cwd(), "uploads", "images", `thumb_${vidId}.png`);
+      createdDiskFiles.push(pngPath);
+      assert.equal(fs.existsSync(pngPath), true);
+
+      // uploadThumbnailDataUrl returns SVG data URIs intact instead of wrapping SVG as image/jpeg .jpg
+      const healthSvg = CATEGORY_THUMBNAILS["Health"]!;
+      const resolvedSvg = await uploadThumbnailDataUrl(healthSvg, "Health");
+      assert.equal(resolvedSvg, healthSvg);
+    });
+
+    it("applies the same SVG fallback and raster MIME extension rules in the MySQL video creation path", async () => {
+      const insertedThumbnails: Array<{ vidId: string; thumbnailUrl: string }> = [];
+      const mockConn = {
+        beginTransaction: async () => {},
+        commit: async () => {},
+        rollback: async () => {},
+        release: () => {},
+        query: async (sql: string, params: any[] = []) => {
+          if (/FROM uploaded_videos\s+WHERE id = \?/i.test(sql)) {
+            return [[]];
+          }
+          if (/INSERT INTO uploaded_videos/i.test(sql)) {
+            insertedThumbnails.push({
+              vidId: String(params[0]),
+              thumbnailUrl: String(params[6]),
+            });
+            return [{ affectedRows: 1 }];
+          }
+          return [[]];
+        },
+      };
+      const mockPool = {
+        query: async (sql: string, _params: any[] = []) => {
+          if (/FROM sessions s/i.test(sql)) {
+            return [
+              [
+                {
+                  id: "FT483921",
+                  user_id: "FT483921",
+                  name: "Alex Rivera",
+                  mobile: "",
+                  email: "alex@facetube.com",
+                  role: "user",
+                  referral_code: null,
+                  avatar_url: null,
+                  channel_logo_url: null,
+                  channel_name: "Alex Rivera",
+                  channel_description: null,
+                  created_at: new Date().toISOString(),
+                },
+              ],
+            ];
+          }
+          if (/INFORMATION_SCHEMA\.COLUMNS/i.test(sql)) {
+            return [[{ "1": 1 }]];
+          }
+          return [[]];
+        },
+        getConnection: async () => mockConn,
+      };
+
+      process.env["DB_HOST"] = "mock-mysql";
+      process.env["DB_NAME"] = "mock_db";
+      process.env["DB_USER"] = "mock_user";
+      setMysqlPoolForTesting(mockPool);
+
+      const vidHealth = `mysql-health-${Date.now()}`;
+      const resHealth = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${userToken}`,
+          },
+          body: JSON.stringify({
+            id: vidHealth,
+            user_id: "FT483921",
+            creator_name: "Alex Rivera",
+            title: "MySQL Health SVG Fallback",
+            video_url: "/uploads/videos/mysql_health.mp4",
+            video_type: "free",
+            content_type: "long",
+            category: "Health",
+          }),
+        }),
+      );
+      assert.ok(resHealth);
+      assert.equal(resHealth.status, 201);
+      const healthBody = await resHealth.json();
+      assert.equal(healthBody.video.thumbnail_url, CATEGORY_THUMBNAILS["Health"]);
+      assert.equal(
+        insertedThumbnails.find((r) => r.vidId === vidHealth)?.thumbnailUrl,
+        CATEGORY_THUMBNAILS["Health"],
+      );
+      assert.equal(
+        fs.existsSync(path.resolve(process.cwd(), "uploads", "images", `thumb_${vidHealth}.jpg`)),
+        false,
+        "MySQL path must NEVER write Health SVG fallback to .jpg",
+      );
+
+      // Custom PNG on MySQL path
+      const tinyPngBase64 =
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+      const vidPng = `mysql-png-${Date.now()}`;
+      const resPng = await handleApiRequest(
+        new Request("http://localhost:3000/api/videos/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${userToken}`,
+          },
+          body: JSON.stringify({
+            id: vidPng,
+            user_id: "FT483921",
+            creator_name: "Alex Rivera",
+            title: "MySQL Custom PNG",
+            video_url: "/uploads/videos/mysql_png.mp4",
+            thumbnail_url: tinyPngBase64,
+            video_type: "free",
+            content_type: "long",
+            category: "Drama",
+          }),
+        }),
+      );
+      assert.ok(resPng);
+      assert.equal(resPng.status, 201);
+      const pngBody = await resPng.json();
+      assert.equal(pngBody.video.thumbnail_url, `/uploads/images/thumb_${vidPng}.png`);
+      createdDiskFiles.push(
+        path.resolve(process.cwd(), "uploads", "images", `thumb_${vidPng}.png`),
+      );
+    });
+
+    it("builds dynamic Explore categories including admin-created categories and filters case-insensitively with trimming", () => {
+      const exploreList = buildExploreCategoryList([
+        "Health",
+        "Sports",
+        "Drama",
+        "Podcast Tech",
+        "health",
+        "All",
+      ]);
+      assert.equal(exploreList[0], "Trending");
+      assert.ok(exploreList.includes("Health"));
+      assert.ok(exploreList.includes("Sports"));
+      assert.ok(exploreList.includes("Drama"));
+      assert.ok(exploreList.includes("Podcast Tech"));
+      assert.equal(exploreList.filter((c) => c.toLowerCase() === "health").length, 1);
+      assert.equal(exploreList.includes("All"), false);
+
+      const sampleVideos = [
+        { id: "1", title: "Morning Yoga", channel: "FitLab", category: " health " },
+        { id: "2", title: "Cup Finals", channel: "GoalTV", category: "SPORTS" },
+        { id: "3", title: "Stage Play", channel: "ArtHouse", category: "Drama" },
+        { id: "4", title: "Founders Ep 1", channel: "Studio", category: "Podcast Tech" },
+      ];
+
+      assert.equal(filterExploreVideos(sampleVideos, { selectedTag: "Trending" }).length, 4);
+      assert.deepEqual(
+        filterExploreVideos(sampleVideos, { selectedTag: "Health" }).map((v) => v.id),
+        ["1"],
+      );
+      assert.deepEqual(
+        filterExploreVideos(sampleVideos, { selectedTag: "  sports  " }).map((v) => v.id),
+        ["2"],
+      );
+      assert.deepEqual(
+        filterExploreVideos(sampleVideos, { selectedTag: "DRAMA" }).map((v) => v.id),
+        ["3"],
+      );
+      assert.deepEqual(
+        filterExploreVideos(sampleVideos, { selectedTag: "podcast tech" }).map((v) => v.id),
+        ["4"],
+      );
+      assert.deepEqual(
+        filterExploreVideos(sampleVideos, { selectedTag: "Health", searchQuery: "yoga" }).map(
+          (v) => v.id,
+        ),
+        ["1"],
+      );
+
+      const exploreSrc = fs.readFileSync(
+        path.resolve(process.cwd(), "src/routes/explore.tsx"),
+        "utf-8",
+      );
+      assert.match(exploreSrc, /window\.addEventListener\("facetube:categories-updated"/);
+      assert.match(exploreSrc, /window\.removeEventListener\("facetube:categories-updated"/);
+    });
+
+    it("runs all category tests inside isolated FACETUBE_DATA_DIR storage without mutating data/facetube_store.json", () => {
+      assert.ok(tmpDataDir.startsWith(os.tmpdir()));
+      assert.equal(process.env["FACETUBE_DATA_DIR"], tmpDataDir);
+      assert.equal(
+        fs.existsSync(path.join(tmpDataDir, "facetube_store.json")),
+        true,
+        "Isolated temp directory must hold the test store file",
+      );
     });
   });
 });
