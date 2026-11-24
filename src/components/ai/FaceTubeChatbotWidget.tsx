@@ -31,6 +31,7 @@ export function FaceTubeChatbotWidget() {
   ]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
     if (open && scrollRef.current) {
@@ -40,7 +41,8 @@ export function FaceTubeChatbotWidget() {
 
   const sendMessage = async (rawText: string) => {
     const trimmed = rawText.trim();
-    if (!trimmed || sending || !user) return;
+    if (!trimmed || inFlightRef.current || sending || !user) return;
+    inFlightRef.current = true;
 
     setErrorMsg(null);
     const userMsg: ChatMessage = {
@@ -77,6 +79,7 @@ export function FaceTubeChatbotWidget() {
     } catch (err: any) {
       setErrorMsg(err?.message || "Assistant is unavailable right now.");
     } finally {
+      inFlightRef.current = false;
       setSending(false);
     }
   };

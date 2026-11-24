@@ -2991,12 +2991,22 @@ async function resolveAiVideoSchemaSupport(
   let hasViewsCol = false;
 
   try {
-    const [tblRows]: any = await pool.query(
-      `SELECT TABLE_NAME
-       FROM INFORMATION_SCHEMA.TABLES
-       WHERE TABLE_SCHEMA = DATABASE()
-         AND TABLE_NAME IN ('uploaded_videos', 'video_likes', 'video_views')`,
-    );
+    const [[tblRows], [colRows]]: any[] = await Promise.all([
+      pool.query(
+        `SELECT TABLE_NAME
+         FROM INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN ('uploaded_videos', 'video_likes', 'video_views')`,
+      ),
+      pool.query(
+        `SELECT TABLE_NAME, COLUMN_NAME
+         FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME = 'uploaded_videos'
+           AND COLUMN_NAME IN ('is_blocked', 'visibility', 'likes', 'views')`,
+      ),
+    ]);
+
     if (Array.isArray(tblRows)) {
       for (const row of tblRows) {
         const tbl = String(row?.TABLE_NAME ?? row?.table_name ?? "").toLowerCase();
@@ -3006,13 +3016,6 @@ async function resolveAiVideoSchemaSupport(
       }
     }
 
-    const [colRows]: any = await pool.query(
-      `SELECT TABLE_NAME, COLUMN_NAME
-       FROM INFORMATION_SCHEMA.COLUMNS
-       WHERE TABLE_SCHEMA = DATABASE()
-         AND TABLE_NAME = 'uploaded_videos'
-         AND COLUMN_NAME IN ('is_blocked', 'visibility', 'likes', 'views')`,
-    );
     if (Array.isArray(colRows)) {
       for (const row of colRows) {
         const tbl = String(row?.TABLE_NAME ?? row?.table_name ?? "").toLowerCase();
@@ -25214,6 +25217,12 @@ async function dispatchApiRequest(
         return jsonResponse({ success: false, error: err.message }, err.status);
       }
       if (err instanceof GeminiServiceError) {
+        const sanitizedMessage = sanitizeGeminiErrorMessage(err.message, readEnv("GEMINI_API_KEY"));
+        if (err.status >= 500 || err.code === "AI_INVALID_INPUT") {
+          console.error(
+            `[FaceTube AI Error] route=${route} status=${err.status} code=${err.code} message=${sanitizedMessage}`,
+          );
+        }
         const headers: Record<string, string> = {
           "Content-Type": "application/json; charset=utf-8",
           "Access-Control-Allow-Origin": "*",
@@ -25224,7 +25233,7 @@ async function dispatchApiRequest(
           JSON.stringify({
             success: false,
             code: err.code,
-            error: sanitizeGeminiErrorMessage(err.message, readEnv("GEMINI_API_KEY")),
+            error: sanitizedMessage,
           }),
           { status: err.status, headers },
         );
@@ -25245,6 +25254,8 @@ async function dispatchApiRequest(
 
     // 1. AI Video Title, Description & Tags Generator (Auth required)
     if (route === "ai/video-metadata" && method === "POST") {
+      const routeStartPerf = performance.now();
+      const requestStartAt = new Date().toISOString();
       try {
         const authUser = await getAuthUserFromRequest(request, store, pool, env);
         const authCheck = requireAuth(authUser);
@@ -25372,6 +25383,21 @@ async function dispatchApiRequest(
           aiConsent,
         });
 
+        const totalMs = Math.round(performance.now() - routeStartPerf);
+        const timingPayload = {
+          requestStartAt,
+          filesUploadMs: result.timing?.filesUploadMs ?? 0,
+          filesActivePollMs: result.timing?.filesActivePollMs ?? 0,
+          filesActivePollAttempts: result.timing?.filesActivePollAttempts ?? 0,
+          geminiStartAt: result.timing?.geminiStartAt ?? "",
+          geminiEndAt: result.timing?.geminiEndAt ?? "",
+          geminiRequestMs: result.timing?.geminiRequestMs ?? 0,
+          totalProcessingMs: totalMs,
+        };
+        console.info(
+          `[FaceTube AI Timing] route=ai/video-metadata mode=${result.analysisMode} model=${result.model} requestStart=${timingPayload.requestStartAt} filesUploadMs=${timingPayload.filesUploadMs} filesActivePollMs=${timingPayload.filesActivePollMs} pollAttempts=${timingPayload.filesActivePollAttempts} geminiStart=${timingPayload.geminiStartAt} geminiEnd=${timingPayload.geminiEndAt} geminiMs=${timingPayload.geminiRequestMs} totalMs=${timingPayload.totalProcessingMs}`,
+        );
+
         return jsonResponse({
           success: true,
           suggestions: {
@@ -25382,8 +25408,13 @@ async function dispatchApiRequest(
             applied: false,
           },
           model: result.model,
+          timing: timingPayload,
         });
       } catch (err) {
+        const totalMs = Math.round(performance.now() - routeStartPerf);
+        console.info(
+          `[FaceTube AI Timing] route=ai/video-metadata status=error requestStart=${requestStartAt} totalMs=${totalMs}`,
+        );
         return handleAiError(err);
       }
     }
@@ -25550,6 +25581,8 @@ async function dispatchApiRequest(
 
     // 3. FaceTube AI Chatbot (Auth required, verified platform knowledge only)
     if (route === "ai/chat" && method === "POST") {
+      const routeStartPerf = performance.now();
+      const requestStartAt = new Date().toISOString();
       try {
         const authUser = await getAuthUserFromRequest(request, store, pool, env);
         const authCheck = requireAuth(authUser);
@@ -25593,13 +25626,30 @@ async function dispatchApiRequest(
           userContext: { displayName, role },
         });
 
+        const totalMs = Math.round(performance.now() - routeStartPerf);
+        const timingPayload = {
+          requestStartAt,
+          geminiStartAt: chatRes.timing?.geminiStartAt ?? "",
+          geminiEndAt: chatRes.timing?.geminiEndAt ?? "",
+          geminiRequestMs: chatRes.timing?.geminiRequestMs ?? 0,
+          totalProcessingMs: totalMs,
+        };
+        console.info(
+          `[FaceTube AI Timing] route=ai/chat model=${chatRes.model} historyTurns=${validatedChat.history.length} requestStart=${timingPayload.requestStartAt} geminiStart=${timingPayload.geminiStartAt} geminiEnd=${timingPayload.geminiEndAt} geminiMs=${timingPayload.geminiRequestMs} totalMs=${timingPayload.totalProcessingMs}`,
+        );
+
         return jsonResponse({
           success: true,
           reply: chatRes.reply,
           model: chatRes.model,
           informationalOnly: true,
+          timing: timingPayload,
         });
       } catch (err) {
+        const totalMs = Math.round(performance.now() - routeStartPerf);
+        console.info(
+          `[FaceTube AI Timing] route=ai/chat status=error requestStart=${requestStartAt} totalMs=${totalMs}`,
+        );
         return handleAiError(err);
       }
     }

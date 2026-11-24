@@ -2436,7 +2436,7 @@ export const api = {
         method: "POST",
         body: JSON.stringify(params),
         baseUrlOverride: getAiApiBaseUrl(),
-        timeoutMs: 30000,
+        timeoutMs: params.videoBase64 || params.videoId ? 75000 : 30000,
       });
     },
 

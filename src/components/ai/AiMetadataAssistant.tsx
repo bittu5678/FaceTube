@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Sparkles, Check, Copy, Loader2, AlertCircle, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
@@ -67,6 +67,7 @@ export function AiMetadataAssistant({
   const [suggestedDescription, setSuggestedDescription] = useState("");
   const [suggestedTags, setSuggestedTags] = useState<string[]>([]);
   const [analysisMode, setAnalysisMode] = useState<"video_content" | "metadata_only" | null>(null);
+  const inFlightRef = useRef(false);
 
   const canAnalyzeFileBytes =
     Boolean(videoFile) &&
@@ -77,12 +78,14 @@ export function AiMetadataAssistant({
   const isNonPublic = visibility === "private" || visibility === "unlisted";
 
   const handleGenerate = async () => {
+    if (inFlightRef.current || loading) return;
     setErrorMsg(null);
     if (!titleDraft.trim() && !descriptionDraft.trim() && !videoFile) {
       toast.error("Add a video file or draft title/notes first so AI can generate suggestions.");
       return;
     }
 
+    inFlightRef.current = true;
     setLoading(true);
     try {
       let videoBase64: string | undefined;
@@ -119,6 +122,7 @@ export function AiMetadataAssistant({
       setErrorMsg(msg);
       toast.error(msg);
     } finally {
+      inFlightRef.current = false;
       setLoading(false);
     }
   };
