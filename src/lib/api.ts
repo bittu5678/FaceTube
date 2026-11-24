@@ -6,6 +6,13 @@
 
 import { cropAndResizeTo9to16, cropAndResizeToSquare } from "./image-effects";
 import { buildImageUploadRequest } from "./channel-logo-validation";
+import {
+  computeUploadProgressFromEvent,
+  createIndeterminateUploadSnapshot,
+  createInitialUploadSnapshot,
+  createUploadProgressTracker,
+  type UploadProgressSnapshot,
+} from "./upload-progress";
 
 export const PRODUCTION_API_URL = "https://api.facetube.online";
 
@@ -266,6 +273,316 @@ export async function apiFetch<T = unknown>(
   }
 
   return data as T;
+}
+
+export interface UploadVideoResponse {
+  success: boolean;
+  url: string;
+  fileName: string;
+  format: string;
+}
+
+export interface XMLHttpRequestUploadLike {
+  addEventListener: (
+    type: string,
+    listener: (event: { loaded?: number; total?: number; lengthComputable?: boolean }) => void,
+  ) => void;
+}
+
+export interface XMLHttpRequestLike {
+  upload?: XMLHttpRequestUploadLike | undefined;
+  readyState: number;
+  status: number;
+  statusText: string;
+  responseText: string;
+  open: (method: string, url: string, async?: boolean) => void;
+  setRequestHeader: (name: string, value: string) => void;
+  send: (body?: Document | XMLHttpRequestBodyInit | null) => void;
+  abort: () => void;
+  addEventListener: (type: string, listener: () => void) => void;
+  getResponseHeader?: ((name: string) => string | null) | undefined;
+}
+
+export interface UploadVideoOptions {
+  onProgress?: ((snapshot: UploadProgressSnapshot) => void) | undefined;
+  signal?: AbortSignal | undefined;
+  baseUrlOverride?: string | undefined;
+  xhrFactory?: (() => XMLHttpRequestLike) | undefined;
+}
+
+/**
+ * Uploads a video file via multipart/form-data to /uploads/video.php using XMLHttpRequest
+ * so real browser upload byte progress, completion, and remaining time are tracked.
+ * Falls back to indeterminate progress when XHR or lengthComputable is unavailable.
+ */
+export async function uploadVideoWithProgress(
+  file: File,
+  options: UploadVideoOptions = {},
+): Promise<UploadVideoResponse> {
+  const { onProgress, signal, baseUrlOverride, xhrFactory } = options;
+  const formData = new FormData();
+  formData.append("video", file);
+
+  const cleanEndpoint = "/uploads/video.php";
+  const baseUrl = baseUrlOverride ?? getApiBaseUrl();
+  let url = `${baseUrl}${cleanEndpoint}`;
+  if (typeof window === "undefined" && !url.startsWith("http://") && !url.startsWith("https://")) {
+    const port = process.env["PORT"] || 3000;
+    url = `http://127.0.0.1:${port}${url.startsWith("/") ? "" : "/"}${url}`;
+  }
+
+  const createXhr: (() => XMLHttpRequestLike) | null = xhrFactory
+    ? xhrFactory
+    : typeof XMLHttpRequest !== "undefined"
+      ? () => new XMLHttpRequest() as unknown as XMLHttpRequestLike
+      : null;
+
+  // Fallback for runtimes without XMLHttpRequest (e.g., SSR/Node test mocks using fetch):
+  // emit an honest indeterminate state instead of fake percentages.
+  if (!createXhr) {
+    const totalSize = Number.isFinite(file.size) && file.size > 0 ? file.size : 0;
+    onProgress?.(createIndeterminateUploadSnapshot(totalSize));
+    try {
+      const fetchOpts: ApiFetchOptions = {
+        method: "POST",
+        body: formData,
+        ...(signal ? { signal } : {}),
+        ...(baseUrlOverride ? { baseUrlOverride } : {}),
+      };
+      const res = await apiFetch<UploadVideoResponse>(cleanEndpoint, fetchOpts);
+      onProgress?.({
+        stage: "upload_completed",
+        loadedBytes: totalSize,
+        totalBytes: totalSize,
+        percentage: 100,
+        isIndeterminate: false,
+        bytesPerSecond: null,
+        estimatedRemainingSeconds: 0,
+      });
+      return res;
+    } catch (err: any) {
+      onProgress?.({
+        stage: "failed",
+        loadedBytes: 0,
+        totalBytes: totalSize,
+        percentage: null,
+        isIndeterminate: true,
+        bytesPerSecond: null,
+        estimatedRemainingSeconds: null,
+        errorMessage: err?.message || "Video upload failed.",
+      });
+      throw err;
+    }
+  }
+
+  const xhr = createXhr();
+  const totalSize = Number.isFinite(file.size) && file.size > 0 ? file.size : 0;
+  const tracker = createUploadProgressTracker(Date.now());
+  let latestLoaded = 0;
+  let latestTotal = totalSize;
+  let latestIndeterminate = totalSize <= 0;
+  let transferCompleted = false;
+
+  const emitProgress = (snapshot: UploadProgressSnapshot) => {
+    latestLoaded = snapshot.loadedBytes;
+    if (snapshot.totalBytes > 0) latestTotal = snapshot.totalBytes;
+    latestIndeterminate = snapshot.isIndeterminate;
+    onProgress?.(snapshot);
+  };
+
+  return new Promise<UploadVideoResponse>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = () => {
+      if (signal) {
+        signal.removeEventListener("abort", onAbortSignal);
+      }
+    };
+
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      emitProgress({
+        stage: "failed",
+        loadedBytes: latestLoaded,
+        totalBytes: latestTotal,
+        percentage:
+          latestIndeterminate || latestTotal <= 0
+            ? null
+            : Math.min(99, Math.round((latestLoaded / latestTotal) * 100)),
+        isIndeterminate: latestIndeterminate || latestTotal <= 0,
+        bytesPerSecond: null,
+        estimatedRemainingSeconds: null,
+        errorMessage: err.message,
+      });
+      reject(err);
+    };
+
+    const onAbortSignal = () => {
+      try {
+        xhr.abort();
+      } catch {
+        // Ignore abort errors
+      }
+      fail(new Error("Video upload was cancelled."));
+    };
+
+    if (signal) {
+      if (signal.aborted) {
+        fail(new Error("Video upload was cancelled."));
+        return;
+      }
+      signal.addEventListener("abort", onAbortSignal, { once: true });
+    }
+
+    if (xhr.upload && typeof xhr.upload.addEventListener === "function") {
+      xhr.upload.addEventListener("progress", (ev) => {
+        if (settled || transferCompleted) return;
+        const computable = Boolean(ev?.lengthComputable);
+        const total = typeof ev?.total === "number" ? ev.total : 0;
+        const loaded = typeof ev?.loaded === "number" ? ev.loaded : 0;
+        const snapshot = computeUploadProgressFromEvent(
+          tracker,
+          {
+            loaded,
+            total,
+            lengthComputable: computable,
+          },
+          Date.now(),
+        );
+        if (snapshot.stage === "upload_completed") {
+          transferCompleted = true;
+        }
+        emitProgress(snapshot);
+      });
+
+      xhr.upload.addEventListener("load", () => {
+        if (settled) return;
+        transferCompleted = true;
+        const completedTotal = latestTotal > 0 ? latestTotal : latestLoaded;
+        emitProgress({
+          stage: "upload_completed",
+          loadedBytes: completedTotal,
+          totalBytes: completedTotal,
+          percentage: 100,
+          isIndeterminate: false,
+          bytesPerSecond: tracker.ewmaBytesPerSec,
+          estimatedRemainingSeconds: 0,
+        });
+        if (xhr.readyState < 4) {
+          queueMicrotask(() => {
+            if (!settled && xhr.readyState < 4) {
+              emitProgress({
+                stage: "server_processing",
+                loadedBytes: completedTotal,
+                totalBytes: completedTotal,
+                percentage: 100,
+                isIndeterminate: false,
+                bytesPerSecond: tracker.ewmaBytesPerSec,
+                estimatedRemainingSeconds: 0,
+              });
+            }
+          });
+        }
+      });
+    } else {
+      // Browser/XHR implementation does not support upload progress events
+      emitProgress(createIndeterminateUploadSnapshot(totalSize));
+    }
+
+    xhr.addEventListener("readystatechange", () => {
+      if (settled) return;
+      if (transferCompleted && (xhr.readyState === 2 || xhr.readyState === 3)) {
+        const completedTotal = latestTotal > 0 ? latestTotal : latestLoaded;
+        emitProgress({
+          stage: "server_processing",
+          loadedBytes: completedTotal,
+          totalBytes: completedTotal,
+          percentage: 100,
+          isIndeterminate: false,
+          bytesPerSecond: tracker.ewmaBytesPerSec,
+          estimatedRemainingSeconds: 0,
+        });
+      }
+    });
+
+    xhr.addEventListener("load", () => {
+      if (settled) return;
+      const rawText = xhr.responseText || "";
+      let data: any = null;
+      try {
+        data = rawText ? JSON.parse(rawText) : null;
+      } catch {
+        data = rawText;
+      }
+
+      if (
+        typeof data === "string" &&
+        (data.includes("<?php") || data.startsWith("<!DOCTYPE") || data.startsWith("<html"))
+      ) {
+        fail(new Error(`Invalid response received from endpoint ${cleanEndpoint}`));
+        return;
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        const errorMsg =
+          (typeof data === "object" && (data?.error || data?.message || data?.msg)) ||
+          (typeof data === "string" && data) ||
+          `HTTP error ${xhr.status}: ${xhr.statusText || "Upload failed"}`;
+        const err = new Error(errorMsg) as Error & { status?: number; data?: unknown };
+        err.status = xhr.status;
+        err.data = data;
+        fail(err);
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      const completedTotal = latestTotal > 0 ? latestTotal : latestLoaded;
+      emitProgress({
+        stage: "server_processing",
+        loadedBytes: completedTotal,
+        totalBytes: completedTotal,
+        percentage: 100,
+        isIndeterminate: false,
+        bytesPerSecond: tracker.ewmaBytesPerSec,
+        estimatedRemainingSeconds: 0,
+      });
+      resolve(data as UploadVideoResponse);
+    });
+
+    xhr.addEventListener("error", () => {
+      fail(
+        new Error(
+          "Network error occurred while uploading the video. Please check your connection and retry.",
+        ),
+      );
+    });
+
+    xhr.addEventListener("abort", () => {
+      fail(new Error("Video upload was cancelled."));
+    });
+
+    try {
+      xhr.open("POST", url, true);
+      xhr.setRequestHeader("Accept", "application/json");
+      const token = getStoredAuthToken();
+      if (token) {
+        xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+        xhr.setRequestHeader("X-Authorization", `Bearer ${token}`);
+      }
+
+      emitProgress(
+        xhr.upload
+          ? createInitialUploadSnapshot(totalSize)
+          : createIndeterminateUploadSnapshot(totalSize),
+      );
+      xhr.send(formData);
+    } catch (err: any) {
+      fail(err instanceof Error ? err : new Error(err?.message || "Failed to start video upload."));
+    }
+  });
 }
 
 /**
@@ -850,18 +1167,8 @@ export const api = {
       });
     },
 
-    uploadVideo: async (file: File) => {
-      const formData = new FormData();
-      formData.append("video", file);
-      return apiFetch<{
-        success: boolean;
-        url: string;
-        fileName: string;
-        format: string;
-      }>("/uploads/video.php", {
-        method: "POST",
-        body: formData,
-      });
+    uploadVideo: async (file: File, options?: UploadVideoOptions) => {
+      return uploadVideoWithProgress(file, options);
     },
 
     uploadKyc: async (file: File) => {

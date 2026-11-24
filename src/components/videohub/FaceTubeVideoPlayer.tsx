@@ -18,12 +18,18 @@ import {
 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { resolveMediaUrl } from "@/lib/media-url";
+import {
+  computeFittedVideoBox,
+  getPlayerContainerClass,
+  resolvePlayerAspectMode,
+} from "@/lib/video-player-layout";
 
 interface FaceTubeVideoPlayerProps {
   src?: string | undefined;
   poster?: string | undefined;
   title?: string | undefined;
   duration?: string | undefined;
+  contentType?: "short" | "long" | string | undefined;
   autoPlay?: boolean | undefined;
   onEnded?: (() => void) | undefined;
   onBack?: (() => void) | undefined;
@@ -49,46 +55,12 @@ function getMimeType(url: string): string {
   return "video/mp4";
 }
 
-function computeFittedVideoBox(
-  containerW: number,
-  containerH: number,
-  videoW: number,
-  videoH: number,
-  rotationDeg: number,
-): { baseWidth: number; baseHeight: number; visualWidth: number; visualHeight: number } | null {
-  if (containerW <= 0 || containerH <= 0) return null;
-  const effectiveW = videoW > 0 ? videoW : 16;
-  const effectiveH = videoH > 0 ? videoH : 9;
-  const isQuarterTurn = Math.abs(rotationDeg % 180) === 90;
-
-  if (isQuarterTurn) {
-    const scale = Math.min(containerW / effectiveH, containerH / effectiveW);
-    const baseWidth = effectiveW * scale;
-    const baseHeight = effectiveH * scale;
-    return {
-      baseWidth,
-      baseHeight,
-      visualWidth: baseHeight,
-      visualHeight: baseWidth,
-    };
-  }
-
-  const scale = Math.min(containerW / effectiveW, containerH / effectiveH);
-  const baseWidth = effectiveW * scale;
-  const baseHeight = effectiveH * scale;
-  return {
-    baseWidth,
-    baseHeight,
-    visualWidth: baseWidth,
-    visualHeight: baseHeight,
-  };
-}
-
 export function FaceTubeVideoPlayer({
   src,
   poster,
   title = "Video",
   duration: initialDurationStr,
+  contentType,
   autoPlay = true,
   onEnded,
   onBack,
@@ -154,6 +126,8 @@ export function FaceTubeVideoPlayer({
 
   const cleanSrc = resolveMediaUrl(src);
   const cleanPoster = resolveMediaUrl(poster);
+  const aspectMode = resolvePlayerAspectMode(contentType);
+  const containerAspectClass = getPlayerContainerClass(aspectMode, isFullscreen);
 
   const normalizedRotation = ((rotation % 360) + 360) % 360;
   const isRotated = normalizedRotation !== 0;
@@ -266,8 +240,16 @@ export function FaceTubeVideoPlayer({
         videoSize.width,
         videoSize.height,
         rotation,
+        aspectMode,
       ),
-    [containerSize.width, containerSize.height, videoSize.width, videoSize.height, rotation],
+    [
+      containerSize.width,
+      containerSize.height,
+      videoSize.width,
+      videoSize.height,
+      rotation,
+      aspectMode,
+    ],
   );
 
   const getPanBounds = useCallback(
@@ -277,7 +259,14 @@ export function FaceTubeVideoPlayer({
       const ch = containerSize.height || containerRef.current?.clientHeight || 0;
       if (cw <= 0 || ch <= 0) return { maxX: 0, maxY: 0 };
 
-      const box = computeFittedVideoBox(cw, ch, videoSize.width, videoSize.height, targetRotation);
+      const box = computeFittedVideoBox(
+        cw,
+        ch,
+        videoSize.width,
+        videoSize.height,
+        targetRotation,
+        aspectMode,
+      );
       if (!box) {
         return {
           maxX: Math.max(0, ((targetZoom - 1) * cw) / 2),
@@ -289,7 +278,7 @@ export function FaceTubeVideoPlayer({
         maxY: Math.max(0, (box.visualHeight * targetZoom - ch) / 2),
       };
     },
-    [containerSize.width, containerSize.height, videoSize.width, videoSize.height],
+    [containerSize.width, containerSize.height, videoSize.width, videoSize.height, aspectMode],
   );
 
   const clampPan = useCallback(
@@ -620,7 +609,9 @@ export function FaceTubeVideoPlayer({
   // Case 1: Empty / Missing video URL
   if (!cleanSrc) {
     return (
-      <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-black border border-border shadow-lift flex flex-col items-center justify-center p-6 text-center select-none">
+      <div
+        className={`relative ${getPlayerContainerClass(aspectMode, false)} overflow-hidden bg-black border border-border shadow-lift flex flex-col items-center justify-center p-6 text-center select-none`}
+      >
         {cleanPoster && (
           <img
             src={cleanPoster}
@@ -661,7 +652,9 @@ export function FaceTubeVideoPlayer({
   // Case 2: Playback Error Card
   if (hasError) {
     return (
-      <div className="relative aspect-video w-full overflow-hidden rounded-2xl bg-zinc-950 border border-red-500/30 shadow-lift flex flex-col items-center justify-center p-6 text-center select-none">
+      <div
+        className={`relative ${getPlayerContainerClass(aspectMode, false)} overflow-hidden bg-zinc-950 border border-red-500/30 shadow-lift flex flex-col items-center justify-center p-6 text-center select-none`}
+      >
         {cleanPoster && (
           <img
             src={cleanPoster}
@@ -712,7 +705,7 @@ export function FaceTubeVideoPlayer({
       ref={containerRef}
       onMouseMove={handleMouseMove}
       onMouseLeave={() => isPlaying && setShowControls(false)}
-      className="group relative aspect-video w-full overflow-hidden rounded-2xl bg-black shadow-lift select-none"
+      className={`group relative ${containerAspectClass} overflow-hidden bg-black shadow-lift select-none`}
     >
       {/* Centered Video Stage: handles click-to-play, drag-to-pan when zoomed, and touch pinch/pan */}
       <div
@@ -758,12 +751,22 @@ export function FaceTubeVideoPlayer({
               setVideoSize({ width: vw, height: vh });
             }
           }}
-          onCanPlay={() => {
+          onCanPlay={(e) => {
+            const vw = e.currentTarget.videoWidth;
+            const vh = e.currentTarget.videoHeight;
+            if (vw > 0 && vh > 0 && (videoSize.width !== vw || videoSize.height !== vh)) {
+              setVideoSize({ width: vw, height: vh });
+            }
             setIsLoading(false);
             setIsBuffering(false);
           }}
           onWaiting={() => setIsBuffering(true)}
-          onPlaying={() => {
+          onPlaying={(e) => {
+            const vw = e.currentTarget.videoWidth;
+            const vh = e.currentTarget.videoHeight;
+            if (vw > 0 && vh > 0 && (videoSize.width !== vw || videoSize.height !== vh)) {
+              setVideoSize({ width: vw, height: vh });
+            }
             setIsBuffering(false);
             setIsLoading(false);
             setIsPlaying(true);

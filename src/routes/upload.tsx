@@ -55,6 +55,15 @@ import {
   type UploadedVideo,
   VIDEO_CATEGORIES,
 } from "@/lib/video-service";
+import { UploadProgressPanel } from "@/components/videohub/UploadProgressPanel";
+import {
+  computeOverallBatchProgress,
+  formatRemainingTime,
+  formatUploadedTotalPair,
+  getUploadFileIdentityKey,
+  type UploadProgressSnapshot,
+} from "@/lib/upload-progress";
+import { getUploadPreviewVideoClass } from "@/lib/video-player-layout";
 import {
   captureVideoThumbnail,
   captureAndUploadThumbnail,
@@ -649,6 +658,9 @@ export interface BulkVideoItem {
   customThumbnailPreview?: string | undefined;
   status: "queued" | "uploading" | "success" | "error";
   progress: number;
+  progressSnapshot?: UploadProgressSnapshot | undefined;
+  uploadedVideoUrl?: string | undefined;
+  uploadedThumbnailUrl?: string | undefined;
   errorMessage?: string | undefined;
   publishedVideo?: UploadedVideo | undefined;
 }
@@ -814,29 +826,88 @@ export function BulkVideoUploadView({
     setQueue((prev) =>
       prev.map((it) =>
         it.id === itemId
-          ? { ...it, status: "uploading", progress: 15, errorMessage: undefined }
+          ? {
+              ...it,
+              status: "uploading",
+              progress: it.uploadedVideoUrl ? 100 : 0,
+              progressSnapshot: it.uploadedVideoUrl
+                ? {
+                    stage: "server_processing",
+                    loadedBytes: it.file.size,
+                    totalBytes: it.file.size,
+                    percentage: 100,
+                    isIndeterminate: false,
+                    bytesPerSecond: null,
+                    estimatedRemainingSeconds: 0,
+                  }
+                : {
+                    stage: "uploading",
+                    loadedBytes: 0,
+                    totalBytes: it.file.size,
+                    percentage: it.file.size > 0 ? 0 : null,
+                    isIndeterminate: it.file.size <= 0,
+                    bytesPerSecond: null,
+                    estimatedRemainingSeconds: null,
+                  },
+              errorMessage: undefined,
+            }
           : it,
       ),
     );
 
     try {
-      // 1. Upload video file to server storage via existing production API
-      setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 35 } : it)));
-      const uploadRes = await api.uploads.uploadVideo(item.file);
-      if (!uploadRes || !uploadRes.url) {
-        const serverError =
-          (uploadRes as any)?.error ||
-          (uploadRes as any)?.message ||
-          (uploadRes as any)?.msg ||
-          "Server storage upload failed without a valid video URL.";
-        throw new Error(serverError);
+      // 1. Upload video file to server storage via existing production API (reuse uploadedVideoUrl on retry)
+      let resolvedVideoUrl = (item.uploadedVideoUrl || "").trim();
+      if (!resolvedVideoUrl) {
+        const uploadRes = await api.uploads.uploadVideo(item.file, {
+          onProgress: (snap) => {
+            setQueue((prev) =>
+              prev.map((it) =>
+                it.id === itemId
+                  ? {
+                      ...it,
+                      progress: snap.percentage ?? it.progress,
+                      progressSnapshot: snap,
+                    }
+                  : it,
+              ),
+            );
+          },
+        });
+        if (!uploadRes || !uploadRes.url) {
+          const serverError =
+            (uploadRes as any)?.error ||
+            (uploadRes as any)?.message ||
+            (uploadRes as any)?.msg ||
+            "Server storage upload failed without a valid video URL.";
+          throw new Error(serverError);
+        }
+        resolvedVideoUrl = uploadRes.url;
+        setQueue((prev) =>
+          prev.map((it) =>
+            it.id === itemId
+              ? {
+                  ...it,
+                  uploadedVideoUrl: resolvedVideoUrl,
+                  progress: 100,
+                  progressSnapshot: {
+                    stage: "server_processing",
+                    loadedBytes: it.file.size,
+                    totalBytes: it.file.size,
+                    percentage: 100,
+                    isIndeterminate: false,
+                    bytesPerSecond: null,
+                    estimatedRemainingSeconds: 0,
+                  },
+                }
+              : it,
+          ),
+        );
       }
 
-      setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 65 } : it)));
-
       // 2. Persist custom thumbnail or video snapshot frame or category fallback
-      let posterUrl = "";
-      if (item.customThumbnailFile) {
+      let posterUrl = (item.uploadedThumbnailUrl || "").trim();
+      if (!posterUrl && item.customThumbnailFile) {
         try {
           const imgRes = await api.uploads.uploadImage(item.customThumbnailFile);
           if (imgRes && imgRes.url) {
@@ -854,13 +925,31 @@ export function BulkVideoUploadView({
         }
       }
 
-      setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 80 } : it)));
+      setQueue((prev) =>
+        prev.map((it) =>
+          it.id === itemId
+            ? {
+                ...it,
+                uploadedThumbnailUrl: posterUrl,
+                progress: 100,
+                progressSnapshot: {
+                  stage: "server_processing",
+                  loadedBytes: it.file.size,
+                  totalBytes: it.file.size,
+                  percentage: 100,
+                  isIndeterminate: false,
+                  bytesPerSecond: null,
+                  estimatedRemainingSeconds: 0,
+                },
+              }
+            : it,
+        ),
+      );
 
       let published: UploadedVideo;
 
       // 3. If video is marked as premium (Sponsor), initiate verified payment
       if (item.videoType === "premium") {
-        setQueue((prev) => prev.map((it) => (it.id === itemId ? { ...it, progress: 85 } : it)));
         let paymentId: string | undefined;
         let serverCreatedVideo: UploadedVideo | undefined;
         await new Promise<void>((resolve, reject) => {
@@ -869,7 +958,7 @@ export function BulkVideoUploadView({
             userName: creatorName,
             videoTitle: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
             description: item.description.trim(),
-            videoUrl: uploadRes.url,
+            videoUrl: resolvedVideoUrl,
             thumbnailUrl: posterUrl,
             contentType: item.contentType,
             visibility: normalizeVideoVisibility(item.visibility, "public"),
@@ -896,7 +985,7 @@ export function BulkVideoUploadView({
           creatorName,
           title: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
           description: item.description.trim(),
-          videoUrl: uploadRes.url,
+          videoUrl: resolvedVideoUrl,
           thumbnailUrl: posterUrl,
           videoType: "premium",
           contentType: item.contentType,
@@ -919,7 +1008,7 @@ export function BulkVideoUploadView({
           creatorName,
           title: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
           description: item.description.trim(),
-          videoUrl: uploadRes.url,
+          videoUrl: resolvedVideoUrl,
           thumbnailUrl: posterUrl,
           videoType: "free",
           contentType: item.contentType,
@@ -934,7 +1023,21 @@ export function BulkVideoUploadView({
       setQueue((prev) =>
         prev.map((it) =>
           it.id === itemId
-            ? { ...it, status: "success", progress: 100, publishedVideo: published }
+            ? {
+                ...it,
+                status: "success",
+                progress: 100,
+                progressSnapshot: {
+                  stage: "completed",
+                  loadedBytes: it.file.size,
+                  totalBytes: it.file.size,
+                  percentage: 100,
+                  isIndeterminate: false,
+                  bytesPerSecond: null,
+                  estimatedRemainingSeconds: 0,
+                },
+                publishedVideo: published,
+              }
             : it,
         ),
       );
@@ -961,7 +1064,24 @@ export function BulkVideoUploadView({
       const msg = err?.message || "Failed to upload video.";
       setQueue((prev) =>
         prev.map((it) =>
-          it.id === itemId ? { ...it, status: "error", progress: 0, errorMessage: msg } : it,
+          it.id === itemId
+            ? {
+                ...it,
+                status: "error",
+                progress: 0,
+                progressSnapshot: {
+                  stage: "failed",
+                  loadedBytes: it.progressSnapshot?.loadedBytes ?? 0,
+                  totalBytes: it.file.size,
+                  percentage: null,
+                  isIndeterminate: false,
+                  bytesPerSecond: null,
+                  estimatedRemainingSeconds: null,
+                  errorMessage: msg,
+                },
+                errorMessage: msg,
+              }
+            : it,
         ),
       );
       return false;
@@ -1075,6 +1195,18 @@ export function BulkVideoUploadView({
   const completedCount = queue.filter((it) => it.status === "success").length;
   const errorCount = queue.filter((it) => it.status === "error").length;
   const totalCount = queue.length;
+  const overallBatchProgress = computeOverallBatchProgress(
+    queue.map((it) => ({
+      fileSize: it.file.size,
+      status: it.status,
+      uploadStage: it.progressSnapshot?.stage,
+      loadedBytes: it.progressSnapshot?.loadedBytes,
+      totalBytes: it.progressSnapshot?.totalBytes,
+      isIndeterminate: it.progressSnapshot?.isIndeterminate,
+      bytesPerSecond: it.progressSnapshot?.bytesPerSecond,
+    })),
+  );
+  const overallBatchEta = formatRemainingTime(overallBatchProgress.estimatedRemainingSeconds);
 
   return (
     <div className="space-y-6">
@@ -1211,23 +1343,50 @@ export function BulkVideoUploadView({
           {/* Overall Batch Progress Indicator */}
           {totalCount > 0 && (
             <div className="space-y-1.5 pt-1">
-              <div className="flex justify-between text-xs font-mono text-muted-foreground">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-muted-foreground">
                 <span>
-                  Batch Progress: {completedCount} / {totalCount} Completed
+                  Overall Progress: {completedCount} / {totalCount} Completed
                   {errorCount > 0 ? ` (${errorCount} Failed)` : ""}
+                  {overallBatchProgress.totalBytes > 0
+                    ? ` · ${formatUploadedTotalPair(
+                        overallBatchProgress.uploadedBytes,
+                        overallBatchProgress.totalBytes,
+                      )}`
+                    : ""}
                 </span>
                 <span className="font-bold text-foreground">
-                  {totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0}%
+                  {overallBatchProgress.percentage !== null
+                    ? `${overallBatchProgress.percentage}%`
+                    : "Uploading..."}
                 </span>
               </div>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
-                <div
-                  className="h-full bg-gradient-to-r from-sky-500 via-indigo-500 to-emerald-400 transition-all duration-300"
-                  style={{
-                    width: `${totalCount > 0 ? Math.round((completedCount / totalCount) * 100) : 0}%`,
-                  }}
-                />
+              <div
+                className="h-2 w-full overflow-hidden rounded-full bg-secondary"
+                role="progressbar"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={
+                  overallBatchProgress.percentage !== null
+                    ? overallBatchProgress.percentage
+                    : undefined
+                }
+              >
+                {overallBatchProgress.percentage !== null ? (
+                  <div
+                    className="h-full bg-gradient-to-r from-sky-500 via-indigo-500 to-emerald-400 transition-all duration-150"
+                    style={{ width: `${overallBatchProgress.percentage}%` }}
+                  />
+                ) : (
+                  <div className="h-full w-1/3 animate-pulse rounded-full bg-gradient-to-r from-sky-500 to-indigo-500" />
+                )}
               </div>
+              {overallBatchProgress.activeFiles > 0 && (
+                <div className="text-[11px] font-mono text-muted-foreground">
+                  {overallBatchProgress.isIndeterminate
+                    ? "Indeterminate batch progress (real-time byte progress unavailable)"
+                    : overallBatchEta || "Calculating overall remaining time..."}
+                </div>
+              )}
             </div>
           )}
 
@@ -1409,7 +1568,13 @@ export function BulkVideoUploadView({
                     {item.status === "uploading" && (
                       <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/20 text-amber-400 px-2 py-0.5 text-[11px] font-bold">
                         <RefreshCw className="h-3 w-3 animate-spin" />
-                        Uploading {item.progress}%
+                        {item.progressSnapshot?.stage === "server_processing"
+                          ? "Server Processing"
+                          : item.progressSnapshot?.stage === "upload_completed"
+                            ? "Upload Completed"
+                            : item.progressSnapshot?.isIndeterminate
+                              ? "Uploading..."
+                              : `Uploading ${item.progressSnapshot?.percentage ?? item.progress}%`}
                       </span>
                     )}
                     {item.status === "success" && (
@@ -1557,39 +1722,41 @@ export function BulkVideoUploadView({
                   />
                 </div>
 
-                {/* Progress Bar (if Uploading) */}
-                {item.status === "uploading" && (
-                  <div className="space-y-1">
-                    <div className="flex justify-between text-[11px] font-mono text-muted-foreground">
-                      <span>Uploading & Processing to Production Storage...</span>
-                      <span>{item.progress}%</span>
-                    </div>
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
-                      <div
-                        className="h-full bg-gradient-to-r from-sky-500 to-emerald-400 transition-all duration-300"
-                        style={{ width: `${item.progress}%` }}
-                      />
-                    </div>
-                  </div>
+                {/* Real-Time Progress Bar (if Uploading) */}
+                {item.status === "uploading" && item.progressSnapshot && (
+                  <UploadProgressPanel
+                    snapshot={item.progressSnapshot}
+                    compact
+                    accent={item.videoType === "premium" ? "pink" : "sky"}
+                    processingLabel={
+                      item.videoType === "premium"
+                        ? "Server-side processing & payment verification..."
+                        : "Server-side processing & publishing..."
+                    }
+                  />
                 )}
 
-                {/* Error Banner with Individual Retry Button */}
+                {/* Error Banner with Individual Duplicate-Safe Retry Button */}
                 {item.status === "error" && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-300">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
-                      <span className="truncate">{item.errorMessage || "Upload failed."}</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleRetryItem(item.id)}
-                      disabled={isProcessing}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1 text-xs font-bold text-white hover:bg-rose-500 transition shadow-sm disabled:opacity-50"
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      Retry Video
-                    </button>
-                  </div>
+                  <UploadProgressPanel
+                    snapshot={
+                      item.progressSnapshot || {
+                        stage: "failed",
+                        loadedBytes: 0,
+                        totalBytes: item.file.size,
+                        percentage: null,
+                        isIndeterminate: false,
+                        bytesPerSecond: null,
+                        estimatedRemainingSeconds: null,
+                        errorMessage: item.errorMessage || "Upload failed.",
+                      }
+                    }
+                    compact
+                    accent={item.videoType === "premium" ? "pink" : "sky"}
+                    onRetry={() => handleRetryItem(item.id)}
+                    retryDisabled={isProcessing}
+                    retryLabel="Retry Video"
+                  />
                 )}
 
                 {/* Success Banner with Watch Video Link */}
@@ -1687,11 +1854,14 @@ function FreeVideoUploadView({
   const [customThumbnailPreview, setCustomThumbnailPreview] = useState<string>("");
   const [detectedDuration, setDetectedDuration] = useState<string>("");
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgressSnapshot | null>(null);
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [publishedVideo, setPublishedVideo] = useState<UploadedVideo | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const thumbnailInputRef = useRef<HTMLInputElement>(null);
+  const isSubmittingRef = useRef(false);
+  const uploadedCacheRef = useRef<{ fileKey: string; videoUrl: string } | null>(null);
 
   const handleThumbnailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1745,6 +1915,8 @@ function FreeVideoUploadView({
       return;
     }
 
+    uploadedCacheRef.current = null;
+    setUploadProgress(null);
     setVideoFile(file);
     const objectUrl = URL.createObjectURL(file);
     setPreviewUrl(objectUrl);
@@ -1797,6 +1969,8 @@ function FreeVideoUploadView({
       return;
     }
 
+    uploadedCacheRef.current = null;
+    setUploadProgress(null);
     setVideoFile(file);
     const objectUrl = URL.createObjectURL(file);
     setPreviewUrl(objectUrl);
@@ -1819,8 +1993,7 @@ function FreeVideoUploadView({
     );
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const startFreeUpload = async () => {
     if (!userId) {
       toast.error(
         "Your FaceTube account session is still loading or not signed in. Please log in and try again.",
@@ -1835,25 +2008,49 @@ function FreeVideoUploadView({
       toast.error("Please enter a video title.");
       return;
     }
+    if (isSubmittingRef.current || uploading) {
+      return;
+    }
 
+    isSubmittingRef.current = true;
     setUploading(true);
+    const fileKey = getUploadFileIdentityKey(videoFile);
     try {
-      // 1. Upload the actual video file to production storage
-      const uploadRes = await api.uploads.uploadVideo(videoFile);
-      if (!uploadRes || !uploadRes.url) {
-        const serverError =
-          (uploadRes as any)?.error ||
-          (uploadRes as any)?.message ||
-          (uploadRes as any)?.msg ||
-          (!uploadRes
-            ? "Server returned an empty upload response."
-            : typeof uploadRes === "string"
-              ? uploadRes
-              : (uploadRes as any)?.success === false
-                ? "Server rejected video upload without providing an error message."
-                : "Server storage upload succeeded with HTTP 200 but did not return a valid video URL.");
-        throw new Error(serverError);
+      // 1. Upload the actual video file to production storage (reuse cached URL on retry to prevent duplicates)
+      let resolvedVideoUrl =
+        uploadedCacheRef.current?.fileKey === fileKey ? uploadedCacheRef.current.videoUrl : "";
+
+      if (!resolvedVideoUrl) {
+        const uploadRes = await api.uploads.uploadVideo(videoFile, {
+          onProgress: (snap) => setUploadProgress(snap),
+        });
+        if (!uploadRes || !uploadRes.url) {
+          const serverError =
+            (uploadRes as any)?.error ||
+            (uploadRes as any)?.message ||
+            (uploadRes as any)?.msg ||
+            (!uploadRes
+              ? "Server returned an empty upload response."
+              : typeof uploadRes === "string"
+                ? uploadRes
+                : (uploadRes as any)?.success === false
+                  ? "Server rejected video upload without providing an error message."
+                  : "Server storage upload succeeded with HTTP 200 but did not return a valid video URL.");
+          throw new Error(serverError);
+        }
+        resolvedVideoUrl = uploadRes.url;
+        uploadedCacheRef.current = { fileKey, videoUrl: resolvedVideoUrl };
       }
+
+      setUploadProgress({
+        stage: "server_processing",
+        loadedBytes: videoFile.size,
+        totalBytes: videoFile.size,
+        percentage: 100,
+        isIndeterminate: false,
+        bytesPerSecond: null,
+        estimatedRemainingSeconds: 0,
+      });
 
       // 2. Upload optional custom thumbnail if selected, else auto-capture or graceful category fallback
       let posterUrl = "";
@@ -1883,7 +2080,7 @@ function FreeVideoUploadView({
         creatorName,
         title: title.trim(),
         description: description.trim(),
-        videoUrl: uploadRes.url,
+        videoUrl: resolvedVideoUrl,
         thumbnailUrl: posterUrl,
         videoType: "free",
         contentType: format,
@@ -1894,6 +2091,16 @@ function FreeVideoUploadView({
         visibility,
       });
 
+      setUploadProgress({
+        stage: "completed",
+        loadedBytes: videoFile.size,
+        totalBytes: videoFile.size,
+        percentage: 100,
+        isIndeterminate: false,
+        bytesPerSecond: null,
+        estimatedRemainingSeconds: 0,
+      });
+      uploadedCacheRef.current = null;
       setPublishedVideo(newVideo);
       setUploadSuccess(true);
       toast.success(
@@ -1902,10 +2109,27 @@ function FreeVideoUploadView({
       onUploaded?.();
     } catch (err: any) {
       console.error("Free video upload failed:", err);
-      toast.error(err?.message || "Failed to upload and publish video.");
+      const errMsg = err?.message || "Failed to upload and publish video.";
+      setUploadProgress((prev) => ({
+        stage: "failed",
+        loadedBytes: prev?.loadedBytes ?? 0,
+        totalBytes: videoFile.size,
+        percentage: null,
+        isIndeterminate: false,
+        bytesPerSecond: null,
+        estimatedRemainingSeconds: null,
+        errorMessage: errMsg,
+      }));
+      toast.error(errMsg);
     } finally {
+      isSubmittingRef.current = false;
       setUploading(false);
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await startFreeUpload();
   };
 
   if (uploadSuccess) {
@@ -1928,7 +2152,11 @@ function FreeVideoUploadView({
               controls
               playsInline
               preload="metadata"
-              className="aspect-video w-full rounded-xl bg-black object-contain"
+              className={
+                publishedVideo.contentType === "short"
+                  ? "mx-auto aspect-[9/16] max-h-96 rounded-xl bg-black object-contain"
+                  : "aspect-video w-full rounded-xl bg-black object-contain"
+              }
               src={publishedVideo.videoUrl}
             />
             <div className="p-3 text-left">
@@ -1965,6 +2193,8 @@ function FreeVideoUploadView({
               setCapturedThumbnail("");
               clearCustomThumbnail();
               setPublishedVideo(null);
+              setUploadProgress(null);
+              uploadedCacheRef.current = null;
               setUploadSuccess(false);
             }}
             className="rounded-xl bg-secondary border border-border px-6 py-2.5 text-xs font-bold text-foreground hover:bg-secondary/80 transition"
@@ -2087,7 +2317,7 @@ function FreeVideoUploadView({
                 controls
                 playsInline
                 preload="metadata"
-                className="mx-auto max-h-56 rounded-2xl bg-black object-contain border border-border shadow-sm"
+                className={getUploadPreviewVideoClass(format)}
                 src={previewUrl}
               />
               <div className="flex items-center justify-center gap-2 text-xs font-bold text-sky-400">
@@ -2259,6 +2489,17 @@ function FreeVideoUploadView({
           </div>
         </div>
 
+        {/* Real-Time Upload Progress */}
+        {uploadProgress && (
+          <UploadProgressPanel
+            snapshot={uploadProgress}
+            accent="sky"
+            processingLabel="Server-side processing & publishing video..."
+            onRetry={() => void startFreeUpload()}
+            retryDisabled={uploading}
+          />
+        )}
+
         {/* Action Buttons */}
         <div className="flex items-center justify-between pt-4 border-t border-border">
           <button
@@ -2273,7 +2514,13 @@ function FreeVideoUploadView({
             disabled={uploading}
             className="rounded-xl bg-sky-600 px-8 py-3 text-xs font-bold text-white hover:bg-sky-500 transition shadow-sm disabled:opacity-50"
           >
-            {uploading ? "Uploading & Publishing..." : `Publish Free Video (₹0)`}
+            {uploading
+              ? uploadProgress?.stage === "server_processing"
+                ? "Server Processing..."
+                : uploadProgress?.percentage !== null && uploadProgress?.percentage !== undefined
+                  ? `Uploading (${uploadProgress.percentage}%)...`
+                  : "Uploading..."
+              : `Publish Free Video (₹0)`}
           </button>
         </div>
       </form>
@@ -2311,6 +2558,7 @@ function PremiumVideoUploadView({
   const [customThumbnailPreview, setCustomThumbnailPreview] = useState<string>("");
   const [detectedDuration, setDetectedDuration] = useState<string>("");
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgressSnapshot | null>(null);
   const [paymentStageLabel, setPaymentStageLabel] = useState("");
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -2319,6 +2567,9 @@ function PremiumVideoUploadView({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const thumbnailInputRef = useRef<HTMLInputElement>(null);
   const isSubmittingRef = useRef(false);
+  const uploadedCacheRef = useRef<{ fileKey: string; videoUrl: string; posterUrl: string } | null>(
+    null,
+  );
   const notifiedSuccessIdsRef = useRef<Set<string>>(new Set());
 
   const handleThumbnailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2368,6 +2619,8 @@ function PremiumVideoUploadView({
       return;
     }
 
+    uploadedCacheRef.current = null;
+    setUploadProgress(null);
     setUploadError(null);
     setVideoFile(file);
     const objectUrl = URL.createObjectURL(file);
@@ -2410,6 +2663,9 @@ function PremiumVideoUploadView({
       return;
     }
 
+    uploadedCacheRef.current = null;
+    setUploadProgress(null);
+    setUploadError(null);
     setVideoFile(file);
     const objectUrl = URL.createObjectURL(file);
     setPreviewUrl(objectUrl);
@@ -2422,8 +2678,7 @@ function PremiumVideoUploadView({
     });
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const startSponsorUpload = async () => {
     if (!videoFile) {
       toast.error("Please select a video file for premium upload.");
       return;
@@ -2454,43 +2709,67 @@ function PremiumVideoUploadView({
     setUploading(true);
     setPaymentStageLabel("Uploading video & preparing gateway...");
     preloadRazorpayScript();
+    const fileKey = getUploadFileIdentityKey(videoFile);
     try {
-      // 1. Upload video file and optional thumbnail concurrently (avoids sequential waterfall before gateway)
-      const thumbnailPromise = (async () => {
-        if (customThumbnailFile) {
-          try {
-            const imgRes = await api.uploads.uploadImage(customThumbnailFile);
-            if (imgRes && imgRes.url) {
-              return imgRes.url;
+      // 1. Upload video file and optional thumbnail concurrently (reuse cached storage URL on retry to prevent duplicates)
+      const cachedMatch =
+        uploadedCacheRef.current?.fileKey === fileKey ? uploadedCacheRef.current : null;
+      let resolvedVideoUrl = cachedMatch?.videoUrl || "";
+      let posterUrl = cachedMatch?.posterUrl || "";
+
+      if (!resolvedVideoUrl) {
+        const thumbnailPromise = (async () => {
+          if (customThumbnailFile) {
+            try {
+              const imgRes = await api.uploads.uploadImage(customThumbnailFile);
+              if (imgRes && imgRes.url) {
+                return imgRes.url;
+              }
+            } catch (_thumbErr) {
+              // Fall through to frame capture / category fallback
             }
-          } catch (_thumbErr) {
-            // Fall through to frame capture / category fallback
           }
+          return capturedThumbnail
+            ? uploadThumbnailDataUrl(capturedThumbnail, category)
+            : captureAndUploadThumbnail(videoFile, category);
+        })().catch(() => capturedThumbnail || getCategoryFallbackThumbnail(category));
+
+        const [uploadRes, resolvedPoster] = await Promise.all([
+          api.uploads.uploadVideo(videoFile, {
+            onProgress: (snap) => setUploadProgress(snap),
+          }),
+          thumbnailPromise,
+        ]);
+
+        if (!uploadRes || !uploadRes.url) {
+          const serverError =
+            (uploadRes as any)?.error ||
+            (uploadRes as any)?.message ||
+            (uploadRes as any)?.msg ||
+            (!uploadRes
+              ? "Server returned an empty upload response."
+              : typeof uploadRes === "string"
+                ? uploadRes
+                : (uploadRes as any)?.success === false
+                  ? "Server rejected video upload without providing an error message."
+                  : "Server storage upload succeeded with HTTP 200 but did not return a valid video URL.");
+          throw new Error(serverError);
         }
-        return capturedThumbnail
-          ? uploadThumbnailDataUrl(capturedThumbnail, category)
-          : captureAndUploadThumbnail(videoFile, category);
-      })().catch(() => capturedThumbnail || getCategoryFallbackThumbnail(category));
 
-      const [uploadRes, posterUrl] = await Promise.all([
-        api.uploads.uploadVideo(videoFile),
-        thumbnailPromise,
-      ]);
-
-      if (!uploadRes || !uploadRes.url) {
-        const serverError =
-          (uploadRes as any)?.error ||
-          (uploadRes as any)?.message ||
-          (uploadRes as any)?.msg ||
-          (!uploadRes
-            ? "Server returned an empty upload response."
-            : typeof uploadRes === "string"
-              ? uploadRes
-              : (uploadRes as any)?.success === false
-                ? "Server rejected video upload without providing an error message."
-                : "Server storage upload succeeded with HTTP 200 but did not return a valid video URL.");
-        throw new Error(serverError);
+        resolvedVideoUrl = uploadRes.url;
+        posterUrl = resolvedPoster;
+        uploadedCacheRef.current = { fileKey, videoUrl: resolvedVideoUrl, posterUrl };
       }
+
+      setUploadProgress({
+        stage: "server_processing",
+        loadedBytes: videoFile.size,
+        totalBytes: videoFile.size,
+        percentage: 100,
+        isIndeterminate: false,
+        bytesPerSecond: null,
+        estimatedRemainingSeconds: 0,
+      });
 
       const vidId = `vid-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
 
@@ -2503,7 +2782,7 @@ function PremiumVideoUploadView({
         videoId: vidId,
         videoTitle: title.trim(),
         description: description.trim(),
-        videoUrl: uploadRes.url,
+        videoUrl: resolvedVideoUrl,
         thumbnailUrl: posterUrl,
         category,
         contentType: format,
@@ -2518,9 +2797,19 @@ function PremiumVideoUploadView({
         },
         onSuccess: async () => {
           isSubmittingRef.current = false;
+          uploadedCacheRef.current = null;
           setUploading(false);
           setPaymentStageLabel("");
           setUploadError(null);
+          setUploadProgress({
+            stage: "completed",
+            loadedBytes: videoFile.size,
+            totalBytes: videoFile.size,
+            percentage: 100,
+            isIndeterminate: false,
+            bytesPerSecond: null,
+            estimatedRemainingSeconds: 0,
+          });
           setUploadSuccess(true);
           if (!notifiedSuccessIdsRef.current.has(vidId)) {
             notifiedSuccessIdsRef.current.add(vidId);
@@ -2540,6 +2829,16 @@ function PremiumVideoUploadView({
           setUploadSuccess(false);
           const msg = err || "Payment failed. Video was not published.";
           setUploadError(msg);
+          setUploadProgress({
+            stage: "failed",
+            loadedBytes: videoFile.size,
+            totalBytes: videoFile.size,
+            percentage: null,
+            isIndeterminate: false,
+            bytesPerSecond: null,
+            estimatedRemainingSeconds: null,
+            errorMessage: msg,
+          });
           toast.error(msg);
         },
         onCancel: () => {
@@ -2547,7 +2846,18 @@ function PremiumVideoUploadView({
           setUploading(false);
           setPaymentStageLabel("");
           setUploadSuccess(false);
-          setUploadError("Payment was cancelled. Your video promotion was not activated.");
+          const cancelMsg = "Payment was cancelled. Your video promotion was not activated.";
+          setUploadError(cancelMsg);
+          setUploadProgress({
+            stage: "failed",
+            loadedBytes: videoFile.size,
+            totalBytes: videoFile.size,
+            percentage: null,
+            isIndeterminate: false,
+            bytesPerSecond: null,
+            estimatedRemainingSeconds: null,
+            errorMessage: cancelMsg,
+          });
           toast.info("Payment cancelled.");
         },
       });
@@ -2558,8 +2868,23 @@ function PremiumVideoUploadView({
       setUploadSuccess(false);
       const msg = err?.message || "Failed to initiate sponsor upload.";
       setUploadError(msg);
+      setUploadProgress((prev) => ({
+        stage: "failed",
+        loadedBytes: prev?.loadedBytes ?? 0,
+        totalBytes: videoFile.size,
+        percentage: null,
+        isIndeterminate: false,
+        bytesPerSecond: null,
+        estimatedRemainingSeconds: null,
+        errorMessage: msg,
+      }));
       toast.error(msg);
     }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await startSponsorUpload();
   };
 
   if (uploadSuccess) {
@@ -2589,6 +2914,8 @@ function PremiumVideoUploadView({
               setCapturedThumbnail("");
               clearCustomThumbnail();
               setUploadError(null);
+              setUploadProgress(null);
+              uploadedCacheRef.current = null;
               setUploadSuccess(false);
             }}
             className="rounded-xl bg-pink-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-pink-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/60 transition"
@@ -2691,7 +3018,7 @@ function PremiumVideoUploadView({
                 controls
                 playsInline
                 preload="metadata"
-                className="mx-auto max-h-56 rounded-2xl bg-black object-contain border border-border shadow-sm"
+                className={getUploadPreviewVideoClass(format)}
                 src={previewUrl}
               />
               <div className="flex items-center justify-center gap-2 text-xs font-bold text-pink-600 dark:text-pink-400">
@@ -2904,7 +3231,19 @@ function PremiumVideoUploadView({
           </div>
         </label>
 
-        {uploadError && (
+        {uploadProgress && (
+          <UploadProgressPanel
+            snapshot={uploadProgress}
+            accent="pink"
+            processingLabel={
+              paymentStageLabel || "Server-side processing & payment verification..."
+            }
+            onRetry={() => void startSponsorUpload()}
+            retryDisabled={uploading || !promotionConsent}
+          />
+        )}
+
+        {uploadError && !uploadProgress && (
           <div
             role="alert"
             className="flex items-start gap-2.5 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-xs text-red-200"

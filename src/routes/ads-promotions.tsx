@@ -37,6 +37,8 @@ import { resolveVideoThumbnail, SVG_FALLBACK_THUMBNAIL } from "@/lib/thumbnail-s
 import { resolveMediaUrl } from "@/lib/media-url";
 import { api } from "@/lib/api";
 import { initiateAdsPromotionPayment, preloadRazorpayScript } from "@/lib/razorpay-service";
+import { UploadProgressPanel } from "@/components/videohub/UploadProgressPanel";
+import { getUploadFileIdentityKey, type UploadProgressSnapshot } from "@/lib/upload-progress";
 
 export const Route = createFileRoute("/ads-promotions")({
   head: () => ({
@@ -205,6 +207,8 @@ function AdsPromotionsPage() {
   const [category, setCategory] = useState<string>("Technology & Gadgets");
   const [ctaText, setCtaText] = useState<string>("Learn More");
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgressSnapshot | null>(null);
+  const uploadedAdCacheRef = useRef<{ fileKey: string; videoUrl: string } | null>(null);
 
   // Payment method
   const [paymentMethod, setPaymentMethod] = useState<"wallet" | "upi" | "card">("wallet");
@@ -348,6 +352,8 @@ function AdsPromotionsPage() {
   }, [loadVideosAndCampaigns]);
 
   const handleSelectChannelVideo = (vid: UploadedVideo) => {
+    uploadedAdCacheRef.current = null;
+    setUploadProgress(null);
     setSelectedVideoId(vid.id);
     setCampaignTitle(vid.title);
     setVideoPreviewUrl(vid.videoUrl);
@@ -370,6 +376,8 @@ function AdsPromotionsPage() {
       return;
     }
 
+    uploadedAdCacheRef.current = null;
+    setUploadProgress(null);
     setVideoFile(file);
     const objectUrl = URL.createObjectURL(file);
     setVideoPreviewUrl(objectUrl);
@@ -414,16 +422,33 @@ function AdsPromotionsPage() {
         let resolvedVideoUrl = "";
 
         if (videoFile) {
-          setIsUploading(true);
-          try {
-            const uploadRes = await api.uploads.uploadVideo(videoFile);
-            if (!uploadRes?.success || !uploadRes.url) {
-              throw new Error("Failed to upload advertisement video file.");
+          const fileKey = getUploadFileIdentityKey(videoFile);
+          if (uploadedAdCacheRef.current?.fileKey === fileKey) {
+            resolvedVideoUrl = uploadedAdCacheRef.current.videoUrl;
+          } else {
+            setIsUploading(true);
+            try {
+              const uploadRes = await api.uploads.uploadVideo(videoFile, {
+                onProgress: (snap) => setUploadProgress(snap),
+              });
+              if (!uploadRes?.success || !uploadRes.url) {
+                throw new Error("Failed to upload advertisement video file.");
+              }
+              resolvedVideoUrl = uploadRes.url;
+              uploadedAdCacheRef.current = { fileKey, videoUrl: resolvedVideoUrl };
+            } finally {
+              setIsUploading(false);
             }
-            resolvedVideoUrl = uploadRes.url;
-          } finally {
-            setIsUploading(false);
           }
+          setUploadProgress({
+            stage: "server_processing",
+            loadedBytes: videoFile.size,
+            totalBytes: videoFile.size,
+            percentage: 100,
+            isIndeterminate: false,
+            bytesPerSecond: null,
+            estimatedRemainingSeconds: 0,
+          });
         } else if (videoPreviewUrl && !videoPreviewUrl.startsWith("blob:")) {
           resolvedVideoUrl = videoPreviewUrl.trim();
         } else {
@@ -448,9 +473,23 @@ function AdsPromotionsPage() {
         });
 
         targetVideoId = createdVideo.id;
+        uploadedAdCacheRef.current = null;
         setSelectedVideoId(targetVideoId);
         setVideoFile(null);
         setVideoPreviewUrl(createdVideo.videoUrl || resolvedVideoUrl);
+        setUploadProgress((prev) =>
+          prev
+            ? {
+                stage: "completed",
+                loadedBytes: prev.totalBytes || prev.loadedBytes,
+                totalBytes: prev.totalBytes || prev.loadedBytes,
+                percentage: 100,
+                isIndeterminate: false,
+                bytesPerSecond: null,
+                estimatedRemainingSeconds: 0,
+              }
+            : null,
+        );
         setUserVideos((prev) =>
           prev.some((v) => v.id === createdVideo.id) ? prev : [createdVideo, ...prev],
         );
@@ -511,7 +550,20 @@ function AdsPromotionsPage() {
       isActivatingRef.current = false;
       setIsActivating(false);
       setIsUploading(false);
-      toast.error(err?.message || "Failed to connect with payment gateway.");
+      const errMsg = err?.message || "Failed to connect with payment gateway.";
+      if (videoFile) {
+        setUploadProgress((prev) => ({
+          stage: "failed",
+          loadedBytes: prev?.loadedBytes ?? 0,
+          totalBytes: videoFile.size,
+          percentage: null,
+          isIndeterminate: false,
+          bytesPerSecond: null,
+          estimatedRemainingSeconds: null,
+          errorMessage: errMsg,
+        }));
+      }
+      toast.error(errMsg);
     }
   };
 
@@ -682,6 +734,18 @@ function AdsPromotionsPage() {
                     </span>
                   </div>
                 </div>
+              )}
+
+              {/* Real-Time Ad Video Upload Progress */}
+              {uploadProgress && (
+                <UploadProgressPanel
+                  snapshot={uploadProgress}
+                  compact
+                  accent="emerald"
+                  processingLabel="Server-side processing & saving ad video..."
+                  onRetry={() => void handleActivatePromotion()}
+                  retryDisabled={isActivating}
+                />
               )}
             </div>
 

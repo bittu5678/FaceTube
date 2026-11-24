@@ -1,0 +1,459 @@
+import { describe, it, afterEach } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import {
+  computeFittedVideoBox,
+  getPlayerContainerClass,
+  getShortsStageCardClass,
+  getUploadPreviewVideoClass,
+  resolvePlayerAspectMode,
+} from "../lib/video-player-layout.ts";
+import {
+  computeOverallBatchProgress,
+  computeUploadProgressFromEvent,
+  createUploadProgressTracker,
+  formatRemainingTime,
+  formatUploadedTotalPair,
+  getUploadFileIdentityKey,
+  type UploadProgressSnapshot,
+} from "../lib/upload-progress.ts";
+import { uploadVideoWithProgress, type XMLHttpRequestLike } from "../lib/api.ts";
+import { uploadSingleBulkVideoItem, type BulkUploadProgressState } from "../lib/video-service.ts";
+
+class MockUploadEventTarget {
+  private listeners = new Map<string, Array<(ev: any) => void>>();
+
+  addEventListener(type: string, listener: (ev: any) => void) {
+    const existing = this.listeners.get(type) ?? [];
+    existing.push(listener);
+    this.listeners.set(type, existing);
+  }
+
+  emit(type: string, event: any = {}) {
+    for (const fn of this.listeners.get(type) ?? []) {
+      fn(event);
+    }
+  }
+}
+
+class MockXMLHttpRequest implements XMLHttpRequestLike {
+  upload = new MockUploadEventTarget();
+  readyState = 0;
+  status = 0;
+  statusText = "";
+  responseText = "";
+  method = "";
+  url = "";
+  headers: Record<string, string> = {};
+  sentBody: unknown = null;
+  aborted = false;
+  private listeners = new Map<string, Array<() => void>>();
+
+  open(method: string, url: string) {
+    this.method = method;
+    this.url = url;
+    this.readyState = 1;
+  }
+
+  setRequestHeader(name: string, value: string) {
+    this.headers[name] = value;
+  }
+
+  send(body?: unknown) {
+    this.sentBody = body;
+  }
+
+  abort() {
+    this.aborted = true;
+    this.readyState = 4;
+    this.emit("abort");
+  }
+
+  addEventListener(type: string, listener: () => void) {
+    const existing = this.listeners.get(type) ?? [];
+    existing.push(listener);
+    this.listeners.set(type, existing);
+  }
+
+  emit(type: string) {
+    for (const fn of this.listeners.get(type) ?? []) {
+      fn();
+    }
+  }
+}
+
+describe("Video Player Aspect Ratio & Real-Time Upload Progress Regression Suite", () => {
+  const originalFetch = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  describe("Task 1: Standard 16:9 Video Player & 9:16 Shorts Aspect Ratio", () => {
+    it("1. Normal videos default to responsive 16:9 container classes and preserve 9:16 for Shorts", () => {
+      assert.equal(resolvePlayerAspectMode(undefined), "standard");
+      assert.equal(resolvePlayerAspectMode("long"), "standard");
+      assert.equal(resolvePlayerAspectMode("short"), "short");
+
+      const normalClass = getPlayerContainerClass("standard", false);
+      assert.ok(normalClass.includes("aspect-video"));
+      assert.ok(normalClass.includes("w-full"));
+
+      const shortPlayerClass = getPlayerContainerClass("short", false);
+      assert.ok(shortPlayerClass.includes("aspect-[9/16]"));
+
+      const fullscreenClass = getPlayerContainerClass("standard", true);
+      assert.equal(fullscreenClass, "h-full w-full rounded-none");
+
+      const shortsStageClass = getShortsStageCardClass();
+      assert.ok(shortsStageClass.includes("aspect-[9/16]"));
+      assert.ok(
+        shortsStageClass.includes("calc((100vh-160px)*9/16)"),
+        "Shorts card width must scale against viewport height so 9:16 ratio never breaks on shorter screens",
+      );
+
+      assert.ok(getUploadPreviewVideoClass("long").includes("aspect-video"));
+      assert.ok(getUploadPreviewVideoClass("long").includes("object-contain"));
+      assert.ok(getUploadPreviewVideoClass("short").includes("aspect-[9/16]"));
+      assert.ok(getUploadPreviewVideoClass("short").includes("object-contain"));
+    });
+
+    it("2. Supports 1280x720 and 1920x1080 without stretching or distorting aspect ratio", () => {
+      const box720 = computeFittedVideoBox(1280, 720, 1280, 720, 0, "standard");
+      assert.ok(box720);
+      assert.equal(Math.round(box720.baseWidth), 1280);
+      assert.equal(Math.round(box720.baseHeight), 720);
+      assert.ok(Math.abs(box720.baseWidth / box720.baseHeight - 16 / 9) < 0.0001);
+
+      // Tablet / Mobile 16:9 container playing 1920x1080 source
+      const mobileW = 360;
+      const mobileH = 202.5;
+      const box1080Mobile = computeFittedVideoBox(mobileW, mobileH, 1920, 1080, 0, "standard");
+      assert.ok(box1080Mobile);
+      assert.ok(
+        Math.abs(box1080Mobile.baseWidth / box1080Mobile.baseHeight - 1920 / 1080) < 0.0001,
+      );
+      assert.ok(box1080Mobile.baseWidth <= mobileW + 0.01);
+      assert.ok(box1080Mobile.baseHeight <= mobileH + 0.01);
+
+      // Non-16:9 video (e.g. 9:16 vertical 1080x1920) inside a 16:9 container must letterbox without stretching
+      const verticalInStandard = computeFittedVideoBox(960, 540, 1080, 1920, 0, "standard");
+      assert.ok(verticalInStandard);
+      assert.ok(
+        Math.abs(verticalInStandard.baseWidth / verticalInStandard.baseHeight - 9 / 16) < 0.0001,
+      );
+      assert.equal(Math.round(verticalInStandard.baseHeight), 540);
+      assert.ok(verticalInStandard.baseWidth < 960);
+
+      // 90deg quarter-turn rotation keeps visual bounds inside container
+      const rotated = computeFittedVideoBox(960, 540, 1920, 1080, 90, "standard");
+      assert.ok(rotated);
+      assert.ok(rotated.visualWidth <= 960.01);
+      assert.ok(rotated.visualHeight <= 540.01);
+      assert.ok(Math.abs(rotated.baseWidth / rotated.baseHeight - 16 / 9) < 0.0001);
+    });
+
+    it("3. Player components & routes preserve object-contain, controls, auth, and 9:16 Shorts behavior", async () => {
+      const playerSrc = await fs.readFile(
+        path.resolve(process.cwd(), "src/components/videohub/FaceTubeVideoPlayer.tsx"),
+        "utf8",
+      );
+      const watchSrc = await fs.readFile(
+        path.resolve(process.cwd(), "src/routes/watch.$videoId.tsx"),
+        "utf8",
+      );
+      const shortsSrc = await fs.readFile(
+        path.resolve(process.cwd(), "src/routes/shorts.tsx"),
+        "utf8",
+      );
+
+      assert.ok(playerSrc.includes("object-contain"));
+      assert.ok(playerSrc.includes("FaceTube Player"));
+      assert.ok(playerSrc.includes("toggleFullscreen"));
+      assert.ok(playerSrc.includes("cyclePlaybackSpeed"));
+      assert.ok(playerSrc.includes("getPlayerContainerClass"));
+
+      assert.ok(watchSrc.includes("resolveWatchVideo"));
+      assert.ok(watchSrc.includes("contentType="));
+
+      assert.ok(shortsSrc.includes("getShortsStageCardClass"));
+      assert.ok(shortsSrc.includes("object-contain"));
+      assert.ok(
+        !shortsSrc.includes("w-2/3 animate-pulse"),
+        "Hardcoded fake Shorts progress bar must be removed",
+      );
+    });
+  });
+
+  describe("Task 2: Real-Time Upload Progress, Byte Display, ETA, States & Duplicate-Safe Retry", () => {
+    it("4. Computes real percentage (never 100% before transfer completes), byte pair, and remaining time", () => {
+      const total = 100 * 1024 * 1024; // 100 MB
+      const tracker = createUploadProgressTracker(0);
+
+      // Initial sample at t=10s: 20 MB uploaded (2 MB/s)
+      const s1 = computeUploadProgressFromEvent(
+        tracker,
+        { loaded: 20 * 1024 * 1024, total, lengthComputable: true },
+        10_000,
+      );
+      assert.equal(s1.stage, "uploading");
+      assert.equal(s1.percentage, 20);
+      assert.equal(s1.isIndeterminate, false);
+      assert.equal(formatUploadedTotalPair(s1.loadedBytes, s1.totalBytes), "20 MB / 100 MB");
+      assert.equal(
+        formatRemainingTime(s1.estimatedRemainingSeconds),
+        "Approximately 40 seconds remaining",
+      );
+
+      // Second sample at t=20s: 45 MB uploaded (2.5 MB/s instantaneous -> smoothed)
+      const s2 = computeUploadProgressFromEvent(
+        tracker,
+        { loaded: 45 * 1024 * 1024, total, lengthComputable: true },
+        20_000,
+      );
+      assert.equal(s2.stage, "uploading");
+      assert.equal(s2.percentage, 45);
+      assert.equal(formatUploadedTotalPair(s2.loadedBytes, s2.totalBytes), "45 MB / 100 MB");
+      assert.ok(s2.estimatedRemainingSeconds !== null && s2.estimatedRemainingSeconds > 0);
+      assert.ok(formatRemainingTime(s2.estimatedRemainingSeconds)?.includes("remaining"));
+
+      // Near-complete 99.8% must stay strictly < 100% until loaded === total
+      const sNearDone = computeUploadProgressFromEvent(
+        tracker,
+        { loaded: total - 1024, total, lengthComputable: true },
+        35_000,
+      );
+      assert.equal(sNearDone.stage, "uploading");
+      assert.equal(sNearDone.percentage, 99);
+
+      // Actual transfer finished (loaded === total) -> 100% upload_completed
+      const sDone = computeUploadProgressFromEvent(
+        tracker,
+        { loaded: total, total, lengthComputable: true },
+        36_000,
+      );
+      assert.equal(sDone.stage, "upload_completed");
+      assert.equal(sDone.percentage, 100);
+      assert.equal(sDone.estimatedRemainingSeconds, 0);
+    });
+
+    it("5. Returns honest indeterminate progress when lengthComputable is false or total is 0", () => {
+      const tracker = createUploadProgressTracker(0);
+      const indet = computeUploadProgressFromEvent(
+        tracker,
+        { loaded: 5 * 1024 * 1024, total: 0, lengthComputable: false },
+        5_000,
+      );
+      assert.equal(indet.stage, "uploading");
+      assert.equal(indet.isIndeterminate, true);
+      assert.equal(indet.percentage, null);
+      assert.equal(indet.estimatedRemainingSeconds, null);
+      assert.equal(formatRemainingTime(indet.estimatedRemainingSeconds), null);
+      assert.equal(formatUploadedTotalPair(indet.loadedBytes, indet.totalBytes), "5 MB uploaded");
+    });
+
+    it("6. uploadVideoWithProgress tracks real XHR upload events -> upload_completed -> server_processing", async () => {
+      let mockXhr!: MockXMLHttpRequest;
+      const seenSnapshots: UploadProgressSnapshot[] = [];
+      const fileBytes = new Uint8Array(1000);
+      const file = new File([fileBytes], "lesson.mp4", { type: "video/mp4" });
+
+      const promise = uploadVideoWithProgress(file, {
+        baseUrlOverride: "http://localhost:3000/api",
+        xhrFactory: () => {
+          mockXhr = new MockXMLHttpRequest();
+          return mockXhr;
+        },
+        onProgress: (snap) => seenSnapshots.push(snap),
+      });
+
+      assert.equal(mockXhr.method, "POST");
+      assert.equal(mockXhr.url, "http://localhost:3000/api/uploads/video.php");
+      assert.ok(mockXhr.sentBody instanceof FormData);
+
+      // Emit real byte progress 25% -> 75% -> upload load -> server response
+      mockXhr.upload.emit("progress", { loaded: 250, total: 1000, lengthComputable: true });
+      mockXhr.upload.emit("progress", { loaded: 750, total: 1000, lengthComputable: true });
+      assert.ok(seenSnapshots.some((s) => s.stage === "uploading" && s.percentage === 25));
+      assert.ok(seenSnapshots.some((s) => s.stage === "uploading" && s.percentage === 75));
+      assert.equal(
+        seenSnapshots.some((s) => s.percentage === 100),
+        false,
+        "Must not report 100% before transfer completes",
+      );
+
+      mockXhr.upload.emit("load");
+      mockXhr.readyState = 2;
+      mockXhr.emit("readystatechange");
+
+      mockXhr.readyState = 4;
+      mockXhr.status = 201;
+      mockXhr.responseText = JSON.stringify({
+        success: true,
+        url: "/uploads/videos/lesson.mp4",
+        fileName: "lesson.mp4",
+        format: "mp4",
+      });
+      mockXhr.emit("load");
+
+      const result = await promise;
+      assert.equal(result.success, true);
+      assert.equal(result.url, "/uploads/videos/lesson.mp4");
+      assert.ok(seenSnapshots.some((s) => s.stage === "upload_completed" && s.percentage === 100));
+      assert.ok(seenSnapshots.some((s) => s.stage === "server_processing" && s.percentage === 100));
+    });
+
+    it("7. uploadVideoWithProgress transitions to failed state on HTTP/network error", async () => {
+      let mockXhr!: MockXMLHttpRequest;
+      const seenSnapshots: UploadProgressSnapshot[] = [];
+      const file = new File([new Uint8Array(500)], "broken.mp4", { type: "video/mp4" });
+
+      const promise = uploadVideoWithProgress(file, {
+        baseUrlOverride: "http://localhost:3000/api",
+        xhrFactory: () => {
+          mockXhr = new MockXMLHttpRequest();
+          return mockXhr;
+        },
+        onProgress: (snap) => seenSnapshots.push(snap),
+      });
+
+      mockXhr.upload.emit("progress", { loaded: 200, total: 500, lengthComputable: true });
+      mockXhr.readyState = 4;
+      mockXhr.status = 413;
+      mockXhr.responseText = JSON.stringify({ error: "Video exceeds 150MB upload limit." });
+      mockXhr.emit("load");
+
+      await assert.rejects(() => promise, /150MB/);
+      const last = seenSnapshots.at(-1);
+      assert.equal(last?.stage, "failed");
+      assert.ok(last?.errorMessage?.includes("150MB"));
+    });
+
+    it("8. Bulk queue aggregates multi-file progress and retries failed items without duplicate video uploads", async () => {
+      const batch = computeOverallBatchProgress([
+        {
+          fileSize: 100 * 1024 * 1024,
+          status: "success",
+          uploadStage: "completed",
+          loadedBytes: 100 * 1024 * 1024,
+          totalBytes: 100 * 1024 * 1024,
+        },
+        {
+          fileSize: 100 * 1024 * 1024,
+          status: "uploading",
+          uploadStage: "uploading",
+          loadedBytes: 50 * 1024 * 1024,
+          totalBytes: 100 * 1024 * 1024,
+          bytesPerSecond: 5 * 1024 * 1024,
+        },
+        {
+          fileSize: 50 * 1024 * 1024,
+          status: "queued",
+        },
+      ]);
+      assert.equal(batch.totalFiles, 3);
+      assert.equal(batch.completedFiles, 1);
+      assert.equal(batch.activeFiles, 1);
+      assert.equal(batch.totalBytes, 250 * 1024 * 1024);
+      assert.equal(batch.uploadedBytes, 150 * 1024 * 1024);
+      assert.equal(batch.percentage, 60);
+      assert.equal(batch.estimatedRemainingSeconds, 20);
+
+      // Test duplicate-safe retry via uploadSingleBulkVideoItem cachedVideoUrl
+      let videoUploadHits = 0;
+      let createHits = 0;
+      globalThis.fetch = (async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/uploads/video.php")) {
+          videoUploadHits += 1;
+          return new Response(
+            JSON.stringify({ success: true, url: "/uploads/videos/bulk_retry.mp4", format: "mp4" }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.endsWith("/videos/create.php")) {
+          createHits += 1;
+          if (createHits === 1) {
+            return new Response(JSON.stringify({ error: "Temporary DB timeout" }), {
+              status: 503,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              success: true,
+              video: { id: "vid-retried-1", video_url: "/uploads/videos/bulk_retry.mp4" },
+            }),
+            { status: 201, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      }) as typeof fetch;
+
+      const file = new File(["video-bytes"], "retry_clip.mp4", { type: "video/mp4" });
+      const states1: BulkUploadProgressState[] = [];
+      await assert.rejects(
+        () =>
+          uploadSingleBulkVideoItem(
+            {
+              id: "bulk-retry-1",
+              file,
+              title: "Retry Clip",
+              description: "",
+              contentType: "long",
+              category: "Coding",
+              thumbnailUrl: "/uploads/images/cover.jpg",
+            },
+            { userId: "FT483921", creatorName: "Alex Rivera" },
+            (st) => states1.push(st),
+          ),
+        /Temporary DB timeout/,
+      );
+      assert.equal(videoUploadHits, 1);
+      const cachedUrl = states1.find((s) => s.uploadedVideoUrl)?.uploadedVideoUrl;
+      assert.equal(cachedUrl, "/uploads/videos/bulk_retry.mp4");
+
+      // Retry passing cachedVideoUrl -> must NOT call /uploads/video.php a second time
+      const states2: BulkUploadProgressState[] = [];
+      const retried = await uploadSingleBulkVideoItem(
+        {
+          id: "bulk-retry-1",
+          file,
+          title: "Retry Clip",
+          description: "",
+          contentType: "long",
+          category: "Coding",
+          thumbnailUrl: "/uploads/images/cover.jpg",
+          cachedVideoUrl: cachedUrl,
+        },
+        { userId: "FT483921", creatorName: "Alex Rivera" },
+        (st) => states2.push(st),
+      );
+      assert.equal(videoUploadHits, 1, "Retry with cachedVideoUrl must not re-upload video file");
+      assert.equal(retried.id, "vid-retried-1");
+      assert.equal(states2.at(-1)?.uploadStage, "completed");
+      assert.ok(getUploadFileIdentityKey(file).includes("retry_clip.mp4"));
+    });
+
+    it("9. upload.tsx and ads-promotions.tsx do not hardcode fake step percentages", async () => {
+      const uploadSrc = await fs.readFile(
+        path.resolve(process.cwd(), "src/routes/upload.tsx"),
+        "utf8",
+      );
+      const adsSrc = await fs.readFile(
+        path.resolve(process.cwd(), "src/routes/ads-promotions.tsx"),
+        "utf8",
+      );
+
+      assert.ok(!uploadSrc.includes("progress: 15"), "Fake progress: 15 must be removed");
+      assert.ok(!uploadSrc.includes("progress: 35"), "Fake progress: 35 must be removed");
+      assert.ok(!uploadSrc.includes("progress: 65"), "Fake progress: 65 must be removed");
+      assert.ok(!uploadSrc.includes("progress: 80"), "Fake progress: 80 must be removed");
+      assert.ok(!uploadSrc.includes("progress: 85"), "Fake progress: 85 must be removed");
+      assert.ok(uploadSrc.includes("UploadProgressPanel"));
+      assert.ok(uploadSrc.includes("computeOverallBatchProgress"));
+      assert.ok(adsSrc.includes("UploadProgressPanel"));
+    });
+  });
+});

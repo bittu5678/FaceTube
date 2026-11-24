@@ -8,6 +8,7 @@ import { resolveMediaUrl } from "./media-url";
 import { computeChannelInitials } from "./channel-branding";
 import type { Video } from "@/data/videos";
 import type { ShortItem } from "@/data/shorts";
+import type { UploadStage } from "./upload-progress";
 
 export type VideoType = "free" | "premium";
 export type ContentType = "short" | "long";
@@ -1331,6 +1332,8 @@ export interface BulkUploadItemPayload {
   paymentStatus?: VideoPaymentStatus;
   paymentId?: string;
   paymentAmount?: number;
+  cachedVideoUrl?: string | undefined;
+  cachedThumbnailUrl?: string | undefined;
 }
 
 export interface BulkUploadItemResult {
@@ -1345,16 +1348,24 @@ export interface BulkUploadItemResult {
 
 export interface BulkUploadProgressState {
   itemId: string;
-  progress: number;
+  progress: number | null;
   phase:
     "validating" | "uploading_video" | "uploading_thumbnail" | "publishing" | "complete" | "error";
+  uploadStage?: UploadStage | undefined;
+  loadedBytes?: number | undefined;
+  totalBytes?: number | undefined;
+  isIndeterminate?: boolean | undefined;
+  bytesPerSecond?: number | null | undefined;
+  estimatedRemainingSeconds?: number | null | undefined;
+  uploadedVideoUrl?: string | undefined;
+  uploadedThumbnailUrl?: string | undefined;
   error?: string;
 }
 
 /**
  * Processes an individual item from a bulk upload batch:
  * 1. Validates the video file
- * 2. Uploads the video file via api.uploads.uploadVideo
+ * 2. Uploads the video file via api.uploads.uploadVideo (or reuses cachedVideoUrl on retry)
  * 3. Handles custom thumbnail file upload (or captured thumbnail / category fallback)
  * 4. Calls recordNewVideoUpload to persist the video record
  * 5. Returns the published UploadedVideo
@@ -1369,28 +1380,73 @@ export async function uploadSingleBulkVideoItem(
   if (!normalizedUserId) {
     throw new Error("Authentication required. Please log in before uploading videos.");
   }
-  onProgress?.({ itemId: item.id, progress: 10, phase: "validating" });
+  const fileSize = Number.isFinite(item.file?.size) && item.file.size > 0 ? item.file.size : 0;
+  onProgress?.({
+    itemId: item.id,
+    progress: fileSize > 0 ? 0 : null,
+    phase: "validating",
+    uploadStage: "uploading",
+    loadedBytes: 0,
+    totalBytes: fileSize,
+    isIndeterminate: fileSize <= 0,
+    bytesPerSecond: null,
+    estimatedRemainingSeconds: null,
+  });
   const validation = validateVideoFileForUpload(item.file);
   if (!validation.valid) {
     throw new Error(validation.error || "Invalid video file.");
   }
 
-  // 2. Upload video binary to storage via production API
-  onProgress?.({ itemId: item.id, progress: 25, phase: "uploading_video" });
-  const uploadRes = await api.uploads.uploadVideo(item.file);
-  if (!uploadRes || !uploadRes.url) {
-    const errMsg =
-      (uploadRes as any)?.error ||
-      (uploadRes as any)?.message ||
-      (uploadRes as any)?.msg ||
-      "Server storage upload failed without a valid video URL.";
-    throw new Error(errMsg);
+  // 2. Upload video binary to storage via production API (reuse cachedVideoUrl on retry to avoid duplicates)
+  let resolvedVideoUrl = (item.cachedVideoUrl || "").trim();
+  if (!resolvedVideoUrl) {
+    const uploadRes = await api.uploads.uploadVideo(item.file, {
+      onProgress: (snap) => {
+        onProgress?.({
+          itemId: item.id,
+          progress: snap.percentage,
+          phase:
+            snap.stage === "upload_completed" || snap.stage === "server_processing"
+              ? "uploading_thumbnail"
+              : snap.stage === "failed"
+                ? "error"
+                : "uploading_video",
+          uploadStage: snap.stage,
+          loadedBytes: snap.loadedBytes,
+          totalBytes: snap.totalBytes,
+          isIndeterminate: snap.isIndeterminate,
+          bytesPerSecond: snap.bytesPerSecond,
+          estimatedRemainingSeconds: snap.estimatedRemainingSeconds,
+        });
+      },
+    });
+    if (!uploadRes || !uploadRes.url) {
+      const errMsg =
+        (uploadRes as any)?.error ||
+        (uploadRes as any)?.message ||
+        (uploadRes as any)?.msg ||
+        "Server storage upload failed without a valid video URL.";
+      throw new Error(errMsg);
+    }
+    resolvedVideoUrl = uploadRes.url;
   }
-  onProgress?.({ itemId: item.id, progress: 65, phase: "uploading_thumbnail" });
+
+  onProgress?.({
+    itemId: item.id,
+    progress: 100,
+    phase: "uploading_thumbnail",
+    uploadStage: "server_processing",
+    loadedBytes: fileSize,
+    totalBytes: fileSize,
+    isIndeterminate: false,
+    bytesPerSecond: null,
+    estimatedRemainingSeconds: 0,
+    uploadedVideoUrl: resolvedVideoUrl,
+  });
 
   // 3. Resolve / upload thumbnail
-  let finalThumbnailUrl = item.thumbnailUrl || "";
-  if (item.customThumbnailFile) {
+  let finalThumbnailUrl = (item.cachedThumbnailUrl || item.thumbnailUrl || "").trim();
+  if (!finalThumbnailUrl && item.customThumbnailFile) {
     try {
       const imgRes = await api.uploads.uploadImage(item.customThumbnailFile);
       if (imgRes && imgRes.url) {
@@ -1409,13 +1465,25 @@ export async function uploadSingleBulkVideoItem(
   }
 
   // 4. Publish video record to production database
-  onProgress?.({ itemId: item.id, progress: 85, phase: "publishing" });
+  onProgress?.({
+    itemId: item.id,
+    progress: 100,
+    phase: "publishing",
+    uploadStage: "server_processing",
+    loadedBytes: fileSize,
+    totalBytes: fileSize,
+    isIndeterminate: false,
+    bytesPerSecond: null,
+    estimatedRemainingSeconds: 0,
+    uploadedVideoUrl: resolvedVideoUrl,
+    uploadedThumbnailUrl: finalThumbnailUrl,
+  });
   const published = await recordNewVideoUpload({
     userId: creatorInfo.userId,
     creatorName: creatorInfo.creatorName,
     title: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
     description: (item.description || "").trim(),
-    videoUrl: uploadRes.url,
+    videoUrl: resolvedVideoUrl,
     thumbnailUrl: finalThumbnailUrl,
     videoType: item.videoType || "free",
     contentType: item.contentType,
@@ -1427,7 +1495,19 @@ export async function uploadSingleBulkVideoItem(
     visibility: normalizeVideoVisibility(item.visibility, "public"),
   });
 
-  onProgress?.({ itemId: item.id, progress: 100, phase: "complete" });
+  onProgress?.({
+    itemId: item.id,
+    progress: 100,
+    phase: "complete",
+    uploadStage: "completed",
+    loadedBytes: fileSize,
+    totalBytes: fileSize,
+    isIndeterminate: false,
+    bytesPerSecond: null,
+    estimatedRemainingSeconds: 0,
+    uploadedVideoUrl: resolvedVideoUrl,
+    uploadedThumbnailUrl: finalThumbnailUrl,
+  });
   return published;
 }
 

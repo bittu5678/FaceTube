@@ -32,6 +32,7 @@ import {
   isPubliclyCacheableVideo,
   isShortVideo,
 } from "@/lib/video-service";
+import { getShortsStageCardClass } from "@/lib/video-player-layout";
 import { api } from "@/lib/api";
 
 export interface ShortsSearch {
@@ -196,6 +197,8 @@ function ShortsPage() {
   const [isZoomInteracting, setIsZoomInteracting] = useState(false);
 
   const cardRef = useRef<HTMLDivElement | null>(null);
+  const shortVideoRef = useRef<HTMLVideoElement | null>(null);
+  const [shortProgressPercent, setShortProgressPercent] = useState(0);
   const lastTouchPos = useRef<{ x: number; y: number } | null>(null);
   const pinchStartDist = useRef<number | null>(null);
   const pinchStartScale = useRef<number>(1);
@@ -212,7 +215,19 @@ function ShortsPage() {
 
   useEffect(() => {
     resetZoom();
+    setShortProgressPercent(0);
   }, [currentIndex, activeShort?.id, resetZoom]);
+
+  useEffect(() => {
+    const vid = shortVideoRef.current;
+    if (!vid) return;
+    vid.muted = isMuted;
+    if (isPlaying) {
+      vid.play().catch(() => {});
+    } else {
+      vid.pause();
+    }
+  }, [isPlaying, isMuted, activeShort?.id]);
 
   // Clean up any pending single-tap timeout on unmount
   useEffect(() => {
@@ -562,7 +577,7 @@ function ShortsPage() {
               onTouchMove={handleTouchMove}
               onTouchEnd={handleTouchEnd}
               style={{ touchAction: scale > 1.05 ? "none" : "pan-y" }}
-              className="relative w-[340px] xs:w-[380px] sm:w-[420px] aspect-[9/16] max-h-[calc(100vh-160px)] rounded-3xl overflow-hidden bg-black shadow-2xl border border-border/70 flex flex-col justify-between select-none"
+              className={getShortsStageCardClass()}
             >
               {/* Background Video / Thumbnail with Pinch Zoom & Pan */}
               <div className="absolute inset-0 z-0 overflow-hidden">
@@ -579,13 +594,23 @@ function ShortsPage() {
                 >
                   {activeShort.videoUrl ? (
                     <video
+                      ref={shortVideoRef}
+                      key={activeShort.id}
                       src={activeShort.videoUrl}
                       poster={activeShort.thumb}
                       autoPlay={isPlaying}
                       muted={isMuted}
                       loop
                       playsInline
-                      className="h-full w-full object-cover pointer-events-none"
+                      onTimeUpdate={(e) => {
+                        const d = e.currentTarget.duration;
+                        if (d > 0 && !Number.isNaN(d)) {
+                          setShortProgressPercent(
+                            Math.min(100, Math.max(0, (e.currentTarget.currentTime / d) * 100)),
+                          );
+                        }
+                      }}
+                      className="h-full w-full object-contain pointer-events-none"
                     />
                   ) : (
                     <img
@@ -727,9 +752,12 @@ function ShortsPage() {
                 </div>
               </div>
 
-              {/* Animated Playback Progress Bar */}
+              {/* Playback Progress Bar */}
               <div className="absolute bottom-0 inset-x-0 h-1 bg-white/25 z-20">
-                <div className="h-full bg-red-600 w-2/3 animate-pulse" />
+                <div
+                  className="h-full bg-red-600 transition-all duration-100"
+                  style={{ width: `${shortProgressPercent}%` }}
+                />
               </div>
             </div>
 

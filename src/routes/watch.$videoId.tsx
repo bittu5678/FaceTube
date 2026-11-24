@@ -395,6 +395,7 @@ function WatchPage() {
               poster={video.thumb || video.thumbnailUrl}
               title={video.title}
               duration={video.duration}
+              contentType={(video as any).contentType || (video as any).content_type}
               autoPlay={true}
               onBack={handleBack}
             />
