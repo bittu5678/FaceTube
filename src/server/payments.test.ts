@@ -3694,6 +3694,9 @@ describe("Task 5J-V2: Payment Create-Order Production Fail-Closed Tests", () => 
       // Scenario A: pool.query throws during INSERT INTO payment_orders
       setMysqlPoolForTesting({
         query: async (sql: string) => {
+          if (sql.includes("FROM INFORMATION_SCHEMA.TABLES")) {
+            return [[{ TABLE_NAME: "global_pool_reserves" }], []];
+          }
           if (sql.includes("FROM sessions s")) {
             return [[createAuthSessionRow("FT483921")], []];
           }
@@ -3926,6 +3929,9 @@ describe("Task 5J-V2: Payment Create-Order Production Fail-Closed Tests", () => 
 
     setMysqlPoolForTesting({
       query: async (sql: string, params?: any[]) => {
+        if (sql.includes("FROM INFORMATION_SCHEMA.TABLES")) {
+          return [[{ TABLE_NAME: "global_pool_reserves" }], []];
+        }
         if (sql.includes("FROM sessions s")) {
           return [[createAuthSessionRow("FT483921")], []];
         }
@@ -5329,6 +5335,9 @@ describe("Uniform ₹6 Premium Transaction Distribution (Phase 1)", () => {
     const handleQuery = async (sql: string, params: any[] = []) => {
       const normalized = sql.replace(/\s+/g, " ").trim();
 
+      if (normalized.includes("FROM INFORMATION_SCHEMA.TABLES")) {
+        return [[{ TABLE_NAME: "global_pool_reserves" }]];
+      }
       if (normalized.includes("FROM INFORMATION_SCHEMA.COLUMNS")) {
         return [
           [
@@ -6004,19 +6013,29 @@ describe("Uniform ₹6 Premium Transaction Distribution (Phase 1)", () => {
     );
   });
 
-  it("15. global-income.tsx renders all uniform ₹6 components and removes hardcoded ₹2,450.00 fallback", () => {
+  it("15. global-income.tsx displays backend Total Income without breakdown splits or hardcoded ₹2,450.00 fallback", () => {
     const globalIncomeRoute = fs.readFileSync(
       path.resolve(process.cwd(), "src", "routes", "global-income.tsx"),
       "utf-8",
     );
-    assert.ok(globalIncomeRoute.includes("Referral"));
-    assert.ok(globalIncomeRoute.includes("Admin"));
-    assert.ok(globalIncomeRoute.includes("GST + PG"));
-    assert.ok(globalIncomeRoute.includes("₹0.90 GST + ₹0.10 PG Fee"));
-    assert.ok(globalIncomeRoute.includes("Global Distribution"));
-    assert.ok(globalIncomeRoute.includes("₹3.00"));
-    assert.ok(globalIncomeRoute.includes("Total Transaction"));
-    assert.ok(globalIncomeRoute.includes("₹6.00"));
+    assert.ok(globalIncomeRoute.includes("Total Income"));
+    assert.ok(globalIncomeRoute.includes("getGlobalIncomeSummary"));
+    assert.ok(globalIncomeRoute.includes("summary.personal.totalIncome"));
+    assert.equal(
+      globalIncomeRoute.includes("₹0.90 GST + ₹0.10 PG Fee"),
+      false,
+      "global-income.tsx must NOT display GST + PG split breakdown",
+    );
+    assert.equal(
+      globalIncomeRoute.includes("Company infrastructure & servers"),
+      false,
+      "global-income.tsx must NOT display Admin breakdown description",
+    );
+    assert.equal(
+      globalIncomeRoute.includes("Weighted pool for eligible Sponsor videos"),
+      false,
+      "global-income.tsx must NOT display Global Distribution breakdown description",
+    );
     assert.equal(
       globalIncomeRoute.includes("₹2,450.00"),
       false,

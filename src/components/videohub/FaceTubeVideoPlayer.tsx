@@ -21,6 +21,7 @@ import { resolveMediaUrl } from "@/lib/media-url";
 import {
   computeFittedVideoBox,
   getPlayerContainerClass,
+  getPlayerIntrinsicContainerStyle,
   resolvePlayerAspectMode,
 } from "@/lib/video-player-layout";
 
@@ -128,6 +129,11 @@ export function FaceTubeVideoPlayer({
   const cleanPoster = resolveMediaUrl(poster);
   const aspectMode = resolvePlayerAspectMode(contentType);
   const containerAspectClass = getPlayerContainerClass(aspectMode, isFullscreen);
+  const intrinsicContainerStyle = useMemo(
+    () =>
+      getPlayerIntrinsicContainerStyle(videoSize.width, videoSize.height, rotation, isFullscreen),
+    [videoSize.width, videoSize.height, rotation, isFullscreen],
+  );
 
   const normalizedRotation = ((rotation % 360) + 360) % 360;
   const isRotated = normalizedRotation !== 0;
@@ -705,7 +711,10 @@ export function FaceTubeVideoPlayer({
       ref={containerRef}
       onMouseMove={handleMouseMove}
       onMouseLeave={() => isPlaying && setShowControls(false)}
-      className={`group relative ${containerAspectClass} overflow-hidden bg-black shadow-lift select-none`}
+      style={intrinsicContainerStyle ?? undefined}
+      className={`group relative ${
+        intrinsicContainerStyle ? "mx-auto rounded-2xl" : containerAspectClass
+      } overflow-hidden bg-black shadow-lift select-none`}
     >
       {/* Centered Video Stage: handles click-to-play, drag-to-pan when zoomed, and touch pinch/pan */}
       <div

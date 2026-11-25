@@ -160,6 +160,35 @@ export function preloadRazorpayScript(): void {
   void loadRazorpayScript();
 }
 
+export interface PendingPremiumPaymentProof {
+  videoId: string;
+  orderId: string;
+  paymentId: string;
+  signature: string;
+  verified?: boolean | undefined;
+}
+
+export interface PremiumPaymentFailureMeta {
+  status?: number | undefined;
+  stage: "auth" | "order" | "gateway" | "verify" | "video_create";
+}
+
+export function shouldClearPendingPremiumPaymentOnFailure(
+  meta?: PremiumPaymentFailureMeta,
+  errorMsg?: string,
+): boolean {
+  if (!meta || meta.stage !== "verify") {
+    return false;
+  }
+  if (meta.status === 403 || meta.status === 404 || meta.status === 409) {
+    return true;
+  }
+  if (meta.status === 400 && /signature|status is not successful|mismatch/i.test(errorMsg || "")) {
+    return true;
+  }
+  return false;
+}
+
 export interface InitiatePremiumVideoPaymentParams {
   userId?: string;
   uploaderUserId?: string;
@@ -179,9 +208,19 @@ export interface InitiatePremiumVideoPaymentParams {
   contentType: ContentType; // "short" | "long"
   visibility?: VideoVisibility;
   directReferrerId?: string | null;
+  pendingPayment?:
+    | {
+        orderId: string;
+        paymentId: string;
+        signature: string;
+        verified?: boolean | undefined;
+      }
+    | undefined;
+  onPaymentCaptured?: (proof: PendingPremiumPaymentProof) => void;
+  onPaymentVerified?: (proof: PendingPremiumPaymentProof) => void;
   onStageChange?: (stage: RazorpayCheckoutStage) => void;
   onSuccess: (paymentIdOrVideo: unknown, createdVideo?: UploadedVideo) => void;
-  onFailure: (errorMsg: string) => void;
+  onFailure: (errorMsg: string, meta?: PremiumPaymentFailureMeta) => void;
   onCancel?: () => void;
 }
 
@@ -200,7 +239,9 @@ export async function initiatePremiumVideoPayment(
   const effectiveUserId = (params.userId || params.uploaderUserId || "").trim();
   if (!effectiveUserId) {
     activeCheckoutLock = false;
-    params.onFailure("Authentication required. Please log in before uploading a Sponsor video.");
+    params.onFailure("Authentication required. Please log in before uploading a Sponsor video.", {
+      stage: "auth",
+    });
     return;
   }
   const effectiveUserName =
@@ -210,12 +251,120 @@ export async function initiatePremiumVideoPayment(
   const effectiveVideoId =
     params.videoId || `vid-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
 
+  const finalizeCapturedPayment = async (
+    paymentId: string,
+    orderId: string,
+    signature: string | undefined,
+    alreadyVerified: boolean,
+  ): Promise<void> => {
+    params.onStageChange?.("verifying");
+
+    if (!orderId || !paymentId || !signature) {
+      activeCheckoutLock = false;
+      params.onFailure(
+        "Payment signature missing from Razorpay checkout response. Verification aborted.",
+        { stage: "verify" },
+      );
+      return;
+    }
+
+    let currentStage: "verify" | "video_create" = alreadyVerified ? "video_create" : "verify";
+
+    try {
+      if (!alreadyVerified) {
+        // Emit captured payment proof immediately so the caller retains orderId/paymentId/signature
+        // across verification errors (e.g., 503 reserve migration / network drops). Never log signature.
+        params.onPaymentCaptured?.({
+          videoId: effectiveVideoId,
+          orderId,
+          paymentId,
+          signature,
+          verified: false,
+        });
+
+        // Server-side cryptographic HMAC & API verification
+        const res = await api.payments.verify({
+          orderId,
+          paymentId,
+          signature,
+          userId: effectiveUserId,
+          userName: effectiveUserName,
+          videoId: effectiveVideoId,
+          purpose: "premium_video_upload",
+          referrerUserId: params.directReferrerId ?? null,
+        });
+
+        if (!res?.verified) {
+          activeCheckoutLock = false;
+          params.onFailure(res?.error || "Payment verification failed on the server.", {
+            stage: "verify",
+          });
+          return;
+        }
+
+        params.onPaymentVerified?.({
+          videoId: effectiveVideoId,
+          orderId,
+          paymentId,
+          signature,
+          verified: true,
+        });
+      }
+
+      currentStage = "video_create";
+
+      // 3. Save uploaded video with verified paid status
+      const newVideo = await recordNewVideoUpload({
+        id: effectiveVideoId,
+        userId: effectiveUserId,
+        creatorName: effectiveUserName,
+        title: effectiveTitle,
+        description: effectiveDescription,
+        videoUrl: params.videoUrl,
+        ...(params.thumbnailUrl !== undefined && { thumbnailUrl: params.thumbnailUrl }),
+        category: params.category || "General",
+        videoType: "premium",
+        contentType: params.contentType,
+        ...(params.duration !== undefined && { duration: params.duration }),
+        paymentStatus: "paid",
+        paymentId,
+        paymentAmount: 6,
+        visibility: normalizeVideoVisibility(params.visibility, "public"),
+      });
+
+      // 4. Financial distribution (Referral, Admin, GST+PG, Global Pool) is settled authoritatively on the server during api.payments.verify
+
+      activeCheckoutLock = false;
+      params.onSuccess(paymentId, newVideo);
+    } catch (err: any) {
+      const status = typeof err?.status === "number" ? err.status : undefined;
+      console.error("Error finalizing premium payment:", err?.message || "Verification failed");
+      activeCheckoutLock = false;
+      params.onFailure(err?.message || "Failed to complete payment verification on server.", {
+        status,
+        stage: currentStage,
+      });
+    }
+  };
+
   try {
+    // Safe retry path: resume verification / video creation using captured payment proof
+    // without creating a new Razorpay order or reopening Razorpay checkout.
+    if (params.pendingPayment) {
+      await finalizeCapturedPayment(
+        params.pendingPayment.paymentId,
+        params.pendingPayment.orderId,
+        params.pendingPayment.signature,
+        Boolean(params.pendingPayment.verified),
+      );
+      return;
+    }
+
     // Warm SDK download in parallel with server order creation (no sequential waterfall)
     const scriptPromise = loadRazorpayScript();
     params.onStageChange?.("creating_order");
 
-    // 1. Create real Order via server API (fails closed if credentials missing)
+    // 1. Create real Order via server API (fails closed if credentials or reserve schema missing)
     let orderData: {
       orderId: string;
       amount: number;
@@ -252,6 +401,10 @@ export async function initiatePremiumVideoPayment(
       params.onFailure(
         orderErr?.message ||
           "Could not create Razorpay payment order. Real Razorpay credentials (RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET) must be configured in server environment.",
+        {
+          status: typeof orderErr?.status === "number" ? orderErr.status : undefined,
+          stage: "order",
+        },
       );
       return;
     }
@@ -264,6 +417,7 @@ export async function initiatePremiumVideoPayment(
       activeCheckoutLock = false;
       params.onFailure(
         "Razorpay checkout SDK could not be loaded. Please check your internet connection and try again.",
+        { stage: "gateway" },
       );
       return;
     }
@@ -281,63 +435,7 @@ export async function initiatePremiumVideoPayment(
         return;
       }
       completionStarted = true;
-      params.onStageChange?.("verifying");
-
-      if (!signature) {
-        activeCheckoutLock = false;
-        params.onFailure(
-          "Payment signature missing from Razorpay checkout response. Verification aborted.",
-        );
-        return;
-      }
-
-      try {
-        // Server-side cryptographic HMAC & API verification
-        const res = await api.payments.verify({
-          orderId,
-          paymentId,
-          signature,
-          userId: effectiveUserId,
-          userName: effectiveUserName,
-          videoId: effectiveVideoId,
-          purpose: "premium_video_upload",
-          referrerUserId: params.directReferrerId ?? null,
-        });
-
-        if (!res?.verified) {
-          activeCheckoutLock = false;
-          params.onFailure(res?.error || "Payment verification failed on the server.");
-          return;
-        }
-
-        // 3. Save uploaded video with verified paid status
-        const newVideo = await recordNewVideoUpload({
-          id: effectiveVideoId,
-          userId: effectiveUserId,
-          creatorName: effectiveUserName,
-          title: effectiveTitle,
-          description: effectiveDescription,
-          videoUrl: params.videoUrl,
-          ...(params.thumbnailUrl !== undefined && { thumbnailUrl: params.thumbnailUrl }),
-          category: params.category || "General",
-          videoType: "premium",
-          contentType: params.contentType,
-          ...(params.duration !== undefined && { duration: params.duration }),
-          paymentStatus: "paid",
-          paymentId,
-          paymentAmount: 6,
-          visibility: normalizeVideoVisibility(params.visibility, "public"),
-        });
-
-        // 4. Financial distribution (Referral, Admin, GST+PG, Global Pool) is settled authoritatively on the server during api.payments.verify
-
-        activeCheckoutLock = false;
-        params.onSuccess(paymentId, newVideo);
-      } catch (err: any) {
-        console.error("Error finalizing premium payment:", err);
-        activeCheckoutLock = false;
-        params.onFailure(err?.message || "Failed to complete payment verification on server.");
-      }
+      await finalizeCapturedPayment(paymentId, orderId, signature, false);
     };
 
     const options: RazorpayOptions = {
@@ -368,7 +466,7 @@ export async function initiatePremiumVideoPayment(
           if (!completionStarted) {
             activeCheckoutLock = false;
             if (lastGatewayFailure) {
-              params.onFailure(lastGatewayFailure);
+              params.onFailure(lastGatewayFailure, { stage: "gateway" });
             } else if (params.onCancel) {
               params.onCancel();
             }
@@ -386,9 +484,12 @@ export async function initiatePremiumVideoPayment(
     }
     rzp.open();
   } catch (err: any) {
-    console.error("Razorpay initiation error:", err);
+    console.error("Razorpay initiation error:", err?.message || "Initiation error");
     activeCheckoutLock = false;
-    params.onFailure(err?.message || "Could not initiate payment gateway.");
+    params.onFailure(err?.message || "Could not initiate payment gateway.", {
+      status: typeof err?.status === "number" ? err.status : undefined,
+      stage: "gateway",
+    });
   }
 }
 

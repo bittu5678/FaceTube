@@ -137,6 +137,37 @@ if ($purpose === 'ads_promotion') {
 
 $amountInSubunits = (int)round($amount * 100);
 
+// 3.5 Pre-order Global Pool reserve schema readiness check (₹6 Sponsor upload only)
+if ($purpose === 'premium_video_upload') {
+    try {
+        $stmtReserveReady = $pdo->query("
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'global_pool_reserves'
+            LIMIT 1
+        ");
+        $reserveTableRows = $stmtReserveReady ? $stmtReserveReady->fetchAll(PDO::FETCH_ASSOC) : [];
+    } catch (Throwable $eReserveReady) {
+        error_log('[create-order.php] Global Pool reserve readiness check failed: ' . $eReserveReady->getMessage());
+        $isConnErr = function_exists('isDatabaseConnectionUnavailableError')
+            && isDatabaseConnectionUnavailableError($eReserveReady);
+        jsonResponse([
+            'success' => false,
+            'error' => $isConnErr
+                ? 'Database connection unavailable while checking Global Pool reserve readiness. Payment order was not created.'
+                : 'Unable to verify Global Pool reserve schema readiness. Payment order was not created.',
+        ], 503);
+    }
+
+    if (empty($reserveTableRows)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Global Pool reserve schema migration has not been applied yet. Payment order was not created.'
+        ], 503);
+    }
+}
+
 // 4. Create Order via official Razorpay Orders API
 $ch = curl_init('https://api.razorpay.com/v1/orders');
 curl_setopt_array($ch, [

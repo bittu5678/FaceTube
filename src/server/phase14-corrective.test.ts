@@ -870,6 +870,9 @@ describe("Phase 1.4 Corrective Fixes — Payment Security, Atomic Integrity & Mi
       enableMockMysqlEnv();
       setMysqlPoolForTesting({
         query: async (sql: string) => {
+          if (sql.includes("FROM INFORMATION_SCHEMA.TABLES")) {
+            return [[{ TABLE_NAME: "global_pool_reserves" }]];
+          }
           if (sql.includes("FROM sessions s") && sql.includes("JOIN users u")) {
             return [
               [

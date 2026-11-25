@@ -97,6 +97,8 @@ import {
   initiatePremiumVideoPayment,
   initiateAdsPromotionPayment,
   preloadRazorpayScript,
+  shouldClearPendingPremiumPaymentOnFailure,
+  type PendingPremiumPaymentProof,
 } from "@/lib/razorpay-service";
 import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
 
@@ -661,6 +663,8 @@ export interface BulkVideoItem {
   progressSnapshot?: UploadProgressSnapshot | undefined;
   uploadedVideoUrl?: string | undefined;
   uploadedThumbnailUrl?: string | undefined;
+  pendingPremiumPayment?:
+    (PendingPremiumPaymentProof & { userId: string; videoUrl: string }) | undefined;
   errorMessage?: string | undefined;
   publishedVideo?: UploadedVideo | undefined;
 }
@@ -948,14 +952,25 @@ export function BulkVideoUploadView({
 
       let published: UploadedVideo;
 
-      // 3. If video is marked as premium (Sponsor), initiate verified payment
+      // 3. If video is marked as premium (Sponsor), initiate verified payment (or safely resume captured payment)
       if (item.videoType === "premium") {
         let paymentId: string | undefined;
         let serverCreatedVideo: UploadedVideo | undefined;
+        const matchingPending =
+          item.pendingPremiumPayment &&
+          item.pendingPremiumPayment.userId === userId &&
+          item.pendingPremiumPayment.videoUrl === resolvedVideoUrl
+            ? item.pendingPremiumPayment
+            : undefined;
+        const vidId =
+          matchingPending?.videoId ||
+          `vid-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
         await new Promise<void>((resolve, reject) => {
           initiatePremiumVideoPayment({
             userId,
             userName: creatorName,
+            videoId: vidId,
             videoTitle: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
             description: item.description.trim(),
             videoUrl: resolvedVideoUrl,
@@ -965,6 +980,49 @@ export function BulkVideoUploadView({
             category: item.category,
             duration: item.detectedDuration || (item.contentType === "short" ? "0:45" : "12:30"),
             directReferrerId: profile?.referral_code || dbUser?.referral_code || null,
+            ...(matchingPending
+              ? {
+                  pendingPayment: {
+                    orderId: matchingPending.orderId,
+                    paymentId: matchingPending.paymentId,
+                    signature: matchingPending.signature,
+                    verified: matchingPending.verified,
+                  },
+                }
+              : {}),
+            onPaymentCaptured: (proof) => {
+              setQueue((prev) =>
+                prev.map((it) =>
+                  it.id === itemId
+                    ? {
+                        ...it,
+                        pendingPremiumPayment: {
+                          ...proof,
+                          userId,
+                          videoUrl: resolvedVideoUrl,
+                        },
+                      }
+                    : it,
+                ),
+              );
+            },
+            onPaymentVerified: (proof) => {
+              setQueue((prev) =>
+                prev.map((it) =>
+                  it.id === itemId
+                    ? {
+                        ...it,
+                        pendingPremiumPayment: {
+                          ...proof,
+                          verified: true,
+                          userId,
+                          videoUrl: resolvedVideoUrl,
+                        },
+                      }
+                    : it,
+                ),
+              );
+            },
             onSuccess: (res: unknown, createdVideo?: UploadedVideo) => {
               if (typeof res === "string") {
                 paymentId = res;
@@ -974,13 +1032,22 @@ export function BulkVideoUploadView({
               }
               resolve();
             },
-            onFailure: (errMsg: string) => reject(new Error(errMsg || "Payment failed")),
+            onFailure: (errMsg: string, meta) => {
+              if (shouldClearPendingPremiumPaymentOnFailure(meta, errMsg)) {
+                setQueue((prev) =>
+                  prev.map((it) =>
+                    it.id === itemId ? { ...it, pendingPremiumPayment: undefined } : it,
+                  ),
+                );
+              }
+              reject(new Error(errMsg || "Payment failed"));
+            },
             onCancel: () => reject(new Error("Payment was cancelled by user")),
           });
         });
 
         published = serverCreatedVideo ?? {
-          id: `vid-${Date.now()}`,
+          id: vidId,
           userId,
           creatorName,
           title: item.title.trim() || item.file.name.replace(/\.[^/.]+$/, ""),
@@ -1027,6 +1094,7 @@ export function BulkVideoUploadView({
                 ...it,
                 status: "success",
                 progress: 100,
+                pendingPremiumPayment: undefined,
                 progressSnapshot: {
                   stage: "completed",
                   loadedBytes: it.file.size,
@@ -2570,6 +2638,9 @@ function PremiumVideoUploadView({
   const uploadedCacheRef = useRef<{ fileKey: string; videoUrl: string; posterUrl: string } | null>(
     null,
   );
+  const pendingPaymentRef = useRef<
+    (PendingPremiumPaymentProof & { fileKey: string; userId: string; videoUrl: string }) | null
+  >(null);
   const notifiedSuccessIdsRef = useRef<Set<string>>(new Set());
 
   const handleThumbnailChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2620,6 +2691,7 @@ function PremiumVideoUploadView({
     }
 
     uploadedCacheRef.current = null;
+    pendingPaymentRef.current = null;
     setUploadProgress(null);
     setUploadError(null);
     setVideoFile(file);
@@ -2664,6 +2736,7 @@ function PremiumVideoUploadView({
     }
 
     uploadedCacheRef.current = null;
+    pendingPaymentRef.current = null;
     setUploadProgress(null);
     setUploadError(null);
     setVideoFile(file);
@@ -2707,9 +2780,16 @@ function PremiumVideoUploadView({
     isSubmittingRef.current = true;
     setUploadError(null);
     setUploading(true);
-    setPaymentStageLabel("Uploading video & preparing gateway...");
     preloadRazorpayScript();
     const fileKey = getUploadFileIdentityKey(videoFile);
+    const hasPendingRetry =
+      pendingPaymentRef.current?.fileKey === fileKey &&
+      pendingPaymentRef.current?.userId === userId;
+    setPaymentStageLabel(
+      hasPendingRetry
+        ? "Resuming payment verification..."
+        : "Uploading video & preparing gateway...",
+    );
     try {
       // 1. Upload video file and optional thumbnail concurrently (reuse cached storage URL on retry to prevent duplicates)
       const cachedMatch =
@@ -2771,9 +2851,19 @@ function PremiumVideoUploadView({
         estimatedRemainingSeconds: 0,
       });
 
-      const vidId = `vid-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const matchingPendingPayment =
+        pendingPaymentRef.current &&
+        pendingPaymentRef.current.fileKey === fileKey &&
+        pendingPaymentRef.current.userId === userId &&
+        pendingPaymentRef.current.videoUrl === resolvedVideoUrl
+          ? pendingPaymentRef.current
+          : null;
 
-      // 2. Initiate Razorpay ₹6 payment flow with server verification
+      const vidId =
+        matchingPendingPayment?.videoId ||
+        `vid-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+
+      // 2. Initiate Razorpay ₹6 payment flow with server verification (or safely resume captured payment)
       const resolvedUserEmail = user?.email || profile?.email || dbUser?.email || "";
       await initiatePremiumVideoPayment({
         uploaderUserId: userId,
@@ -2789,6 +2879,33 @@ function PremiumVideoUploadView({
         visibility,
         duration: detectedDuration || (format === "short" ? "0:45" : "14:20"),
         ...(referrerId ? { directReferrerId: referrerId } : {}),
+        ...(matchingPendingPayment
+          ? {
+              pendingPayment: {
+                orderId: matchingPendingPayment.orderId,
+                paymentId: matchingPendingPayment.paymentId,
+                signature: matchingPendingPayment.signature,
+                verified: matchingPendingPayment.verified,
+              },
+            }
+          : {}),
+        onPaymentCaptured: (proof) => {
+          pendingPaymentRef.current = {
+            ...proof,
+            fileKey,
+            userId,
+            videoUrl: resolvedVideoUrl,
+          };
+        },
+        onPaymentVerified: (proof) => {
+          pendingPaymentRef.current = {
+            ...proof,
+            verified: true,
+            fileKey,
+            userId,
+            videoUrl: resolvedVideoUrl,
+          };
+        },
         onStageChange: (stage) => {
           if (stage === "creating_order") setPaymentStageLabel("Creating payment order...");
           else if (stage === "loading_gateway") setPaymentStageLabel("Loading Razorpay SDK...");
@@ -2797,6 +2914,7 @@ function PremiumVideoUploadView({
         },
         onSuccess: async () => {
           isSubmittingRef.current = false;
+          pendingPaymentRef.current = null;
           uploadedCacheRef.current = null;
           setUploading(false);
           setPaymentStageLabel("");
@@ -2822,7 +2940,10 @@ function PremiumVideoUploadView({
           }
           onUploaded?.();
         },
-        onFailure: (err) => {
+        onFailure: (err, meta) => {
+          if (shouldClearPendingPremiumPaymentOnFailure(meta, err)) {
+            pendingPaymentRef.current = null;
+          }
           isSubmittingRef.current = false;
           setUploading(false);
           setPaymentStageLabel("");
@@ -2916,6 +3037,7 @@ function PremiumVideoUploadView({
               setUploadError(null);
               setUploadProgress(null);
               uploadedCacheRef.current = null;
+              pendingPaymentRef.current = null;
               setUploadSuccess(false);
             }}
             className="rounded-xl bg-pink-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-pink-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-500/60 transition"

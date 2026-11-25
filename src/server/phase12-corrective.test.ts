@@ -643,7 +643,7 @@ describe("Phase 1.2 Corrective Fixes — Accounting, Schema Compatibility, Dupli
       const body = await res?.json();
       assert.equal(body.verified, false);
       assert.equal(harness.getStatus().committed, false);
-      assert.equal(harness.getStatus().rolledBack, true);
+      assert.equal(harness.getStatus().rolledBack, false);
       assert.equal(harness.paymentTxInserts.length, 0);
       assert.equal(harness.ledgerInserts.length, 0);
       assert.equal(harness.walletCredits.length, 0);

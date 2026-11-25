@@ -5,8 +5,10 @@ import path from "node:path";
 import {
   computeFittedVideoBox,
   getPlayerContainerClass,
+  getPlayerIntrinsicContainerStyle,
   getShortsStageCardClass,
   getUploadPreviewVideoClass,
+  resolveEffectiveVideoDimensions,
   resolvePlayerAspectMode,
 } from "../lib/video-player-layout.ts";
 import {
@@ -173,9 +175,24 @@ describe("Video Player Aspect Ratio & Real-Time Upload Progress Regression Suite
       assert.ok(playerSrc.includes("toggleFullscreen"));
       assert.ok(playerSrc.includes("cyclePlaybackSpeed"));
       assert.ok(playerSrc.includes("getPlayerContainerClass"));
+      assert.ok(playerSrc.includes("getPlayerIntrinsicContainerStyle"));
 
       assert.ok(watchSrc.includes("resolveWatchVideo"));
       assert.ok(watchSrc.includes("contentType="));
+      assert.ok(
+        watchSrc.includes("pt-0 pb-24 sm:px-6"),
+        "Watch page main must start at top (pt-0) immediately below Navbar",
+      );
+      assert.ok(
+        !watchSrc.includes("sm:pt-3"),
+        "Unnecessary top padding above watch player must be removed",
+      );
+      assert.ok(
+        !watchSrc.includes(
+          'className="mx-auto w-full overflow-hidden rounded-2xl bg-black shadow-lift"',
+        ),
+        "Outer full-width bg-black wrapper must not add black pillar space around intrinsic player",
+      );
 
       assert.ok(shortsSrc.includes("getShortsStageCardClass"));
       assert.ok(shortsSrc.includes("object-contain"));
@@ -183,6 +200,85 @@ describe("Video Player Aspect Ratio & Real-Time Upload Progress Regression Suite
         !shortsSrc.includes("w-2/3 animate-pulse"),
         "Hardcoded fake Shorts progress bar must be removed",
       );
+    });
+
+    it("4. Intrinsic container sizing supports portrait 9:16, landscape 16:9, square 1:1, ultrawide, rotation, fullscreen, and metadata fallback", () => {
+      // Metadata not yet loaded -> null (falls back safely to getPlayerContainerClass)
+      assert.equal(resolveEffectiveVideoDimensions(0, 0, 0), null);
+      assert.equal(getPlayerIntrinsicContainerStyle(0, 0, 0, false), null);
+      assert.equal(getPlayerIntrinsicContainerStyle(-100, 720, 0, false), null);
+      assert.equal(getPlayerIntrinsicContainerStyle(Number.NaN, 1080, 0, false), null);
+
+      // Portrait 9:16 (1080x1920)
+      const portraitStyle = getPlayerIntrinsicContainerStyle(1080, 1920, 0, false);
+      assert.deepEqual(portraitStyle, {
+        width: "min(100%, calc(80vh * 1080 / 1920))",
+        maxWidth: "100%",
+        aspectRatio: "1080 / 1920",
+      });
+      // Desktop 80vh=720px -> 405x720; Mobile 360px wide -> 360x640
+      const portraitDesktopFit = computeFittedVideoBox(405, 720, 1080, 1920, 0, "standard");
+      assert.ok(portraitDesktopFit);
+      assert.equal(Math.round(portraitDesktopFit.baseWidth), 405);
+      assert.equal(Math.round(portraitDesktopFit.baseHeight), 720);
+
+      // Landscape 16:9 (1920x1080)
+      const landscapeStyle = getPlayerIntrinsicContainerStyle(1920, 1080, 0, false);
+      assert.deepEqual(landscapeStyle, {
+        width: "min(100%, calc(80vh * 1920 / 1080))",
+        maxWidth: "100%",
+        aspectRatio: "1920 / 1080",
+      });
+
+      // Square 1:1 (1080x1080)
+      const squareStyle = getPlayerIntrinsicContainerStyle(1080, 1080, 0, false);
+      assert.deepEqual(squareStyle, {
+        width: "min(100%, calc(80vh * 1080 / 1080))",
+        maxWidth: "100%",
+        aspectRatio: "1080 / 1080",
+      });
+      const squareMobileFit = computeFittedVideoBox(358, 358, 1080, 1080, 0, "standard");
+      assert.ok(squareMobileFit);
+      assert.equal(Math.round(squareMobileFit.baseWidth), 358);
+      assert.equal(Math.round(squareMobileFit.baseHeight), 358);
+
+      // Ultrawide 21:9 (2560x1080) -> exact 21:9 height with zero black bars above/below
+      const ultrawideStyle = getPlayerIntrinsicContainerStyle(2560, 1080, 0, false);
+      assert.deepEqual(ultrawideStyle, {
+        width: "min(100%, calc(80vh * 2560 / 1080))",
+        maxWidth: "100%",
+        aspectRatio: "2560 / 1080",
+      });
+      const ultrawideDesktopFit = computeFittedVideoBox(960, 405, 2560, 1080, 0, "standard");
+      assert.ok(ultrawideDesktopFit);
+      assert.equal(Math.round(ultrawideDesktopFit.baseWidth), 960);
+      assert.equal(Math.round(ultrawideDesktopFit.baseHeight), 405);
+
+      // Quarter-turn rotations (90° and 270°) swap width & height cleanly; 180° keeps original
+      const rotated90Style = getPlayerIntrinsicContainerStyle(1920, 1080, 90, false);
+      assert.deepEqual(rotated90Style, {
+        width: "min(100%, calc(80vh * 1080 / 1920))",
+        maxWidth: "100%",
+        aspectRatio: "1080 / 1920",
+      });
+      const rotated270Style = getPlayerIntrinsicContainerStyle(1080, 1920, -90, false);
+      assert.deepEqual(rotated270Style, {
+        width: "min(100%, calc(80vh * 1920 / 1080))",
+        maxWidth: "100%",
+        aspectRatio: "1920 / 1080",
+      });
+      const rotated180Style = getPlayerIntrinsicContainerStyle(1920, 1080, 180, false);
+      assert.deepEqual(rotated180Style, landscapeStyle);
+
+      // Rotated 90° video inside matching rotated container fills 100% without clipping or bars
+      const rotatedFit = computeFittedVideoBox(405, 720, 1920, 1080, 90, "standard");
+      assert.ok(rotatedFit);
+      assert.equal(Math.round(rotatedFit.visualWidth), 405);
+      assert.equal(Math.round(rotatedFit.visualHeight), 720);
+
+      // Fullscreen disables intrinsic constraint so viewport-filling class applies
+      assert.equal(getPlayerIntrinsicContainerStyle(1920, 1080, 0, true), null);
+      assert.equal(getPlayerContainerClass("standard", true), "h-full w-full rounded-none");
     });
   });
 

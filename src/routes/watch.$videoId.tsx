@@ -386,9 +386,9 @@ function WatchPage() {
     <div className="min-h-screen bg-background font-sans text-foreground">
       <Navbar onToggleSidebar={() => {}} />
 
-      <main className="mx-auto grid max-w-[1600px] gap-8 px-4 pt-2 pb-24 sm:px-6 sm:pt-3 lg:grid-cols-[minmax(0,1fr)_400px] lg:pb-10">
+      <main className="mx-auto grid max-w-[1600px] gap-8 px-4 pt-0 pb-24 sm:px-6 lg:grid-cols-[minmax(0,1fr)_400px] lg:pb-10">
         <div className="min-w-0">
-          <div className="mx-auto w-full overflow-hidden rounded-2xl bg-black shadow-lift">
+          <div className="w-full">
             <FaceTubeVideoPlayer
               key={video.id}
               src={video.videoUrl}

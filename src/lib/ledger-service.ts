@@ -427,6 +427,109 @@ export async function getEligibleGlobalIncomeUsers(): Promise<string[]> {
   return Array.from(eligibleSet);
 }
 
+export interface GlobalIncomePersonalSummary {
+  userId: string;
+  hasWalletRow: boolean;
+  totalIncome: number;
+  globalIncome: number;
+  balance: number;
+  totalWithdrawn: number;
+  walletTotalEarned: number;
+  walletGlobalIncome: number;
+  ledgerTotalEarned: number;
+  ledgerGlobalIncome: number;
+  walletVsLedgerDiff: number;
+  globalTxCount: number;
+  source: "wallet_balances" | "income_ledger_fallback";
+}
+
+export interface GlobalIncomePlatformSummary {
+  totalPremiumTransactions: number;
+  totalTransactionAmount: number;
+  referralAllocationTotal: number;
+  adminAllocationTotal: number;
+  gstTotal: number;
+  pgFeeTotal: number;
+  globalPoolAllocationTotal: number;
+  immediateGlobalPoolDistributedTotal: number;
+  settlementBatchCount: number;
+  settlementDistributedTotal: number;
+  globalPoolDistributedTotal: number;
+  pendingReserveCount: number;
+  pendingReserveTotal: number;
+  settledReserveCount: number;
+  settledReserveTotal: number;
+  cancelledReserveCount: number;
+  cancelledReserveTotal: number;
+  eligibleCreatorCount: number;
+  eligibleVideoCount: number;
+}
+
+export interface GlobalIncomeSummary {
+  personal: GlobalIncomePersonalSummary;
+  platform: GlobalIncomePlatformSummary;
+}
+
+/**
+ * Fetches authoritative personal + platform Global Income accounting metrics
+ * directly from the backend endpoint (zero localStorage calculations or fabricated fallbacks).
+ */
+export async function getGlobalIncomeSummary(userId?: string): Promise<GlobalIncomeSummary | null> {
+  const norm = typeof userId === "string" ? userId.trim().toUpperCase() : "";
+  try {
+    const res = await api.wallet.getGlobalIncomeSummary(norm || undefined);
+    if (!res?.success || !res.personal || !res.platform) {
+      return null;
+    }
+    return {
+      personal: {
+        userId: String(res.personal.userId || norm),
+        hasWalletRow: Boolean(res.personal.hasWalletRow),
+        totalIncome: toFiniteMoney(res.personal.totalIncome),
+        globalIncome: toFiniteMoney(res.personal.globalIncome),
+        balance: toFiniteMoney(res.personal.balance),
+        totalWithdrawn: toFiniteMoney(res.personal.totalWithdrawn),
+        walletTotalEarned: toFiniteMoney(res.personal.walletTotalEarned),
+        walletGlobalIncome: toFiniteMoney(res.personal.walletGlobalIncome),
+        ledgerTotalEarned: toFiniteMoney(res.personal.ledgerTotalEarned),
+        ledgerGlobalIncome: toFiniteMoney(res.personal.ledgerGlobalIncome),
+        walletVsLedgerDiff: toFiniteMoney(res.personal.walletVsLedgerDiff),
+        globalTxCount: Number(res.personal.globalTxCount) || 0,
+        source:
+          res.personal.source === "income_ledger_fallback"
+            ? "income_ledger_fallback"
+            : "wallet_balances",
+      },
+      platform: {
+        totalPremiumTransactions: Number(res.platform.totalPremiumTransactions) || 0,
+        totalTransactionAmount: toFiniteMoney(res.platform.totalTransactionAmount),
+        referralAllocationTotal: toFiniteMoney(res.platform.referralAllocationTotal),
+        adminAllocationTotal: toFiniteMoney(res.platform.adminAllocationTotal),
+        gstTotal: toFiniteMoney(res.platform.gstTotal),
+        pgFeeTotal: toFiniteMoney(res.platform.pgFeeTotal),
+        globalPoolAllocationTotal: toFiniteMoney(res.platform.globalPoolAllocationTotal),
+        immediateGlobalPoolDistributedTotal: toFiniteMoney(
+          res.platform.immediateGlobalPoolDistributedTotal,
+        ),
+        settlementBatchCount: Number(res.platform.settlementBatchCount) || 0,
+        settlementDistributedTotal: toFiniteMoney(res.platform.settlementDistributedTotal),
+        globalPoolDistributedTotal: toFiniteMoney(res.platform.globalPoolDistributedTotal),
+        pendingReserveCount: Number(res.platform.pendingReserveCount) || 0,
+        pendingReserveTotal: toFiniteMoney(res.platform.pendingReserveTotal),
+        settledReserveCount: Number(res.platform.settledReserveCount) || 0,
+        settledReserveTotal: toFiniteMoney(res.platform.settledReserveTotal),
+        cancelledReserveCount: Number(res.platform.cancelledReserveCount) || 0,
+        cancelledReserveTotal: toFiniteMoney(res.platform.cancelledReserveTotal),
+        eligibleCreatorCount: Number(res.platform.eligibleCreatorCount) || 0,
+        eligibleVideoCount: Number(res.platform.eligibleVideoCount) || 0,
+      },
+    };
+  } catch (err) {
+    console.warn("getGlobalIncomeSummary: failed to fetch global income summary from server:", err);
+    return null;
+  }
+}
+
 /**
  * Legacy helper preserved for backwards compatibility.
  * Every ₹6 premium transaction now follows the uniform ₹6 distribution.

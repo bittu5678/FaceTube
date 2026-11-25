@@ -980,6 +980,49 @@ export const api = {
         }>;
       }>(`/wallet/earnings-history.php?${params.toString()}`);
     },
+
+    getGlobalIncomeSummary: async (userId?: string) => {
+      const q = userId ? `?userId=${encodeURIComponent(userId)}` : "";
+      return apiFetch<{
+        success: boolean;
+        personal: {
+          userId: string;
+          hasWalletRow: boolean;
+          totalIncome: number;
+          globalIncome: number;
+          balance: number;
+          totalWithdrawn: number;
+          walletTotalEarned: number;
+          walletGlobalIncome: number;
+          ledgerTotalEarned: number;
+          ledgerGlobalIncome: number;
+          walletVsLedgerDiff: number;
+          globalTxCount: number;
+          source: "wallet_balances" | "income_ledger_fallback";
+        };
+        platform: {
+          totalPremiumTransactions: number;
+          totalTransactionAmount: number;
+          referralAllocationTotal: number;
+          adminAllocationTotal: number;
+          gstTotal: number;
+          pgFeeTotal: number;
+          globalPoolAllocationTotal: number;
+          immediateGlobalPoolDistributedTotal: number;
+          settlementBatchCount: number;
+          settlementDistributedTotal: number;
+          globalPoolDistributedTotal: number;
+          pendingReserveCount: number;
+          pendingReserveTotal: number;
+          settledReserveCount: number;
+          settledReserveTotal: number;
+          cancelledReserveCount: number;
+          cancelledReserveTotal: number;
+          eligibleCreatorCount: number;
+          eligibleVideoCount: number;
+        };
+      }>(`/wallet/global-income.php${q}`);
+    },
   },
 
   // KYC

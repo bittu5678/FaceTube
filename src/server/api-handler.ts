@@ -3459,6 +3459,45 @@ async function dispatchApiRequest(
           }
         }
 
+        if (pool && purpose === "premium_video_upload") {
+          let reserveTableRows: any[] = [];
+          try {
+            const [tblRows]: any = await pool.query(
+              `SELECT TABLE_NAME
+               FROM INFORMATION_SCHEMA.TABLES
+               WHERE TABLE_SCHEMA = DATABASE()
+                 AND TABLE_NAME = 'global_pool_reserves'
+               LIMIT 1`,
+            );
+            reserveTableRows = Array.isArray(tblRows) ? tblRows : [];
+          } catch (_eReserveReady) {
+            console.error(
+              "[payments/create-order] Global Pool reserve readiness check failed:",
+              _eReserveReady instanceof Error ? _eReserveReady.message : "Metadata query error",
+            );
+            return jsonResponse(
+              {
+                success: false,
+                error: isMysqlConnectionUnavailableError(_eReserveReady)
+                  ? "Database connection unavailable while checking Global Pool reserve readiness. Payment order was not created."
+                  : "Unable to verify Global Pool reserve schema readiness. Payment order was not created.",
+              },
+              503,
+            );
+          }
+
+          if (reserveTableRows.length === 0) {
+            return jsonResponse(
+              {
+                success: false,
+                error:
+                  "Global Pool reserve schema migration has not been applied yet. Payment order was not created.",
+              },
+              503,
+            );
+          }
+        }
+
         const result = await createServerPaymentOrder(
           {
             ...payload,
@@ -4207,6 +4246,56 @@ async function dispatchApiRequest(
           }
         }
 
+        // Pre-capture Global Pool reserve readiness check for ₹6 Sponsor uploads
+        // Runs AFTER auth, HMAC signature, order ownership/amount validation, and paid-order fast-path idempotency,
+        // and BEFORE Razorpay lookup / auto-capture so authorized payments are never captured when reserve schema is missing.
+        let preVerifiedHasGlobalPoolReservesTable = false;
+        if (pool && purpose === "premium_video_upload") {
+          let preReserveRows: any[] = [];
+          try {
+            const [tblRows]: any = await pool.query(
+              `SELECT TABLE_NAME
+               FROM INFORMATION_SCHEMA.TABLES
+               WHERE TABLE_SCHEMA = DATABASE()
+                 AND TABLE_NAME = 'global_pool_reserves'
+               LIMIT 1`,
+            );
+            preReserveRows = Array.isArray(tblRows) ? tblRows : [];
+          } catch (_ePreReserve) {
+            console.error(
+              "[payments/verify] Pre-capture Global Pool reserve readiness check failed:",
+              _ePreReserve instanceof Error ? _ePreReserve.message : "Metadata query error",
+            );
+            return jsonResponse(
+              {
+                verified: false,
+                paymentId,
+                orderId,
+                error: isMysqlConnectionUnavailableError(_ePreReserve)
+                  ? "Database connection unavailable while checking Global Pool reserve readiness. Payment was not captured."
+                  : "Unable to verify Global Pool reserve schema readiness. Payment was not captured.",
+              },
+              503,
+            );
+          }
+
+          preVerifiedHasGlobalPoolReservesTable = preReserveRows.some(
+            (r) => String(r?.TABLE_NAME || "").toLowerCase() === "global_pool_reserves",
+          );
+          if (!preVerifiedHasGlobalPoolReservesTable) {
+            return jsonResponse(
+              {
+                verified: false,
+                paymentId,
+                orderId,
+                error:
+                  "Global Pool reserve schema migration has not been applied yet. Payment was not captured.",
+              },
+              503,
+            );
+          }
+        }
+
         // Remote Razorpay API confirmation (status, payment_id, order_id, currency, amount in paise)
         if (!skipRemote) {
           try {
@@ -4356,7 +4445,7 @@ async function dispatchApiRequest(
           let hasPremPoolDistCol = false;
           let hasPremPoolResCol = false;
           let hasPremPoolStatusCol = false;
-          let hasGlobalPoolReservesTable = false;
+          let hasGlobalPoolReservesTable = preVerifiedHasGlobalPoolReservesTable;
           let hasReserveReasonInsufficientEnum = false;
           try {
             const [colRows]: any = await pool.query(
@@ -4399,22 +4488,30 @@ async function dispatchApiRequest(
               }
             }
           } catch (_eCols) {
-            // Keep false defaults if schema metadata check fails
-          }
-          try {
-            const [tblRows]: any = await pool.query(
-              `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-               WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('global_pool_reserves', 'global_pool_settlements')`,
+            console.error(
+              "[payments/verify] Schema column metadata check failed:",
+              _eCols instanceof Error ? _eCols.message : "Metadata query error",
             );
-            if (Array.isArray(tblRows)) {
-              for (const tRow of tblRows) {
-                if (String(tRow.TABLE_NAME || "").toLowerCase() === "global_pool_reserves") {
-                  hasGlobalPoolReservesTable = true;
+          }
+          if (!hasGlobalPoolReservesTable) {
+            try {
+              const [tblRows]: any = await pool.query(
+                `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('global_pool_reserves', 'global_pool_settlements')`,
+              );
+              if (Array.isArray(tblRows)) {
+                for (const tRow of tblRows) {
+                  if (String(tRow.TABLE_NAME || "").toLowerCase() === "global_pool_reserves") {
+                    hasGlobalPoolReservesTable = true;
+                  }
                 }
               }
+            } catch (_eTbl) {
+              console.error(
+                "[payments/verify] Global Pool reserve table check failed:",
+                _eTbl instanceof Error ? _eTbl.message : "Metadata query error",
+              );
             }
-          } catch (_eTbl) {
-            // Keep false if table check fails
           }
           const hasPtAccountingCols = hasPtGstCol && hasPtPgFeeCol && hasPtRefStatusCol;
           const hasPtPoolBreakdownCols = hasPtPoolDistCol && hasPtPoolResCol && hasPtPoolStatusCol;
@@ -10712,6 +10809,687 @@ async function dispatchApiRequest(
         },
       });
     }
+  }
+
+  if (route === "wallet/global-income") {
+    if (method !== "GET") {
+      return jsonResponse({ success: false, error: "Method Not Allowed" }, 405);
+    }
+
+    const qUserId = url.searchParams.get("userId") || url.searchParams.get("user_id");
+    const pool = getMysqlPool();
+    const isProduction = isProductionStoreBlocked(env);
+    const authUser = await getAuthUserFromRequest(request, store, pool, env);
+    const auth = requireAuth(authUser, qUserId);
+    if (!auth.success) {
+      return auth.response;
+    }
+    const targetUserId = auth.effectiveUserId;
+
+    const roundMoney = (val: unknown): number => {
+      if (val === null || val === undefined || val === "") return 0;
+      const num = Number(val);
+      return Number.isFinite(num) ? Math.round(num * 100) / 100 : 0;
+    };
+
+    if (isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error:
+            "Database connection unavailable. In production, global income summary requires a persistent database connection.",
+        },
+        503,
+      );
+    }
+
+    if (pool) {
+      try {
+        const [tableRows]: any = await pool.query(
+          `SELECT TABLE_NAME
+           FROM INFORMATION_SCHEMA.TABLES
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND TABLE_NAME IN (
+               'payment_orders',
+               'global_pool_reserves',
+               'global_pool_settlements',
+               'payment_transactions',
+               'income_ledger',
+               'wallet_balances',
+               'uploaded_videos'
+             )`,
+        );
+        const existingTables = new Set<string>(
+          (Array.isArray(tableRows) ? tableRows : [])
+            .map((r: any) =>
+              String(r?.TABLE_NAME ?? r?.table_name ?? "")
+                .trim()
+                .toLowerCase(),
+            )
+            .filter(Boolean),
+        );
+
+        const hasPaymentOrdersTable = existingTables.has("payment_orders");
+        const hasReservesTable = existingTables.has("global_pool_reserves");
+        const hasSettlementsTable = existingTables.has("global_pool_settlements");
+        const hasPaymentTransactionsTable = existingTables.has("payment_transactions");
+        const hasIncomeLedgerTable = existingTables.has("income_ledger");
+        const hasWalletBalancesTable = existingTables.has("wallet_balances");
+        const hasUploadedVideosTable = existingTables.has("uploaded_videos");
+
+        const [colRows]: any = await pool.query(
+          `SELECT TABLE_NAME, COLUMN_NAME
+           FROM INFORMATION_SCHEMA.COLUMNS
+           WHERE TABLE_SCHEMA = DATABASE()
+             AND (
+               (TABLE_NAME = 'payment_transactions' AND COLUMN_NAME IN ('status', 'gst_amount', 'pg_fee', 'global_pool_distributed', 'global_pool_status'))
+               OR (TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME = 'is_blocked')
+             )`,
+        );
+        const ptCols = new Set<string>();
+        const uvCols = new Set<string>();
+        for (const r of Array.isArray(colRows) ? colRows : []) {
+          const tbl = String(r?.TABLE_NAME ?? r?.table_name ?? "")
+            .trim()
+            .toLowerCase();
+          const col = String(r?.COLUMN_NAME ?? r?.column_name ?? "")
+            .trim()
+            .toLowerCase();
+          if (tbl === "payment_transactions" && col) ptCols.add(col);
+          if (tbl === "uploaded_videos" && col) uvCols.add(col);
+        }
+
+        const hasPtStatusCol = ptCols.has("status");
+        const hasPtTaxCols = ptCols.has("gst_amount") && ptCols.has("pg_fee");
+        const hasPtPoolCols =
+          ptCols.has("global_pool_distributed") && ptCols.has("global_pool_status");
+        const hasVideoBlockedCol = uvCols.has("is_blocked");
+
+        // 1. Personal income aggregation (read-only)
+        let hasWalletRow = false;
+        let walletTotalEarned = 0;
+        let walletGlobalIncome = 0;
+        let balance = 0;
+        let totalWithdrawn = 0;
+
+        if (hasWalletBalancesTable) {
+          const [wRows]: any = await pool.query(
+            `SELECT user_id, balance, total_earned, total_withdrawn, global_income
+             FROM wallet_balances
+             WHERE UPPER(user_id) = UPPER(?)
+             LIMIT 1`,
+            [targetUserId],
+          );
+          if (Array.isArray(wRows) && wRows.length > 0) {
+            const wRow = wRows[0];
+            hasWalletRow = true;
+            balance = roundMoney(wRow.balance);
+            walletTotalEarned = roundMoney(wRow.total_earned);
+            totalWithdrawn = roundMoney(wRow.total_withdrawn);
+            walletGlobalIncome = roundMoney(wRow.global_income);
+          }
+        }
+
+        let ledgerTotalEarned = 0;
+        let ledgerGlobalIncome = 0;
+        let globalTxCount = 0;
+
+        if (hasIncomeLedgerTable) {
+          const [lRows]: any = await pool.query(
+            `SELECT
+               ROUND(COALESCE(SUM(CASE
+                 WHEN COALESCE(income_type, '') NOT IN ('withdrawal', 'ads_promotion_fee')
+                 THEN amount ELSE 0 END), 0), 2) AS ledger_total_earned,
+               ROUND(COALESCE(SUM(CASE
+                 WHEN income_type = 'global_income'
+                 THEN amount ELSE 0 END), 0), 2) AS ledger_global_income,
+               COUNT(CASE
+                 WHEN income_type = 'global_income'
+                 THEN 1 ELSE NULL END) AS global_tx_count
+             FROM income_ledger
+             WHERE UPPER(user_id) = UPPER(?)
+               AND status = 'settled'`,
+            [targetUserId],
+          );
+          if (Array.isArray(lRows) && lRows.length > 0) {
+            const lRow = lRows[0];
+            ledgerTotalEarned = roundMoney(lRow.ledger_total_earned);
+            ledgerGlobalIncome = roundMoney(lRow.ledger_global_income);
+            globalTxCount = Number(lRow.global_tx_count || 0) || 0;
+          }
+        }
+
+        const personalTotalIncome = hasWalletRow ? walletTotalEarned : ledgerTotalEarned;
+        const personalGlobalIncome = hasWalletRow ? walletGlobalIncome : ledgerGlobalIncome;
+        const personalSource = hasWalletRow ? "wallet_balances" : "income_ledger_fallback";
+        const walletVsLedgerDiff = hasWalletRow
+          ? roundMoney(walletTotalEarned - ledgerTotalEarned)
+          : 0;
+
+        // 2. Platform Sponsor Video transaction summary (strict successful-payment verification)
+        let totalPremiumTransactions = 0;
+        let totalTransactionAmount = 0;
+        let referralAllocationTotal = 0;
+        let adminAllocationTotal = 0;
+        let gstTotal = 0;
+        let pgFeeTotal = 0;
+        let globalPoolAllocationTotal = 0;
+        let immediateGlobalPoolDistributedTotal = 0;
+
+        if (hasPaymentTransactionsTable) {
+          let caseJoinSql = "";
+          let caseWhereSql = "";
+
+          if (hasPaymentOrdersTable) {
+            caseJoinSql = `
+              INNER JOIN payment_orders po
+                ON pt_in.order_id IS NOT NULL
+               AND TRIM(pt_in.order_id) != ''
+               AND po.order_id = pt_in.order_id
+               AND LOWER(TRIM(po.status)) = 'paid'
+               AND po.purpose = 'premium_video_upload'
+               AND (po.payment_id IS NULL OR TRIM(po.payment_id) = '' OR TRIM(po.payment_id) = TRIM(pt_in.payment_id))
+            `;
+            if (hasPtStatusCol) {
+              caseWhereSql =
+                " AND LOWER(TRIM(COALESCE(pt_in.status, ''))) IN ('paid', 'settled', 'captured', 'completed', 'success')";
+            }
+          } else if (hasPtStatusCol) {
+            caseWhereSql =
+              " AND LOWER(TRIM(COALESCE(pt_in.status, ''))) IN ('paid', 'settled', 'captured', 'completed', 'success')";
+          } else {
+            const proofClauses: string[] = [];
+            if (hasIncomeLedgerTable) {
+              proofClauses.push(`EXISTS (
+                SELECT 1 FROM income_ledger il
+                WHERE il.status = 'settled'
+                  AND il.amount > 0
+                  AND (
+                    il.transaction_id = CONCAT('TX_ADM_', TRIM(pt_in.payment_id))
+                    OR il.transaction_id = CONCAT('TX_REF_', TRIM(pt_in.payment_id))
+                    OR LEFT(il.transaction_id, CHAR_LENGTH(CONCAT('TX_GLB_', TRIM(pt_in.payment_id), '_'))) = CONCAT('TX_GLB_', TRIM(pt_in.payment_id), '_')
+                  )
+              )`);
+            }
+            if (hasUploadedVideosTable) {
+              proofClauses.push(`EXISTS (
+                SELECT 1 FROM uploaded_videos uv
+                WHERE uv.payment_id IS NOT NULL
+                  AND TRIM(uv.payment_id) = TRIM(pt_in.payment_id)
+                  AND LOWER(TRIM(uv.payment_status)) = 'paid'
+              )`);
+            }
+            caseWhereSql =
+              proofClauses.length > 0 ? ` AND (${proofClauses.join(" OR ")})` : " AND 1 = 0";
+          }
+
+          const historical6FallbackCondition = `
+            ABS(COALESCE(pt.amount, 0.00) - 6.00) <= 0.005
+            AND ABS((COALESCE(pt.amount, 0.00) - (COALESCE(pt.referral_commission, 0.00) + COALESCE(pt.admin_allocation, 0.00) + COALESCE(pt.global_pool_allocation, 0.00))) - 1.00) <= 0.005
+          `;
+
+          const gstExpr = hasPtTaxCols
+            ? `CASE
+                WHEN COALESCE(pt.gst_amount, 0.00) > 0 OR COALESCE(pt.pg_fee, 0.00) > 0
+                  THEN COALESCE(pt.gst_amount, 0.00)
+                WHEN ${historical6FallbackCondition}
+                  THEN 0.90
+                ELSE 0.00
+              END`
+            : `CASE
+                WHEN ${historical6FallbackCondition}
+                  THEN 0.90
+                ELSE 0.00
+              END`;
+
+          const pgExpr = hasPtTaxCols
+            ? `CASE
+                WHEN COALESCE(pt.gst_amount, 0.00) > 0 OR COALESCE(pt.pg_fee, 0.00) > 0
+                  THEN COALESCE(pt.pg_fee, 0.00)
+                WHEN ${historical6FallbackCondition}
+                  THEN 0.10
+                ELSE 0.00
+              END`
+            : `CASE
+                WHEN ${historical6FallbackCondition}
+                  THEN 0.10
+                ELSE 0.00
+              END`;
+
+          const immediatePoolExpr = hasPtPoolCols
+            ? `CASE
+                WHEN COALESCE(NULLIF(TRIM(pt.global_pool_status), ''), 'not_applicable') = 'not_applicable'
+                  THEN COALESCE(pt.global_pool_allocation, 0.00)
+                ELSE COALESCE(pt.global_pool_distributed, 0.00)
+              END`
+            : `COALESCE(pt.global_pool_allocation, 0.00)`;
+
+          const [ptRows]: any = await pool.query(`
+            SELECT
+              COUNT(*) AS total_premium_transactions,
+              ROUND(COALESCE(SUM(COALESCE(pt.amount, 0.00)), 0), 2) AS total_transaction_amount,
+              ROUND(COALESCE(SUM(COALESCE(pt.referral_commission, 0.00)), 0), 2) AS referral_allocation_total,
+              ROUND(COALESCE(SUM(COALESCE(pt.admin_allocation, 0.00)), 0), 2) AS admin_allocation_total,
+              ROUND(COALESCE(SUM(${gstExpr}), 0), 2) AS gst_total,
+              ROUND(COALESCE(SUM(${pgExpr}), 0), 2) AS pg_fee_total,
+              ROUND(COALESCE(SUM(COALESCE(pt.global_pool_allocation, 0.00)), 0), 2) AS global_pool_allocation_total,
+              ROUND(COALESCE(SUM(${immediatePoolExpr}), 0), 2) AS immediate_global_pool_distributed_total
+            FROM payment_transactions pt
+            INNER JOIN (
+              SELECT MIN(pt_in.id) AS first_id
+              FROM payment_transactions pt_in
+              ${caseJoinSql}
+              WHERE pt_in.purpose = 'premium_video_upload'
+                AND pt_in.payment_id IS NOT NULL
+                AND TRIM(pt_in.payment_id) != ''
+                AND COALESCE(pt_in.amount, 0.00) > 0
+                ${caseWhereSql}
+              GROUP BY TRIM(pt_in.payment_id)
+            ) uniq_tx ON pt.id = uniq_tx.first_id
+          `);
+          if (Array.isArray(ptRows) && ptRows.length > 0) {
+            const ptRow = ptRows[0];
+            totalPremiumTransactions = Number(ptRow.total_premium_transactions || 0) || 0;
+            totalTransactionAmount = roundMoney(ptRow.total_transaction_amount);
+            referralAllocationTotal = roundMoney(ptRow.referral_allocation_total);
+            adminAllocationTotal = roundMoney(ptRow.admin_allocation_total);
+            gstTotal = roundMoney(ptRow.gst_total);
+            pgFeeTotal = roundMoney(ptRow.pg_fee_total);
+            globalPoolAllocationTotal = roundMoney(ptRow.global_pool_allocation_total);
+            immediateGlobalPoolDistributedTotal = roundMoney(
+              ptRow.immediate_global_pool_distributed_total,
+            );
+          }
+        }
+
+        // 3. Settlement distribution summary (standalone from reserves, deduplicated by batch)
+        let settlementBatchCount = 0;
+        let settlementDistributedTotal = 0;
+
+        if (hasSettlementsTable) {
+          const [settleRows]: any = await pool.query(`
+            SELECT
+              COUNT(*) AS settlement_batch_count,
+              ROUND(COALESCE(SUM(uniq_batch.distributed_amount), 0), 2) AS settlement_distributed_total
+            FROM (
+              SELECT
+                COALESCE(NULLIF(TRIM(idempotency_key), ''), id) AS batch_key,
+                MAX(COALESCE(distributed_amount, 0.00)) AS distributed_amount
+              FROM global_pool_settlements
+              GROUP BY COALESCE(NULLIF(TRIM(idempotency_key), ''), id)
+            ) uniq_batch
+          `);
+          if (Array.isArray(settleRows) && settleRows.length > 0) {
+            const sRow = settleRows[0];
+            settlementBatchCount = Number(sRow.settlement_batch_count || 0) || 0;
+            settlementDistributedTotal = roundMoney(sRow.settlement_distributed_total);
+          }
+        }
+
+        const globalPoolDistributedTotal = roundMoney(
+          immediateGlobalPoolDistributedTotal + settlementDistributedTotal,
+        );
+
+        // 4. Reserves breakdown (pending, settled, cancelled separate)
+        let pendingReserveCount = 0;
+        let pendingReserveTotal = 0;
+        let settledReserveCount = 0;
+        let settledReserveTotal = 0;
+        let cancelledReserveCount = 0;
+        let cancelledReserveTotal = 0;
+
+        if (hasReservesTable) {
+          const [resRows]: any = await pool.query(`
+            SELECT
+              COUNT(CASE WHEN LOWER(TRIM(gpr.status)) = 'pending' THEN 1 ELSE NULL END) AS pending_reserve_count,
+              ROUND(COALESCE(SUM(CASE WHEN LOWER(TRIM(gpr.status)) = 'pending' THEN COALESCE(gpr.reserve_amount, 0.00) ELSE 0.00 END), 0), 2) AS pending_reserve_total,
+              COUNT(CASE WHEN LOWER(TRIM(gpr.status)) = 'settled' THEN 1 ELSE NULL END) AS settled_reserve_count,
+              ROUND(COALESCE(SUM(CASE WHEN LOWER(TRIM(gpr.status)) = 'settled' THEN COALESCE(gpr.reserve_amount, 0.00) ELSE 0.00 END), 0), 2) AS settled_reserve_total,
+              COUNT(CASE WHEN LOWER(TRIM(gpr.status)) = 'cancelled' THEN 1 ELSE NULL END) AS cancelled_reserve_count,
+              ROUND(COALESCE(SUM(CASE WHEN LOWER(TRIM(gpr.status)) = 'cancelled' THEN COALESCE(gpr.reserve_amount, 0.00) ELSE 0.00 END), 0), 2) AS cancelled_reserve_total
+            FROM global_pool_reserves gpr
+            INNER JOIN (
+              SELECT MIN(id) AS first_id
+              FROM global_pool_reserves
+              GROUP BY COALESCE(NULLIF(TRIM(payment_id), ''), id)
+            ) uniq_res ON gpr.id = uniq_res.first_id
+          `);
+          if (Array.isArray(resRows) && resRows.length > 0) {
+            const rRow = resRows[0];
+            pendingReserveCount = Number(rRow.pending_reserve_count || 0) || 0;
+            pendingReserveTotal = roundMoney(rRow.pending_reserve_total);
+            settledReserveCount = Number(rRow.settled_reserve_count || 0) || 0;
+            settledReserveTotal = roundMoney(rRow.settled_reserve_total);
+            cancelledReserveCount = Number(rRow.cancelled_reserve_count || 0) || 0;
+            cancelledReserveTotal = roundMoney(rRow.cancelled_reserve_total);
+          }
+        }
+
+        // 5. Eligible creators & videos
+        let eligibleCreatorCount = 0;
+        let eligibleVideoCount = 0;
+
+        if (hasUploadedVideosTable) {
+          const blockedClause = hasVideoBlockedCol
+            ? "AND (is_blocked = 0 OR is_blocked IS NULL)"
+            : "";
+          const [eligRows]: any = await pool.query(`
+            SELECT
+              COUNT(DISTINCT UPPER(TRIM(user_id))) AS eligible_creator_count,
+              COUNT(*) AS eligible_video_count
+            FROM uploaded_videos
+            WHERE (video_type = 'premium' OR payment_status = 'paid')
+              ${blockedClause}
+          `);
+          if (Array.isArray(eligRows) && eligRows.length > 0) {
+            const eRow = eligRows[0];
+            eligibleCreatorCount = Number(eRow.eligible_creator_count || 0) || 0;
+            eligibleVideoCount = Number(eRow.eligible_video_count || 0) || 0;
+          }
+        }
+
+        return jsonResponse({
+          success: true,
+          personal: {
+            userId: targetUserId,
+            hasWalletRow,
+            totalIncome: personalTotalIncome,
+            globalIncome: personalGlobalIncome,
+            balance,
+            totalWithdrawn,
+            walletTotalEarned,
+            walletGlobalIncome,
+            ledgerTotalEarned,
+            ledgerGlobalIncome,
+            walletVsLedgerDiff,
+            globalTxCount,
+            source: personalSource,
+          },
+          platform: {
+            totalPremiumTransactions,
+            totalTransactionAmount,
+            referralAllocationTotal,
+            adminAllocationTotal,
+            gstTotal,
+            pgFeeTotal,
+            globalPoolAllocationTotal,
+            immediateGlobalPoolDistributedTotal,
+            settlementBatchCount,
+            settlementDistributedTotal,
+            globalPoolDistributedTotal,
+            pendingReserveCount,
+            pendingReserveTotal,
+            settledReserveCount,
+            settledReserveTotal,
+            cancelledReserveCount,
+            cancelledReserveTotal,
+            eligibleCreatorCount,
+            eligibleVideoCount,
+          },
+        });
+      } catch (dbErr) {
+        if (isProduction) {
+          const isUnavailable = isMysqlConnectionUnavailableError(dbErr);
+          return jsonResponse(
+            {
+              success: false,
+              error: isUnavailable
+                ? "Database connection unavailable while loading global income summary."
+                : "Failed to load global income summary due to a database error.",
+            },
+            isUnavailable ? 503 : 500,
+          );
+        }
+        console.warn("[Global Income] MySQL query failed, falling back to non-prod store:", dbErr);
+      }
+    }
+
+    // Non-production local store fallback (mirroring strict SQL rules)
+    const walletEntry = Object.entries(store.wallets || {}).find(
+      ([k]) => k.trim().toUpperCase() === targetUserId.toUpperCase(),
+    )?.[1];
+    const hasWalletRow = Boolean(walletEntry);
+    const balance = hasWalletRow ? roundMoney(walletEntry?.balance) : 0;
+    const walletTotalEarned = hasWalletRow ? roundMoney(walletEntry?.total_earned) : 0;
+    const totalWithdrawn = hasWalletRow ? roundMoney(walletEntry?.total_withdrawn) : 0;
+    const walletGlobalIncome = hasWalletRow ? roundMoney(walletEntry?.global_income) : 0;
+
+    let ledgerTotalEarned = 0;
+    let ledgerGlobalIncome = 0;
+    let globalTxCount = 0;
+    const seenPersonalKeys = new Set<string>();
+    for (const tx of store.walletTransactions || []) {
+      const txUser = String(tx["user_id"] || tx["userId"] || "")
+        .trim()
+        .toUpperCase();
+      if (txUser !== targetUserId.toUpperCase()) continue;
+      const st = String(tx["status"] ?? "settled")
+        .trim()
+        .toLowerCase();
+      if (st !== "" && st !== "settled") continue;
+      const dedupKey = String(tx["transaction_id"] || tx["transactionId"] || tx["id"] || "")
+        .trim()
+        .toUpperCase();
+      if (dedupKey) {
+        if (seenPersonalKeys.has(dedupKey)) continue;
+        seenPersonalKeys.add(dedupKey);
+      }
+      const incType = String(tx["income_type"] || tx["incomeType"] || tx["type"] || "")
+        .trim()
+        .toLowerCase();
+      if (incType === "withdrawal" || incType === "ads_promotion_fee") continue;
+      const amt = Number(tx["amount"]) || 0;
+      ledgerTotalEarned += amt;
+      if (incType === "global_income") {
+        ledgerGlobalIncome += amt;
+        globalTxCount += 1;
+      }
+    }
+    ledgerTotalEarned = roundMoney(ledgerTotalEarned);
+    ledgerGlobalIncome = roundMoney(ledgerGlobalIncome);
+
+    const personalTotalIncome = hasWalletRow ? walletTotalEarned : ledgerTotalEarned;
+    const personalGlobalIncome = hasWalletRow ? walletGlobalIncome : ledgerGlobalIncome;
+    const personalSource = hasWalletRow ? "wallet_balances" : "income_ledger_fallback";
+    const walletVsLedgerDiff = hasWalletRow ? roundMoney(walletTotalEarned - ledgerTotalEarned) : 0;
+
+    const persistentTxs = await getPersistentTransactions();
+    const gpState = await getPersistentGlobalPoolState();
+    const orders = store.paymentOrders || [];
+    const settledStatuses = new Set(["paid", "settled", "captured", "completed", "success"]);
+    const settledLedgerTxIds = new Set<string>();
+    const settledGlbPrefixes: string[] = [];
+    for (const tx of store.walletTransactions || []) {
+      const st = String(tx["status"] ?? "settled")
+        .trim()
+        .toLowerCase();
+      if ((st === "" || st === "settled") && (Number(tx["amount"]) || 0) > 0) {
+        const txId = String(tx["transaction_id"] || tx["transactionId"] || "").trim();
+        if (txId) {
+          settledLedgerTxIds.add(txId);
+          if (txId.startsWith("TX_GLB_")) {
+            settledGlbPrefixes.push(txId);
+          }
+        }
+      }
+    }
+    const paidVideoPayIds = new Set<string>(
+      (store.videos || [])
+        .filter(
+          (v: any) => v?.payment_id && String(v?.payment_status || "").toLowerCase() === "paid",
+        )
+        .map((v: any) => String(v.payment_id).trim()),
+    );
+
+    const seenPayIds = new Set<string>();
+    let totalPremiumTransactions = 0;
+    let totalTransactionAmount = 0;
+    let referralAllocationTotal = 0;
+    let adminAllocationTotal = 0;
+    let gstTotal = 0;
+    let pgFeeTotal = 0;
+    let globalPoolAllocationTotal = 0;
+    let immediateGlobalPoolDistributedTotal = 0;
+
+    for (const tx of persistentTxs) {
+      if (tx.transactionType !== "premium_upload") continue;
+      const payId = String(tx.paymentId || "").trim();
+      if (!payId || Number(tx.amount) <= 0) continue;
+      if (seenPayIds.has(payId)) continue;
+
+      const rawStatus = String((tx as any).status ?? "")
+        .trim()
+        .toLowerCase();
+      let isVerified = false;
+      if (orders.length > 0) {
+        const matchingOrder = orders.find(
+          (o: any) =>
+            o.order_id &&
+            tx.orderId &&
+            String(o.order_id) === String(tx.orderId) &&
+            String(o.status || "")
+              .trim()
+              .toLowerCase() === "paid" &&
+            o.purpose === "premium_video_upload" &&
+            (!o.payment_id || String(o.payment_id).trim() === payId),
+        );
+        isVerified = Boolean(matchingOrder) && (rawStatus === "" || settledStatuses.has(rawStatus));
+      } else if (rawStatus !== "") {
+        isVerified = settledStatuses.has(rawStatus);
+      } else {
+        isVerified =
+          settledLedgerTxIds.has(`TX_ADM_${payId}`) ||
+          settledLedgerTxIds.has(`TX_REF_${payId}`) ||
+          settledGlbPrefixes.some((id) => id.startsWith(`TX_GLB_${payId}_`)) ||
+          paidVideoPayIds.has(payId);
+      }
+      if (!isVerified) continue;
+
+      seenPayIds.add(payId);
+      totalPremiumTransactions += 1;
+      const amt = Number(tx.amount) || 0;
+      const refComm = Number(tx.referralCommission) || 0;
+      const admAlloc = Number(tx.adminAllocation) || 0;
+      const glbAlloc = Number(tx.globalPoolAllocation) || 0;
+      totalTransactionAmount += amt;
+      referralAllocationTotal += refComm;
+      adminAllocationTotal += admAlloc;
+      globalPoolAllocationTotal += glbAlloc;
+
+      const storedGst = Number(tx.gstAmount) || 0;
+      const storedPg = Number(tx.pgFee) || 0;
+      if (storedGst > 0 || storedPg > 0) {
+        gstTotal += storedGst;
+        pgFeeTotal += storedPg;
+      } else if (
+        Math.abs(amt - 6.0) <= 0.005 &&
+        Math.abs(amt - (refComm + admAlloc + glbAlloc) - 1.0) <= 0.005
+      ) {
+        gstTotal += 0.9;
+        pgFeeTotal += 0.1;
+      }
+
+      const poolStatus = String(tx.globalPoolStatus || "").trim() || "not_applicable";
+      immediateGlobalPoolDistributedTotal +=
+        poolStatus === "not_applicable" ? glbAlloc : Number(tx.globalPoolDistributed) || 0;
+    }
+
+    const uniqSettlements = new Map<string, number>();
+    for (const batch of gpState.settlements || []) {
+      const key = String(batch.idempotencyKey || "").trim() || batch.id;
+      const amt = Number(batch.distributedAmount) || 0;
+      uniqSettlements.set(key, Math.max(uniqSettlements.get(key) ?? 0, amt));
+    }
+    const settlementBatchCount = uniqSettlements.size;
+    const settlementDistributedTotal = roundMoney(
+      Array.from(uniqSettlements.values()).reduce((sum, v) => sum + v, 0),
+    );
+    const globalPoolDistributedTotal = roundMoney(
+      immediateGlobalPoolDistributedTotal + settlementDistributedTotal,
+    );
+
+    const seenReserves = new Set<string>();
+    let pendingReserveCount = 0;
+    let pendingReserveTotal = 0;
+    let settledReserveCount = 0;
+    let settledReserveTotal = 0;
+    let cancelledReserveCount = 0;
+    let cancelledReserveTotal = 0;
+
+    for (const resv of gpState.reserves || []) {
+      const key = String(resv.paymentId || "").trim() || resv.id;
+      if (seenReserves.has(key)) continue;
+      seenReserves.add(key);
+      const st = String(resv.status || "")
+        .trim()
+        .toLowerCase();
+      const amt = Number(resv.reserveAmount) || 0;
+      if (st === "pending") {
+        pendingReserveCount += 1;
+        pendingReserveTotal += amt;
+      } else if (st === "settled") {
+        settledReserveCount += 1;
+        settledReserveTotal += amt;
+      } else if (st === "cancelled") {
+        cancelledReserveCount += 1;
+        cancelledReserveTotal += amt;
+      }
+    }
+
+    const eligibleVideos = (store.videos || []).filter(
+      (v: any) =>
+        (v.video_type === "premium" || v.payment_status === "paid") &&
+        Number(v.is_blocked || 0) === 0,
+    );
+    const eligibleCreatorSet = new Set(
+      eligibleVideos
+        .map((v: any) =>
+          String(v.user_id || "")
+            .trim()
+            .toUpperCase(),
+        )
+        .filter(Boolean),
+    );
+
+    return jsonResponse({
+      success: true,
+      personal: {
+        userId: targetUserId,
+        hasWalletRow,
+        totalIncome: personalTotalIncome,
+        globalIncome: personalGlobalIncome,
+        balance,
+        totalWithdrawn,
+        walletTotalEarned,
+        walletGlobalIncome,
+        ledgerTotalEarned,
+        ledgerGlobalIncome,
+        walletVsLedgerDiff,
+        globalTxCount,
+        source: personalSource,
+      },
+      platform: {
+        totalPremiumTransactions,
+        totalTransactionAmount: roundMoney(totalTransactionAmount),
+        referralAllocationTotal: roundMoney(referralAllocationTotal),
+        adminAllocationTotal: roundMoney(adminAllocationTotal),
+        gstTotal: roundMoney(gstTotal),
+        pgFeeTotal: roundMoney(pgFeeTotal),
+        globalPoolAllocationTotal: roundMoney(globalPoolAllocationTotal),
+        immediateGlobalPoolDistributedTotal: roundMoney(immediateGlobalPoolDistributedTotal),
+        settlementBatchCount,
+        settlementDistributedTotal,
+        globalPoolDistributedTotal,
+        pendingReserveCount,
+        pendingReserveTotal: roundMoney(pendingReserveTotal),
+        settledReserveCount,
+        settledReserveTotal: roundMoney(settledReserveTotal),
+        cancelledReserveCount,
+        cancelledReserveTotal: roundMoney(cancelledReserveTotal),
+        eligibleCreatorCount: eligibleCreatorSet.size,
+        eligibleVideoCount: eligibleVideos.length,
+      },
+    });
   }
 
   if (route === "wallet/transactions") {

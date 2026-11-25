@@ -433,6 +433,49 @@ if (($preOrder['status'] ?? '') === 'paid') {
     }
 }
 
+// Pre-capture Global Pool reserve readiness check for ₹6 Sponsor uploads
+// Runs AFTER auth, HMAC signature, order ownership/amount validation, and paid-order fast-path idempotency,
+// and BEFORE Razorpay lookup / auto-capture so authorized payments are never captured when reserve schema is missing.
+$preHasGlobalPoolReservesTable = false;
+if ($prePurpose === 'premium_video_upload') {
+    try {
+        $preTblStmt = $pdo->query("
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'global_pool_reserves'
+            LIMIT 1
+        ");
+        $preTblRows = $preTblStmt ? $preTblStmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        $preHasGlobalPoolReservesTable = count($preTblRows) > 0;
+    } catch (Throwable $ePreTblCheck) {
+        error_log('[verify.php] Pre-capture Global Pool reserve readiness check failed: ' . $ePreTblCheck->getMessage());
+        if ($isConnectionUnavailable($ePreTblCheck)) {
+            jsonResponse([
+                'verified' => false,
+                'paymentId' => $paymentId,
+                'orderId' => $orderId,
+                'error' => 'Database connection unavailable while checking Global Pool reserve readiness. Payment was not captured.'
+            ], 503);
+        }
+        jsonResponse([
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'error' => 'Unable to verify Global Pool reserve schema readiness. Payment was not captured.'
+        ], 503);
+    }
+
+    if (!$preHasGlobalPoolReservesTable) {
+        jsonResponse([
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'error' => 'Global Pool reserve schema migration has not been applied yet. Payment was not captured.'
+        ], 503);
+    }
+}
+
 // -----------------------------------------------------------------------------
 // 2. REMOTE GATEWAY STATUS VERIFICATION VIA RAZORPAY REST API (cURL)
 // -----------------------------------------------------------------------------
@@ -547,7 +590,7 @@ $hasPremRefStatusCol = false;
 $hasPremPoolDistCol = false;
 $hasPremPoolResCol = false;
 $hasPremPoolStatusCol = false;
-$hasGlobalPoolReservesTable = false;
+$hasGlobalPoolReservesTable = $preHasGlobalPoolReservesTable;
 $hasReserveReasonInsufficientEnum = false;
 try {
     $colStmt = $pdo->query("
@@ -612,19 +655,21 @@ try {
             }
         }
     }
-} catch (Exception $eColCheck) {
-    // Keep safe false defaults if metadata query fails
+} catch (Throwable $eColCheck) {
+    error_log('[verify.php] Schema column metadata check failed: ' . $eColCheck->getMessage());
 }
-try {
-    $tblStmt = $pdo->query("
-        SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'global_pool_reserves'
-    ");
-    if ($tblStmt && count($tblStmt->fetchAll(PDO::FETCH_ASSOC)) > 0) {
-        $hasGlobalPoolReservesTable = true;
+if (!$hasGlobalPoolReservesTable) {
+    try {
+        $tblStmt = $pdo->query("
+            SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'global_pool_reserves'
+        ");
+        if ($tblStmt && count($tblStmt->fetchAll(PDO::FETCH_ASSOC)) > 0) {
+            $hasGlobalPoolReservesTable = true;
+        }
+    } catch (Throwable $eTblCheck) {
+        error_log('[verify.php] Global Pool reserve table check failed: ' . $eTblCheck->getMessage());
     }
-} catch (Exception $eTblCheck) {
-    // Keep safe false default
 }
 $hasPtAccountingCols = ($hasPtGstCol && $hasPtPgFeeCol && $hasPtRefStatusCol);
 $hasPtPoolBreakdownCols = ($hasPtPoolDistCol && $hasPtPoolResCol && $hasPtPoolStatusCol);

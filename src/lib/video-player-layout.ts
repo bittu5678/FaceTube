@@ -21,6 +21,58 @@ export function resolvePlayerAspectMode(
     : "standard";
 }
 
+export interface PlayerIntrinsicDimensions {
+  width: number;
+  height: number;
+  aspectRatio: number;
+}
+
+/**
+ * Resolves the effective intrinsic width, height, and aspect ratio of a video,
+ * swapping dimensions for 90deg / 270deg quarter-turn rotations.
+ * Returns null until valid metadata dimensions (> 0) are available.
+ */
+export function resolveEffectiveVideoDimensions(
+  videoW: number,
+  videoH: number,
+  rotationDeg = 0,
+): PlayerIntrinsicDimensions | null {
+  if (!Number.isFinite(videoW) || !Number.isFinite(videoH) || videoW <= 0 || videoH <= 0) {
+    return null;
+  }
+  const isQuarterTurn = Math.abs(rotationDeg % 180) === 90;
+  const width = isQuarterTurn ? videoH : videoW;
+  const height = isQuarterTurn ? videoW : videoH;
+  return {
+    width,
+    height,
+    aspectRatio: width / height,
+  };
+}
+
+/**
+ * Returns responsive inline CSS dimensions for FaceTubeVideoPlayer once video metadata is loaded.
+ * Preserves the exact effective intrinsic aspect ratio (portrait, square, landscape, ultrawide)
+ * while clamping width against both 100% of available column width and 80vh height so there is
+ * no overflow and no unnecessary black letterboxing above/below the video.
+ * Returns null in fullscreen or before metadata loads so fallback classes apply.
+ */
+export function getPlayerIntrinsicContainerStyle(
+  videoW: number,
+  videoH: number,
+  rotationDeg = 0,
+  isFullscreen = false,
+): { width: string; maxWidth: string; aspectRatio: string } | null {
+  if (isFullscreen) return null;
+  const dims = resolveEffectiveVideoDimensions(videoW, videoH, rotationDeg);
+  if (!dims) return null;
+  return {
+    width: `min(100%, calc(80vh * ${dims.width} / ${dims.height}))`,
+    maxWidth: "100%",
+    aspectRatio: `${dims.width} / ${dims.height}`,
+  };
+}
+
 /**
  * Computes the exact fitted width and height for a video inside a container
  * while preserving the original video aspect ratio (no stretching or cropping),
