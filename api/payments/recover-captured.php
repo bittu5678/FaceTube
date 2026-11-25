@@ -361,7 +361,25 @@ $description = array_key_exists('description', $input)
     ? trim((string)$input['description'])
     : trim((string)($preExistingVideo['description'] ?? ''));
 
-$rawVideoUrl = trim((string)($input['videoUrl'] ?? ($input['video_url'] ?? ($preExistingVideo['video_url'] ?? ''))));
+$rawClientVideoUrl = trim((string)($input['videoUrl'] ?? ($input['video_url'] ?? '')));
+$existingVideoCanonicalPath = ($preExistingVideo && !empty($preExistingVideo['video_url']))
+    ? ftExtractCanonicalVideoAssetRelativePathPhp((string)$preExistingVideo['video_url'])
+    : null;
+if ($preExistingVideo && !empty($preExistingVideo['video_url']) && $rawClientVideoUrl !== '') {
+    $clientCanonicalPath = ftExtractCanonicalVideoAssetRelativePathPhp($rawClientVideoUrl);
+    if (!$existingVideoCanonicalPath || !$clientCanonicalPath || $clientCanonicalPath !== $existingVideoCanonicalPath) {
+        jsonResponse([
+            'recovered' => false,
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'videoId' => $videoId,
+            'error' => "Conflict: Cannot overwrite existing video's verified asset URL during recovery.",
+        ], 409);
+    }
+}
+
+$rawVideoUrl = $rawClientVideoUrl !== '' ? $rawClientVideoUrl : trim((string)($preExistingVideo['video_url'] ?? ''));
 $assetValidation = ftValidateUploadedVideoAssetPhp($rawVideoUrl);
 if (empty($assetValidation['valid'])) {
     jsonResponse([
@@ -375,6 +393,20 @@ if (empty($assetValidation['valid'])) {
     ], (int)($assetValidation['status'] ?? 422));
 }
 $resolvedVideoUrl = (string)$assetValidation['publicUrl'];
+
+if (!empty($preOrder['video_url']) && trim((string)$preOrder['video_url']) !== '') {
+    $orderAssetCanon = ftExtractCanonicalVideoAssetRelativePathPhp((string)$preOrder['video_url']);
+    if (!$orderAssetCanon || $orderAssetCanon !== $assetValidation['relativePath']) {
+        jsonResponse([
+            'recovered' => false,
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'videoId' => $videoId,
+            'error' => 'Conflict: Original payment order is linked to a different uploaded video asset.',
+        ], 409);
+    }
+}
 
 $rawContentType = trim((string)($input['contentType'] ?? ($input['content_type'] ?? ($preOrder['content_type'] ?? ($preExistingVideo['content_type'] ?? 'long')))));
 $contentType = strtolower($rawContentType ?: 'long');
@@ -427,7 +459,7 @@ if ($creatorName === '') {
     $creatorName = 'FaceTube Creator';
 }
 
-// 6. Verify Global Pool reserve schema readiness BEFORE fetching Razorpay or modifying DB
+// 6. Verify Global Pool reserve schema readiness BEFORE uploaded_video_assets check, Razorpay lookup, or DB writes
 $reserveSchema = ftCheckGlobalPoolReserveSchemaReadyPhp($pdo);
 if (empty($reserveSchema['ready'])) {
     jsonResponse([
@@ -438,6 +470,90 @@ if (empty($reserveSchema['ready'])) {
         'videoId' => $videoId,
         'error' => $reserveSchema['error'] ?? 'Global Pool reserve schema is not ready.',
     ], (int)($reserveSchema['status'] ?? 503));
+}
+
+// 6b. Verify uploaded_video_assets ownership BEFORE Razorpay lookup or settlement
+$hasMatchedExistingVideoRecord = (
+    $preExistingVideo
+    && strcasecmp((string)$preExistingVideo['user_id'], $orderUserId) === 0
+    && $existingVideoCanonicalPath
+    && $existingVideoCanonicalPath === $assetValidation['relativePath']
+);
+$hasUploadAssetsTable = false;
+try {
+    $hasUploadAssetsTable = ftCheckUploadAssetsTableExistsPhp($pdo);
+    if ($hasUploadAssetsTable) {
+        $stmtAsset = $pdo->prepare('SELECT * FROM uploaded_video_assets WHERE relative_path = ? LIMIT 1');
+        $stmtAsset->execute([$assetValidation['relativePath']]);
+        $assetRow = $stmtAsset->fetch(PDO::FETCH_ASSOC) ?: null;
+        if (!$assetRow) {
+            if (!$hasMatchedExistingVideoRecord) {
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'missingAsset' => 'video_file',
+                    'error' => 'Uploaded video asset ownership record is missing. Please re-upload your video file while signed in.',
+                ], 422);
+            }
+        } else {
+            if (strcasecmp(trim((string)($assetRow['user_id'] ?? '')), $orderUserId) !== 0) {
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'error' => 'Unauthorized: Uploaded video asset belongs to a different user.',
+                ], 403);
+            }
+            $assetVideoId = trim((string)($assetRow['video_id'] ?? ''));
+            if ($assetVideoId !== '' && $assetVideoId !== $videoId) {
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'error' => 'Conflict: Uploaded video asset is already linked to a different video.',
+                ], 409);
+            }
+            $assetOrderId = trim((string)($assetRow['order_id'] ?? ''));
+            if ($assetOrderId !== '' && $assetOrderId !== $orderId) {
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'error' => 'Conflict: Uploaded video asset is already linked to a different payment order.',
+                ], 409);
+            }
+        }
+    } elseif (!$hasMatchedExistingVideoRecord) {
+        jsonResponse([
+            'recovered' => false,
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'videoId' => $videoId,
+            'error' => 'Upload asset ownership tracking schema (uploaded_video_assets) has not been applied yet. Recovery aborted safely before settlement.',
+        ], 503);
+    }
+} catch (Throwable $assetDbErr) {
+    error_log('[recover-captured.php] Asset ownership lookup error: ' . $assetDbErr->getMessage());
+    jsonResponse([
+        'recovered' => false,
+        'verified' => false,
+        'paymentId' => $paymentId,
+        'orderId' => $orderId,
+        'videoId' => $videoId,
+        'error' => ftIsConnectionUnavailablePhp($assetDbErr)
+            ? 'Database connection unavailable while verifying uploaded asset ownership.'
+            : 'Database error verifying uploaded asset ownership.',
+    ], ftIsConnectionUnavailablePhp($assetDbErr) ? 503 : 500);
 }
 
 // 7. Fetch original payment directly from Razorpay API (GET ONLY — NEVER capture/order/refund)
@@ -702,6 +818,114 @@ try {
                 'error' => 'Conflict: Video is already linked to a different payment ID.',
             ], 409);
         }
+        if (!empty($lockedVideo['video_url']) && $rawClientVideoUrl !== '') {
+            $lockedCanon = ftExtractCanonicalVideoAssetRelativePathPhp((string)$lockedVideo['video_url']);
+            if (!$lockedCanon || $lockedCanon !== $assetValidation['relativePath']) {
+                ftSafeRollbackPhp($pdo);
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'error' => "Conflict: Cannot overwrite existing video's verified asset URL during recovery.",
+                ], 409);
+            }
+        }
+    }
+
+    if (!empty($lockedOrder['video_url']) && trim((string)$lockedOrder['video_url']) !== '') {
+        $lockedOrderAsset = ftExtractCanonicalVideoAssetRelativePathPhp((string)$lockedOrder['video_url']);
+        if (!$lockedOrderAsset || $lockedOrderAsset !== $assetValidation['relativePath']) {
+            ftSafeRollbackPhp($pdo);
+            jsonResponse([
+                'recovered' => false,
+                'verified' => false,
+                'paymentId' => $paymentId,
+                'orderId' => $orderId,
+                'videoId' => $videoId,
+                'error' => 'Conflict: Original payment order is linked to a different uploaded video asset.',
+            ], 409);
+        }
+    }
+
+    $lockedExistingMatchesAsset = (
+        $lockedVideo
+        && strcasecmp((string)$lockedVideo['user_id'], $orderUserId) === 0
+        && ftExtractCanonicalVideoAssetRelativePathPhp((string)($lockedVideo['video_url'] ?? '')) === $assetValidation['relativePath']
+    );
+    if ($hasUploadAssetsTable) {
+        $stmtLockedAsset = $pdo->prepare('SELECT * FROM uploaded_video_assets WHERE relative_path = ? FOR UPDATE');
+        $stmtLockedAsset->execute([$assetValidation['relativePath']]);
+        $lockedAssetRow = $stmtLockedAsset->fetch(PDO::FETCH_ASSOC) ?: null;
+        if (!$lockedAssetRow) {
+            if (!$lockedExistingMatchesAsset) {
+                ftSafeRollbackPhp($pdo);
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'missingAsset' => 'video_file',
+                    'error' => 'Uploaded video asset ownership record is missing. Please re-upload your video file while signed in.',
+                ], 422);
+            }
+        } else {
+            if (strcasecmp(trim((string)($lockedAssetRow['user_id'] ?? '')), $orderUserId) !== 0) {
+                ftSafeRollbackPhp($pdo);
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'error' => 'Unauthorized: Uploaded video asset belongs to a different user.',
+                ], 403);
+            }
+            $lockedAssetVid = trim((string)($lockedAssetRow['video_id'] ?? ''));
+            if ($lockedAssetVid !== '' && $lockedAssetVid !== $videoId) {
+                ftSafeRollbackPhp($pdo);
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'error' => 'Conflict: Uploaded video asset is already linked to a different video.',
+                ], 409);
+            }
+            $lockedAssetOrd = trim((string)($lockedAssetRow['order_id'] ?? ''));
+            if ($lockedAssetOrd !== '' && $lockedAssetOrd !== $orderId) {
+                ftSafeRollbackPhp($pdo);
+                jsonResponse([
+                    'recovered' => false,
+                    'verified' => false,
+                    'paymentId' => $paymentId,
+                    'orderId' => $orderId,
+                    'videoId' => $videoId,
+                    'error' => 'Conflict: Uploaded video asset is already linked to a different payment order.',
+                ], 409);
+            }
+            $stmtBindAsset = $pdo->prepare("
+                UPDATE uploaded_video_assets
+                SET video_id = COALESCE(NULLIF(video_id, ''), ?),
+                    order_id = COALESCE(NULLIF(order_id, ''), ?),
+                    updated_at = NOW()
+                WHERE id = ?
+            ");
+            $stmtBindAsset->execute([$videoId, $orderId, $lockedAssetRow['id']]);
+        }
+    } elseif (!$lockedExistingMatchesAsset) {
+        ftSafeRollbackPhp($pdo);
+        jsonResponse([
+            'recovered' => false,
+            'verified' => false,
+            'paymentId' => $paymentId,
+            'orderId' => $orderId,
+            'videoId' => $videoId,
+            'error' => 'Upload asset ownership tracking schema (uploaded_video_assets) has not been applied yet. Recovery aborted safely before settlement.',
+        ], 503);
     }
 
     // Check if payment settlement already exists

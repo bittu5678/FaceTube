@@ -13,6 +13,7 @@
 
 require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../response.php';
+require_once __DIR__ . '/premium-settlement.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed'], 405);
@@ -137,6 +138,62 @@ if ($purpose === 'ads_promotion') {
 
 $amountInSubunits = (int)round($amount * 100);
 
+// 3.25 Optional uploaded video asset ownership validation & binding
+$boundVideoUrlPath = null;
+$rawOrderVideoUrl = trim((string)($input['videoUrl'] ?? ($input['video_url'] ?? '')));
+if ($rawOrderVideoUrl !== '') {
+    $canonOrderAssetPath = ftExtractCanonicalVideoAssetRelativePathPhp($rawOrderVideoUrl);
+    if (!$canonOrderAssetPath) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Invalid videoUrl format. Asset must reference /uploads/videos/.',
+        ], 400);
+    }
+
+    try {
+        if (!ftCheckUploadAssetsTableExistsPhp($pdo)) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Upload asset ownership tracking schema (uploaded_video_assets) has not been applied yet. Payment order was not created.',
+            ], 503);
+        }
+        $stmtAssetOrder = $pdo->prepare('SELECT user_id, video_id, order_id FROM uploaded_video_assets WHERE relative_path = ? LIMIT 1');
+        $stmtAssetOrder->execute([$canonOrderAssetPath]);
+        $assetRowOrder = $stmtAssetOrder->fetch(PDO::FETCH_ASSOC) ?: null;
+        if (!$assetRowOrder) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Uploaded video asset ownership record was not found. Please re-upload your video file while signed in.',
+            ], 422);
+        }
+        if (strcasecmp(trim((string)($assetRowOrder['user_id'] ?? '')), $effectiveUserId) !== 0) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Unauthorized: Uploaded video asset belongs to another user.',
+            ], 403);
+        }
+        $assetVid = trim((string)($assetRowOrder['video_id'] ?? ''));
+        if ($assetVid !== '' && $videoId !== '' && $assetVid !== $videoId) {
+            jsonResponse([
+                'success' => false,
+                'error' => 'Conflict: Uploaded video asset is already linked to another video.',
+            ], 409);
+        }
+    } catch (Throwable $eAssetOrder) {
+        error_log('[create-order.php] Asset lookup error: ' . $eAssetOrder->getMessage());
+        $isConnErr = function_exists('isDatabaseConnectionUnavailableError')
+            && isDatabaseConnectionUnavailableError($eAssetOrder);
+        jsonResponse([
+            'success' => false,
+            'error' => $isConnErr
+                ? 'Database connection unavailable verifying uploaded video asset ownership.'
+                : 'Database error verifying uploaded video asset ownership.',
+        ], $isConnErr ? 503 : 500);
+    }
+
+    $boundVideoUrlPath = $canonOrderAssetPath;
+}
+
 // 3.5 Pre-order Global Pool reserve schema readiness check (₹6 Sponsor upload only)
 if ($purpose === 'premium_video_upload') {
     try {
@@ -238,6 +295,25 @@ try {
             'success' => false,
             'error' => 'Failed to persist payment order in database. Please try again.'
         ], 500);
+    }
+    if ($boundVideoUrlPath !== null) {
+        try {
+            $stmtHasPoCol = $pdo->query("
+                SELECT COLUMN_NAME
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'payment_orders'
+                  AND COLUMN_NAME = 'video_url'
+                LIMIT 1
+            ");
+            $poColRows = $stmtHasPoCol ? $stmtHasPoCol->fetchAll(PDO::FETCH_ASSOC) : [];
+            if (!empty($poColRows)) {
+                $stmtPoAsset = $pdo->prepare('UPDATE payment_orders SET video_url = ? WHERE order_id = ?');
+                $stmtPoAsset->execute([$boundVideoUrlPath, $orderId]);
+            }
+        } catch (Throwable $_ePoAssetCol) {
+            // Preserve compatibility with pre-migration schemas
+        }
     }
 } catch (Throwable $ePo) {
     error_log('[create-order.php] Database error persisting payment_orders: ' . $ePo->getMessage());

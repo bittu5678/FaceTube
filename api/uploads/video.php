@@ -4,10 +4,122 @@
  * POST /api/uploads/video.php
  */
 
+require_once __DIR__ . '/../config/database.php';
 require_once __DIR__ . '/../response.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     jsonResponse(['success' => false, 'error' => 'Method Not Allowed. Use POST to upload video files.'], 405);
+}
+
+$pdo = getDatabaseConnection();
+
+// 1. Strict session authentication check
+try {
+    $authUser = getAuthUser($pdo, true);
+} catch (Throwable $authErr) {
+    error_log('[uploads/video.php] Auth DB error: ' . $authErr->getMessage());
+    $isConnErr = function_exists('isDatabaseConnectionUnavailableError')
+        && isDatabaseConnectionUnavailableError($authErr);
+    jsonResponse([
+        'success' => false,
+        'error' => $isConnErr
+            ? 'Database connection unavailable during authentication.'
+            : 'Authentication service error during video upload.',
+    ], $isConnErr ? 503 : 500);
+}
+
+if (!$authUser) {
+    jsonResponse([
+        'success' => false,
+        'error' => 'Authentication required. Please log in before uploading a video file.',
+    ], 401);
+}
+
+$uploaderUserId = trim((string)($authUser['user_id'] ?? ''));
+$optionalVideoId = trim((string)($_POST['videoId'] ?? ($_POST['video_id'] ?? '')));
+$optionalOrderId = trim((string)($_POST['orderId'] ?? ($_POST['order_id'] ?? '')));
+
+// 2. Validate optional orderId / videoId ownership before saving media
+if ($optionalOrderId !== '') {
+    try {
+        $stmtOrd = $pdo->prepare('SELECT order_id, user_id, video_id FROM payment_orders WHERE order_id = ? LIMIT 1');
+        $stmtOrd->execute([$optionalOrderId]);
+        $orderRow = $stmtOrd->fetch(PDO::FETCH_ASSOC);
+    } catch (Throwable $ordErr) {
+        error_log('[uploads/video.php] Order lookup error: ' . $ordErr->getMessage());
+        $isConnErr = function_exists('isDatabaseConnectionUnavailableError')
+            && isDatabaseConnectionUnavailableError($ordErr);
+        jsonResponse([
+            'success' => false,
+            'error' => $isConnErr
+                ? 'Database connection unavailable verifying linked payment order.'
+                : 'Database error verifying linked payment order.',
+        ], $isConnErr ? 503 : 500);
+    }
+    if (!$orderRow) {
+        jsonResponse(['success' => false, 'error' => 'Linked payment order was not found.'], 404);
+    }
+    if (strcasecmp(trim((string)($orderRow['user_id'] ?? '')), $uploaderUserId) !== 0) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Unauthorized: Cannot link video upload to another user\'s payment order.',
+        ], 403);
+    }
+    $ordVid = trim((string)($orderRow['video_id'] ?? ''));
+    if ($optionalVideoId !== '' && $ordVid !== '' && $ordVid !== $optionalVideoId) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Conflict: Uploaded videoId does not match linked payment order video_id.',
+        ], 409);
+    }
+}
+
+if ($optionalVideoId !== '') {
+    try {
+        $stmtVid = $pdo->prepare('SELECT id, user_id FROM uploaded_videos WHERE id = ? LIMIT 1');
+        $stmtVid->execute([$optionalVideoId]);
+        $vidRow = $stmtVid->fetch(PDO::FETCH_ASSOC);
+    } catch (Throwable $vidErr) {
+        error_log('[uploads/video.php] Video lookup error: ' . $vidErr->getMessage());
+        $isConnErr = function_exists('isDatabaseConnectionUnavailableError')
+            && isDatabaseConnectionUnavailableError($vidErr);
+        jsonResponse([
+            'success' => false,
+            'error' => $isConnErr
+                ? 'Database connection unavailable verifying linked video.'
+                : 'Database error verifying linked video.',
+        ], $isConnErr ? 503 : 500);
+    }
+    if ($vidRow && strcasecmp(trim((string)($vidRow['user_id'] ?? '')), $uploaderUserId) !== 0) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Unauthorized: Cannot attach video upload to another user\'s video record.',
+        ], 403);
+    }
+}
+
+// 3. Fail closed if uploaded_video_assets tracking schema has not been applied
+try {
+    $stmtTbl = $pdo->query("
+        SELECT TABLE_NAME
+        FROM INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME = 'uploaded_video_assets'
+        LIMIT 1
+    ");
+    $tblRows = $stmtTbl ? $stmtTbl->fetchAll(PDO::FETCH_ASSOC) : [];
+    if (empty($tblRows)) {
+        jsonResponse([
+            'success' => false,
+            'error' => 'Upload asset ownership tracking schema (uploaded_video_assets) has not been applied yet. Video upload aborted safely.',
+        ], 503);
+    }
+} catch (Throwable $tblErr) {
+    error_log('[uploads/video.php] Schema check error: ' . $tblErr->getMessage());
+    jsonResponse([
+        'success' => false,
+        'error' => 'Database error verifying upload asset ownership schema.',
+    ], 503);
 }
 
 // Ensure destination storage directory exists and is writable in the public web root
@@ -116,19 +228,59 @@ if (!@move_uploaded_file($tmpName, $target)) {
 }
 
 // Sync to secondary storage directories (e.g. root uploads/) so both docroots stay consistent
+$savedFiles = [$target];
 $allDirs = getMediaStorageDirectories('videos');
 foreach ($allDirs as $otherDir) {
     if ($otherDir !== $uploadDir && is_dir($otherDir) && is_writable($otherDir)) {
-        @copy($target, $otherDir . $fileName);
+        if (@copy($target, $otherDir . $fileName)) {
+            $savedFiles[] = $otherDir . $fileName;
+        }
     }
 }
 
+$relativePath = '/uploads/videos/' . $fileName;
+$publicUrl = toAbsoluteMediaUrl($relativePath, 'videos');
+$assetId = 'ast_' . round(microtime(true) * 1000) . '_' . bin2hex(random_bytes(6));
+
+try {
+    $stmtAsset = $pdo->prepare('
+        INSERT INTO uploaded_video_assets
+            (id, user_id, file_name, relative_path, public_url, video_id, order_id, size_bytes, format, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+    ');
+    $stmtAsset->execute([
+        $assetId,
+        $uploaderUserId,
+        $fileName,
+        $relativePath,
+        $publicUrl,
+        $optionalVideoId !== '' ? $optionalVideoId : null,
+        $optionalOrderId !== '' ? $optionalOrderId : null,
+        (int)$fileSize,
+        $ext,
+    ]);
+} catch (Throwable $assetErr) {
+    foreach ($savedFiles as $sf) {
+        @unlink($sf);
+    }
+    error_log('[uploads/video.php] Failed to persist asset ownership row: ' . $assetErr->getMessage());
+    $isConnErr = function_exists('isDatabaseConnectionUnavailableError')
+        && isDatabaseConnectionUnavailableError($assetErr);
+    jsonResponse([
+        'success' => false,
+        'error' => $isConnErr
+            ? 'Database connection unavailable recording uploaded asset ownership.'
+            : 'Database error recording uploaded asset ownership.',
+    ], $isConnErr ? 503 : 500);
+}
+
 $fileSizeMb = round($fileSize / (1024 * 1024), 2) . ' MB';
-$publicUrl = toAbsoluteMediaUrl('/uploads/videos/' . $fileName, 'videos');
 
 jsonResponse([
     'success' => true,
+    'assetId' => $assetId,
     'url' => $publicUrl,
+    'relativePath' => $relativePath,
     'fileName' => $fileName,
     'format' => $ext,
     'fileSize' => $fileSizeMb,

@@ -352,6 +352,59 @@ if (!function_exists('ftValidateUploadedVideoAssetPhp')) {
     }
 }
 
+if (!function_exists('ftExtractCanonicalVideoAssetRelativePathPhp')) {
+    function ftExtractCanonicalVideoAssetRelativePathPhp(?string $rawUrl): ?string {
+        $trimmed = trim((string)$rawUrl);
+        if ($trimmed === '' || str_contains($trimmed, "\0")) {
+            return null;
+        }
+        $candidatePath = $trimmed;
+        if (preg_match('/^https?:\/\//i', $trimmed)) {
+            $parsed = @parse_url($trimmed);
+            if (!is_array($parsed) || empty($parsed['host']) || empty($parsed['path'])) {
+                return null;
+            }
+            $urlHost = strtolower((string)$parsed['host']);
+            $serverHost = strtolower(preg_replace('/:\d+$/', '', (string)($_SERVER['HTTP_HOST'] ?? ($_SERVER['SERVER_NAME'] ?? ''))));
+            $allowedLocalHosts = array_filter([
+                'api.facetube.online',
+                'facetube.online',
+                'www.facetube.online',
+                'localhost',
+                '127.0.0.1',
+                $serverHost,
+            ]);
+            if (!in_array($urlHost, $allowedLocalHosts, true)) {
+                return null;
+            }
+            $candidatePath = (string)$parsed['path'];
+        }
+        $decoded = rawurldecode($candidatePath);
+        if (str_contains($decoded, "\0") || str_contains($decoded, '..') || str_contains($decoded, '\\')) {
+            return null;
+        }
+        $normalized = str_replace('\\', '/', $decoded);
+        if (!preg_match('/^\/?(?:api\/)?(uploads\/videos\/([A-Za-z0-9._-]+))$/', $normalized, $matches) || empty($matches[2])) {
+            return null;
+        }
+        return '/uploads/videos/' . $matches[2];
+    }
+}
+
+if (!function_exists('ftCheckUploadAssetsTableExistsPhp')) {
+    function ftCheckUploadAssetsTableExistsPhp(PDO $conn): bool {
+        $stmt = $conn->query("
+            SELECT TABLE_NAME
+            FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+              AND TABLE_NAME = 'uploaded_video_assets'
+            LIMIT 1
+        ");
+        $rows = $stmt ? $stmt->fetchAll(PDO::FETCH_ASSOC) : [];
+        return !empty($rows);
+    }
+}
+
 if (!function_exists('ftResolveDuplicateReferrerIdPhp')) {
     function ftResolveDuplicateReferrerIdPhp(PDO $conn, array $existingTx): ?string {
         $dupIsPremium = ($existingTx['purpose'] ?? '') === 'premium_video_upload';

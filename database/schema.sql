@@ -274,6 +274,7 @@ CREATE TABLE IF NOT EXISTS `payment_orders` (
   `user_id` VARCHAR(50) NOT NULL,
   `user_name` VARCHAR(255) DEFAULT 'Creator',
   `video_id` VARCHAR(100) DEFAULT NULL,
+  `video_url` VARCHAR(500) DEFAULT NULL,
   `purpose` VARCHAR(50) NOT NULL,
   `plan_id` VARCHAR(50) DEFAULT NULL,
   `content_type` VARCHAR(20) DEFAULT NULL,
@@ -291,6 +292,29 @@ CREATE TABLE IF NOT EXISTS `payment_orders` (
   KEY `idx_po_payment_id` (`payment_id`),
   KEY `idx_po_status` (`status`),
   KEY `idx_po_created_at` (`created_at` DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------------------------
+-- 9d. Table: uploaded_video_assets
+-- Authenticated upload asset ownership tracking for safe media recovery
+-- ------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `uploaded_video_assets` (
+  `id` VARCHAR(64) NOT NULL,
+  `user_id` VARCHAR(50) NOT NULL,
+  `file_name` VARCHAR(255) NOT NULL,
+  `relative_path` VARCHAR(255) NOT NULL,
+  `public_url` VARCHAR(500) NOT NULL,
+  `video_id` VARCHAR(64) DEFAULT NULL,
+  `order_id` VARCHAR(100) DEFAULT NULL,
+  `size_bytes` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  `format` VARCHAR(20) NOT NULL DEFAULT 'mp4',
+  `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_uva_relative_path` (`relative_path`),
+  KEY `idx_uva_user_id` (`user_id`),
+  KEY `idx_uva_video_id` (`video_id`),
+  KEY `idx_uva_order_id` (`order_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 

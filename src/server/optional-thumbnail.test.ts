@@ -459,14 +459,32 @@ describe("Task 14: Optional Video Thumbnail (Cover Image) Regression Suite", () 
   });
 
   describe("5. Video Upload Validation, Security & PHP Parity Preservation", () => {
-    it("continues rejecting invalid video files on client and server /api/uploads/video", async () => {
+    it("continues rejecting unauthenticated uploads (401) and invalid video files (400) on /api/uploads/video", async () => {
       const badFile = new File(["not a video"], "trojan.exe", { type: "application/x-msdownload" });
       assert.equal(validateVideoFileForUpload(badFile).valid, false);
+
+      // Unauthenticated upload attempt must fail closed with 401
+      const unauthForm = new FormData();
+      unauthForm.append("video", new File(["vid"], "clip.mp4", { type: "video/mp4" }));
+      const resUnauth = await handleApiRequest(
+        new Request("http://localhost:3000/api/uploads/video", {
+          method: "POST",
+          body: unauthForm,
+        }),
+      );
+      assert.ok(resUnauth);
+      assert.equal(resUnauth.status, 401);
+
+      const authHeaders = { Authorization: `Bearer ${userToken}` };
 
       const formBad = new FormData();
       formBad.append("video", badFile);
       const resBad = await handleApiRequest(
-        new Request("http://localhost:3000/api/uploads/video", { method: "POST", body: formBad }),
+        new Request("http://localhost:3000/api/uploads/video", {
+          method: "POST",
+          headers: authHeaders,
+          body: formBad,
+        }),
       );
       assert.ok(resBad);
       assert.equal(resBad.status, 400);
@@ -474,7 +492,11 @@ describe("Task 14: Optional Video Thumbnail (Cover Image) Regression Suite", () 
       const formEmpty = new FormData();
       formEmpty.append("video", new File([], "empty.mp4", { type: "video/mp4" }));
       const resEmpty = await handleApiRequest(
-        new Request("http://localhost:3000/api/uploads/video", { method: "POST", body: formEmpty }),
+        new Request("http://localhost:3000/api/uploads/video", {
+          method: "POST",
+          headers: authHeaders,
+          body: formEmpty,
+        }),
       );
       assert.ok(resEmpty);
       assert.equal(resEmpty.status, 400);
@@ -482,6 +504,7 @@ describe("Task 14: Optional Video Thumbnail (Cover Image) Regression Suite", () 
       const resMissing = await handleApiRequest(
         new Request("http://localhost:3000/api/uploads/video", {
           method: "POST",
+          headers: authHeaders,
           body: new FormData(),
         }),
       );

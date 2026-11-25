@@ -3119,10 +3119,10 @@ function PremiumVideoUploadView({
       </div>
 
       {/* Captured Payment Recovery Trigger & Panel */}
-      <div className="rounded-2xl border border-amber-500/35 bg-amber-500/5 p-4 space-y-4">
+      <div className="rounded-2xl border border-pink-500/35 bg-pink-500/5 p-4 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div className="flex items-start gap-2.5">
-            <ShieldCheck className="h-5 w-5 shrink-0 text-amber-400 mt-0.5" />
+            <ShieldCheck className="h-5 w-5 shrink-0 text-pink-500 mt-0.5" />
             <div>
               <h2 className="text-sm font-bold text-foreground">
                 Recover Captured ₹6 Sponsor Payment (No Extra Charge)
@@ -3139,14 +3139,14 @@ function PremiumVideoUploadView({
               setShowRecoveryPanel((v) => !v);
               setRecoverError(null);
             }}
-            className="shrink-0 rounded-xl border border-amber-500/40 bg-amber-500/15 px-4 py-2 text-xs font-bold text-amber-300 hover:bg-amber-500/25 transition"
+            className="shrink-0 rounded-xl border border-pink-500/40 bg-pink-500/15 px-4 py-2 text-xs font-bold text-pink-600 dark:text-pink-300 hover:bg-pink-500/25 transition"
           >
             {showRecoveryPanel ? "Hide Recovery Form" : "Recover Payment"}
           </button>
         </div>
 
         {showRecoveryPanel && (
-          <div className="border-t border-amber-500/20 pt-4 space-y-4">
+          <div className="border-t border-pink-500/20 pt-4 space-y-4">
             {recoverResult ? (
               <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 space-y-3">
                 <div className="flex items-start gap-2.5">
@@ -3193,7 +3193,7 @@ function PremiumVideoUploadView({
                       value={recoverOrderId}
                       onChange={(e) => setRecoverOrderId(e.target.value)}
                       placeholder="order_..."
-                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-pink-500 focus:outline-none"
                     />
                   </div>
                   <div>
@@ -3205,7 +3205,7 @@ function PremiumVideoUploadView({
                       value={recoverPaymentId}
                       onChange={(e) => setRecoverPaymentId(e.target.value)}
                       placeholder="pay_..."
-                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-pink-500 focus:outline-none"
                     />
                   </div>
                   <div>
@@ -3217,7 +3217,7 @@ function PremiumVideoUploadView({
                       value={recoverVideoId}
                       onChange={(e) => setRecoverVideoId(e.target.value)}
                       placeholder="vid-..."
-                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-pink-500 focus:outline-none"
                     />
                   </div>
                 </div>
@@ -3232,7 +3232,7 @@ function PremiumVideoUploadView({
                       value={recoverTitle}
                       onChange={(e) => setRecoverTitle(e.target.value)}
                       placeholder="Sponsor video title"
-                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-pink-500 focus:outline-none"
                     />
                   </div>
                   <div>
@@ -3245,7 +3245,7 @@ function PremiumVideoUploadView({
                         value={recoverVideoUrl}
                         onChange={(e) => setRecoverVideoUrl(e.target.value)}
                         placeholder="/uploads/videos/your-video.mp4"
-                        className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                        className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-pink-500 focus:outline-none"
                       />
                       <input
                         ref={recoverFileInputRef}
@@ -3264,8 +3264,8 @@ function PremiumVideoUploadView({
                           setRecoverError(null);
                           try {
                             const up = await api.uploads.uploadVideo(file);
-                            if (up?.videoUrl) {
-                              setRecoverVideoUrl(up.videoUrl);
+                            if (up?.url) {
+                              setRecoverVideoUrl(up.url);
                               if (!recoverTitle.trim()) {
                                 setRecoverTitle(file.name.replace(/\.[^/.]+$/, ""));
                               }
@@ -3300,7 +3300,7 @@ function PremiumVideoUploadView({
                     value={recoverDescription}
                     onChange={(e) => setRecoverDescription(e.target.value)}
                     placeholder="Optional description (or leaves existing saved metadata)"
-                    className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                    className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-pink-500 focus:outline-none"
                   />
                 </div>
 
@@ -3332,10 +3332,15 @@ function PremiumVideoUploadView({
                       setRecovering(true);
                       try {
                         let resolvedThumb: string | undefined = undefined;
-                        if (customThumbnailFile || capturedThumbnail) {
+                        if (customThumbnailFile) {
+                          const uploadedThumb = await api.uploads.uploadImage(customThumbnailFile);
+                          if (uploadedThumb?.url) {
+                            resolvedThumb = uploadedThumb.url;
+                          }
+                        } else if (capturedThumbnail) {
                           resolvedThumb =
                             (await uploadThumbnailDataUrl(
-                              customThumbnailFile || capturedThumbnail,
+                              capturedThumbnail,
                               `recover-${recoverVideoId.trim() || Date.now()}`,
                             )) || undefined;
                         }
@@ -3363,8 +3368,8 @@ function PremiumVideoUploadView({
                           videoId: res.videoId || recoverVideoId.trim(),
                           paymentId: res.paymentId || recoverPaymentId.trim(),
                           orderId: res.orderId || recoverOrderId.trim(),
-                          message: res.message,
-                          duplicate: res.duplicate,
+                          ...(res.message ? { message: res.message } : {}),
+                          ...(res.duplicate !== undefined ? { duplicate: res.duplicate } : {}),
                         });
                         toast.success(res.message || "Captured payment recovered safely!");
                         onUploaded?.();
@@ -3376,7 +3381,7 @@ function PremiumVideoUploadView({
                         setRecovering(false);
                       }
                     }}
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-5 py-2.5 text-xs font-black text-slate-950 hover:bg-amber-400 transition disabled:opacity-50"
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-pink-600 px-5 py-2.5 text-xs font-black text-white hover:bg-pink-500 transition disabled:opacity-50"
                   >
                     {recovering ? (
                       <>

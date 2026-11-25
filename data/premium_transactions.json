@@ -3,8 +3,8 @@
   "transactions": [
     {
       "txNumber": 1,
-      "paymentId": "pay_p11_fb_1795600951710",
-      "orderId": "ord_p11_fb_1795600951710",
+      "paymentId": "pay_p11_fb_1795603642183",
+      "orderId": "ord_p11_fb_1795603642183",
       "videoId": "",
       "userId": "FT483921",
       "userName": "FaceTube Creator",
@@ -22,14 +22,14 @@
       "gstAmount": 0.9,
       "pgFee": 0.1,
       "referralStatus": "unassigned_pending",
-      "createdAt": "2026-11-25T10:02:31.710Z"
+      "createdAt": "2026-11-25T10:47:22.183Z"
     }
   ],
   "globalPoolReserves": [
     {
-      "id": "gpr_1795600951710_9a904ec0",
-      "paymentId": "pay_p11_fb_1795600951710",
-      "orderId": "ord_p11_fb_1795600951710",
+      "id": "gpr_1795603642183_1c0fa56a",
+      "paymentId": "pay_p11_fb_1795603642183",
+      "orderId": "ord_p11_fb_1795603642183",
       "txNumber": 1,
       "sourceUserId": "FT483921",
       "sourceVideoId": null,
@@ -37,18 +37,18 @@
       "reservePaise": 300,
       "reserveReason": "no_eligible_videos",
       "status": "settled",
-      "settledBatchId": "gps_1795600951725_cb0b333c",
-      "settledAt": "2026-11-25T10:02:31.725Z",
+      "settledBatchId": "gps_1795603642187_eb729a39",
+      "settledAt": "2026-11-25T10:47:22.187Z",
       "settledBy": "FT102857",
       "notes": "Pending ₹3.00 Global Pool reserve (0 eligible previous videos at TX #1)",
-      "createdAt": "2026-11-25T10:02:31.710Z",
-      "updatedAt": "2026-11-25T10:02:31.725Z"
+      "createdAt": "2026-11-25T10:47:22.183Z",
+      "updatedAt": "2026-11-25T10:47:22.187Z"
     }
   ],
   "globalPoolSettlements": [
     {
-      "id": "gps_1795600951725_cb0b333c",
-      "idempotencyKey": "fb-settle-1795600951723",
+      "id": "gps_1795603642187_eb729a39",
+      "idempotencyKey": "fb-settle-1795603642186",
       "totalReserveAmount": 3,
       "distributedAmount": 3,
       "carryForwardAmount": 0,
@@ -58,7 +58,7 @@
       "settledBy": "FT102857",
       "notes": null,
       "settledReserveIds": [
-        "gpr_1795600951710_9a904ec0"
+        "gpr_1795603642183_1c0fa56a"
       ],
       "payouts": [
         {
@@ -75,7 +75,7 @@
         }
       ],
       "carryForwardReserveId": null,
-      "createdAt": "2026-11-25T10:02:31.725Z"
+      "createdAt": "2026-11-25T10:47:22.187Z"
     }
   ],
   "userSubscriptions": [],

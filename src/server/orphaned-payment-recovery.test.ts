@@ -23,14 +23,17 @@ const RAZORPAY_SECRET = "rzp_test_recovery_secret_123456";
 
 function createRecoveryMysqlHarness(options?: {
   hasGlobalPoolReservesTable?: boolean;
+  hasUploadedAssetsTable?: boolean;
   authUser?: { user_id: string; name: string; role: string; channel_name?: string };
   initialOrder?: Record<string, any> | null;
   initialVideo?: Record<string, any> | null;
   initialTx?: Record<string, any> | null;
+  initialAssets?: Array<Record<string, any>> | null;
   sponsorUserId?: string | null;
   eligibleVideos?: Array<{ video_id: string; user_id: string; ad_earnings?: number }>;
 }) {
   const hasGlobalPoolReservesTable = options?.hasGlobalPoolReservesTable ?? true;
+  const hasUploadedAssetsTable = options?.hasUploadedAssetsTable ?? true;
   const authUser = options?.authUser ?? {
     user_id: TARGET_USER_ID,
     name: "Recovery Creator",
@@ -41,7 +44,7 @@ function createRecoveryMysqlHarness(options?: {
   const orders = new Map<string, any>();
   if (options?.initialOrder !== null) {
     orders.set(
-      options?.initialOrder?.order_id || TARGET_ORDER_ID,
+      options?.initialOrder?.["order_id"] || TARGET_ORDER_ID,
       options?.initialOrder ?? {
         order_id: TARGET_ORDER_ID,
         user_id: TARGET_USER_ID,
@@ -60,7 +63,7 @@ function createRecoveryMysqlHarness(options?: {
 
   const paymentTransactions = new Map<string, any>();
   if (options?.initialTx) {
-    paymentTransactions.set(String(options.initialTx.payment_id), options.initialTx);
+    paymentTransactions.set(String(options.initialTx["payment_id"]), options.initialTx);
   }
 
   const premiumTransactions: any[] = [];
@@ -72,7 +75,25 @@ function createRecoveryMysqlHarness(options?: {
   >();
   const videos = new Map<string, any>();
   if (options?.initialVideo) {
-    videos.set(String(options.initialVideo.id), options.initialVideo);
+    videos.set(String(options.initialVideo["id"]), options.initialVideo);
+  }
+  const uploadedAssets = new Map<string, any>();
+  if (options?.initialAssets === undefined) {
+    uploadedAssets.set(TARGET_VIDEO_URL, {
+      id: "ast_default_kf7k",
+      user_id: TARGET_USER_ID,
+      file_name: TARGET_VIDEO_FILE,
+      relative_path: TARGET_VIDEO_URL,
+      public_url: `https://api.facetube.online${TARGET_VIDEO_URL}`,
+      video_id: null,
+      order_id: null,
+      size_bytes: 28,
+      format: "mp4",
+    });
+  } else if (Array.isArray(options.initialAssets)) {
+    for (const a of options.initialAssets) {
+      uploadedAssets.set(String(a["relative_path"]), { ...a });
+    }
   }
 
   let lockChain: Promise<void> = Promise.resolve();
@@ -83,11 +104,11 @@ function createRecoveryMysqlHarness(options?: {
     const norm = sql.replace(/\s+/g, " ").trim();
 
     if (norm.includes("FROM INFORMATION_SCHEMA.TABLES")) {
-      if (!hasGlobalPoolReservesTable) {
-        return [[]];
-      }
       if (norm.includes("global_pool_reserves")) {
-        return [[{ TABLE_NAME: "global_pool_reserves" }]];
+        return hasGlobalPoolReservesTable ? [[{ TABLE_NAME: "global_pool_reserves" }]] : [[]];
+      }
+      if (norm.includes("uploaded_video_assets")) {
+        return hasUploadedAssetsTable ? [[{ TABLE_NAME: "uploaded_video_assets" }]] : [[]];
       }
       return [[]];
     }
@@ -171,6 +192,11 @@ function createRecoveryMysqlHarness(options?: {
     if (norm.includes("FROM uploaded_videos WHERE id = ?")) {
       const v = videos.get(String(params[0]));
       return [v ? [{ ...v }] : []];
+    }
+
+    if (norm.includes("FROM uploaded_video_assets WHERE relative_path = ?")) {
+      const a = uploadedAssets.get(String(params[0]));
+      return [a ? [{ ...a }] : []];
     }
 
     if (norm.includes("FROM payment_transactions WHERE payment_id = ?")) {
@@ -367,6 +393,36 @@ function createRecoveryMysqlHarness(options?: {
       return [{ affectedRows: 1 }];
     }
 
+    if (norm.startsWith("INSERT INTO uploaded_video_assets")) {
+      const relPath = String(params[3]);
+      uploadedAssets.set(relPath, {
+        id: String(params[0]),
+        user_id: String(params[1]),
+        file_name: String(params[2]),
+        relative_path: relPath,
+        public_url: String(params[4]),
+        video_id: params[5] ? String(params[5]) : null,
+        order_id: params[6] ? String(params[6]) : null,
+        size_bytes: Number(params[7]),
+        format: String(params[8]),
+      });
+      return [{ affectedRows: 1 }];
+    }
+
+    if (norm.startsWith("UPDATE uploaded_video_assets")) {
+      const vidId = String(params[0]);
+      const ordId = String(params[1]);
+      const assetId = String(params[2]);
+      for (const a of uploadedAssets.values()) {
+        if (a.id === assetId) {
+          if (!a.video_id) a.video_id = vidId;
+          if (!a.order_id) a.order_id = ordId;
+          break;
+        }
+      }
+      return [{ affectedRows: 1 }];
+    }
+
     if (norm.startsWith("UPDATE payment_orders SET status = 'paid'")) {
       const pid = String(params[0]);
       const oid = String(params[1]);
@@ -424,6 +480,7 @@ function createRecoveryMysqlHarness(options?: {
     ledgerEntries,
     walletBalances,
     videos,
+    uploadedAssets,
     getStats: () => ({ committedCount, rolledBackCount }),
   };
 }
@@ -1053,6 +1110,21 @@ describe("Orphaned Captured Sponsor Payment Recovery", () => {
               updated_at: "2026-01-01T00:00:00.000Z",
             },
           ],
+          uploadedAssets: [
+            {
+              id: "ast_store_kf7k",
+              user_id: TARGET_USER_ID,
+              file_name: TARGET_VIDEO_FILE,
+              relative_path: TARGET_VIDEO_URL,
+              public_url: `https://api.facetube.online${TARGET_VIDEO_URL}`,
+              video_id: null,
+              order_id: null,
+              size_bytes: 28,
+              format: "mp4",
+              created_at: "2026-01-01T00:00:00.000Z",
+              updated_at: "2026-01-01T00:00:00.000Z",
+            },
+          ],
           wallets: {},
           walletTransactions: [],
         }),
@@ -1158,5 +1230,289 @@ describe("Orphaned Captured Sponsor Payment Recovery", () => {
     assert.match(recoverPhp, /ftCheckGlobalPoolReserveSchemaReadyPhp/);
     assert.match(recoverPhp, /ftValidateUploadedVideoAssetPhp/);
     assert.match(recoverPhp, /\$gatewayStatus\s*!==\s*'captured'/);
+  });
+
+  it("7. Enforces authentication and fails closed on POST /api/uploads/video with ownership persistence", async () => {
+    // 7a. Unauthenticated upload fails with 401 in MySQL mode and writes nothing
+    {
+      const harness = createRecoveryMysqlHarness();
+      setMysqlPoolForTesting(harness.pool as any);
+      const fd = new FormData();
+      fd.append("video", new File(["ftypmp42"], "unauth.mp4", { type: "video/mp4" }));
+      const res = await handleApiRequest(
+        new Request("http://localhost:3000/api/uploads/video", {
+          method: "POST",
+          body: fd,
+        }),
+      );
+      assert.equal(res?.status, 401);
+      assert.equal(harness.uploadedAssets.size, 1); // only default fixture
+    }
+
+    // 7b. Missing uploaded_video_assets schema fails closed (503) in MySQL mode without returning 201
+    {
+      const harness = createRecoveryMysqlHarness({ hasUploadedAssetsTable: false });
+      setMysqlPoolForTesting(harness.pool as any);
+      const fd = new FormData();
+      fd.append("video", new File(["ftypmp42"], "failclosed.mp4", { type: "video/mp4" }));
+      const res = await handleApiRequest(
+        new Request("http://localhost:3000/api/uploads/video", {
+          method: "POST",
+          headers: { Authorization: "Bearer sess_valid_token" },
+          body: fd,
+        }),
+      );
+      assert.equal(res?.status, 503);
+      const data: any = await res!.json();
+      assert.equal(data.success, false);
+      assert.match(String(data.error), /uploaded_video_assets/i);
+    }
+
+    // 7c. Authenticated upload records ownership in uploaded_video_assets & rejects foreign orderId (403)
+    {
+      const harness = createRecoveryMysqlHarness({
+        initialOrder: {
+          order_id: "order_foreign_999",
+          user_id: "FT999999",
+          video_id: "vid-foreign",
+          purpose: "premium_video_upload",
+          amount: 6.0,
+          currency: "INR",
+          status: "created",
+        },
+      });
+      setMysqlPoolForTesting(harness.pool as any);
+
+      const foreignFd = new FormData();
+      foreignFd.append("video", new File(["ftypmp42"], "stolen.mp4", { type: "video/mp4" }));
+      foreignFd.append("orderId", "order_foreign_999");
+      const resForeign = await handleApiRequest(
+        new Request("http://localhost:3000/api/uploads/video", {
+          method: "POST",
+          headers: { Authorization: "Bearer sess_valid_token" },
+          body: foreignFd,
+        }),
+      );
+      assert.equal(resForeign?.status, 403);
+
+      const goodFd = new FormData();
+      goodFd.append("video", new File(["ftypmp42good"], "owned.mp4", { type: "video/mp4" }));
+      const resGood = await handleApiRequest(
+        new Request("http://localhost:3000/api/uploads/video", {
+          method: "POST",
+          headers: { Authorization: "Bearer sess_valid_token" },
+          body: goodFd,
+        }),
+      );
+      assert.equal(resGood?.status, 201);
+      const dataGood: any = await resGood!.json();
+      assert.equal(dataGood.success, true);
+      assert.ok(dataGood.assetId);
+      assert.ok(dataGood.relativePath);
+      const savedAsset = harness.uploadedAssets.get(dataGood.relativePath);
+      assert.ok(savedAsset);
+      assert.equal(savedAsset.user_id, TARGET_USER_ID);
+    }
+  });
+
+  it("8. Blocks cross-user asset theft, bound-asset conflicts, video_url overwriting, and missing asset ownership records (Node + PHP parity)", async () => {
+    let gatewayCalled = false;
+    const guardFetch = (async () => {
+      gatewayCalled = true;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    // 8a. Cross-user uploaded video asset theft -> 403 BEFORE gateway call
+    {
+      gatewayCalled = false;
+      globalThis.fetch = guardFetch;
+      const harness = createRecoveryMysqlHarness({
+        initialAssets: [
+          {
+            id: "ast_other_user",
+            user_id: "FT999999",
+            file_name: TARGET_VIDEO_FILE,
+            relative_path: TARGET_VIDEO_URL,
+            public_url: `https://api.facetube.online${TARGET_VIDEO_URL}`,
+            video_id: null,
+            order_id: null,
+            size_bytes: 28,
+            format: "mp4",
+          },
+        ],
+      });
+      setMysqlPoolForTesting(harness.pool as any);
+      const res = await handleApiRequest(
+        makeRecoveryRequest({
+          orderId: TARGET_ORDER_ID,
+          paymentId: TARGET_PAYMENT_ID,
+          videoId: TARGET_VIDEO_ID,
+          title: "Asset Theft Attempt",
+          videoUrl: TARGET_VIDEO_URL,
+        }),
+        { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET: RAZORPAY_SECRET },
+      );
+      assert.equal(res?.status, 403);
+      assert.equal(gatewayCalled, false);
+    }
+
+    // 8b. Asset bound to a different video_id or order_id -> 409 BEFORE gateway call
+    for (const conflictAsset of [
+      { video_id: "vid-already-used", order_id: null },
+      { video_id: null, order_id: "order_already_used" },
+    ]) {
+      gatewayCalled = false;
+      globalThis.fetch = guardFetch;
+      const harness = createRecoveryMysqlHarness({
+        initialAssets: [
+          {
+            id: "ast_conflict",
+            user_id: TARGET_USER_ID,
+            file_name: TARGET_VIDEO_FILE,
+            relative_path: TARGET_VIDEO_URL,
+            public_url: `https://api.facetube.online${TARGET_VIDEO_URL}`,
+            size_bytes: 28,
+            format: "mp4",
+            ...conflictAsset,
+          },
+        ],
+      });
+      setMysqlPoolForTesting(harness.pool as any);
+      const res = await handleApiRequest(
+        makeRecoveryRequest({
+          orderId: TARGET_ORDER_ID,
+          paymentId: TARGET_PAYMENT_ID,
+          videoId: TARGET_VIDEO_ID,
+          title: "Asset Conflict Attempt",
+          videoUrl: TARGET_VIDEO_URL,
+        }),
+        { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET: RAZORPAY_SECRET },
+      );
+      assert.equal(res?.status, 409);
+      assert.equal(gatewayCalled, false);
+    }
+
+    // 8c. Overwriting existing video's verified video_url OR mismatching order.video_url -> 409
+    {
+      const altFile = "another-asset.mp4";
+      fs.writeFileSync(path.join(tmpUploadsDir, "videos", altFile), Buffer.from("ftypmp42alt"));
+      gatewayCalled = false;
+      globalThis.fetch = guardFetch;
+      const harness = createRecoveryMysqlHarness({
+        initialVideo: {
+          id: TARGET_VIDEO_ID,
+          user_id: TARGET_USER_ID,
+          video_url: `https://api.facetube.online/uploads/videos/${altFile}`,
+          video_type: "premium",
+          payment_status: "pending",
+          payment_id: null,
+        },
+      });
+      setMysqlPoolForTesting(harness.pool as any);
+      const res = await handleApiRequest(
+        makeRecoveryRequest({
+          orderId: TARGET_ORDER_ID,
+          paymentId: TARGET_PAYMENT_ID,
+          videoId: TARGET_VIDEO_ID,
+          title: "Overwrite Existing URL",
+          videoUrl: TARGET_VIDEO_URL,
+        }),
+        { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET: RAZORPAY_SECRET },
+      );
+      assert.equal(res?.status, 409);
+      assert.equal(gatewayCalled, false);
+
+      // Mismatching payment_orders.video_url -> 409
+      const harnessOrderBound = createRecoveryMysqlHarness({
+        initialOrder: {
+          order_id: TARGET_ORDER_ID,
+          user_id: TARGET_USER_ID,
+          video_id: TARGET_VIDEO_ID,
+          video_url: `/uploads/videos/${altFile}`,
+          purpose: "premium_video_upload",
+          amount: 6.0,
+          currency: "INR",
+          status: "created",
+          payment_id: null,
+        },
+      });
+      setMysqlPoolForTesting(harnessOrderBound.pool as any);
+      const resOrderMismatch = await handleApiRequest(
+        makeRecoveryRequest({
+          orderId: TARGET_ORDER_ID,
+          paymentId: TARGET_PAYMENT_ID,
+          videoId: TARGET_VIDEO_ID,
+          title: "Order Asset Mismatch",
+          videoUrl: TARGET_VIDEO_URL,
+        }),
+        { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET: RAZORPAY_SECRET },
+      );
+      assert.equal(resOrderMismatch?.status, 409);
+      assert.equal(gatewayCalled, false);
+    }
+
+    // 8d. Missing uploaded_video_assets row -> 422; missing uploaded_video_assets table -> 503
+    {
+      gatewayCalled = false;
+      globalThis.fetch = guardFetch;
+      const harnessMissingRow = createRecoveryMysqlHarness({ initialAssets: [] });
+      setMysqlPoolForTesting(harnessMissingRow.pool as any);
+      const resRow = await handleApiRequest(
+        makeRecoveryRequest({
+          orderId: TARGET_ORDER_ID,
+          paymentId: TARGET_PAYMENT_ID,
+          videoId: TARGET_VIDEO_ID,
+          title: "Missing Asset Row",
+          videoUrl: TARGET_VIDEO_URL,
+        }),
+        { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET: RAZORPAY_SECRET },
+      );
+      assert.equal(resRow?.status, 422);
+      assert.equal(gatewayCalled, false);
+
+      const harnessMissingTbl = createRecoveryMysqlHarness({ hasUploadedAssetsTable: false });
+      setMysqlPoolForTesting(harnessMissingTbl.pool as any);
+      const resTbl = await handleApiRequest(
+        makeRecoveryRequest({
+          orderId: TARGET_ORDER_ID,
+          paymentId: TARGET_PAYMENT_ID,
+          videoId: TARGET_VIDEO_ID,
+          title: "Missing Asset Table",
+          videoUrl: TARGET_VIDEO_URL,
+        }),
+        { RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET: RAZORPAY_SECRET },
+      );
+      assert.equal(resTbl?.status, 503);
+      assert.equal(gatewayCalled, false);
+    }
+
+    // 8e. PHP security parity checks (uploads/video.php, uploads/my-assets.php, create-order.php, recover-captured.php)
+    const uploadVideoPhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api/uploads/video.php"),
+      "utf8",
+    );
+    const myAssetsPhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api/uploads/my-assets.php"),
+      "utf8",
+    );
+    const createOrderPhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api/payments/create-order.php"),
+      "utf8",
+    );
+    const recoverPhp = fs.readFileSync(
+      path.resolve(process.cwd(), "api/payments/recover-captured.php"),
+      "utf8",
+    );
+    assert.match(uploadVideoPhp, /getAuthUser\(\$pdo,\s*true\)/);
+    assert.match(uploadVideoPhp, /INSERT INTO uploaded_video_assets/);
+    assert.match(myAssetsPhp, /getAuthUser\(\$pdo,\s*true\)/);
+    assert.match(myAssetsPhp, /FROM uploaded_video_assets/);
+    assert.match(createOrderPhp, /uploaded_video_assets/);
+    assert.match(recoverPhp, /ftCheckUploadAssetsTableExistsPhp/);
+    assert.match(
+      recoverPhp,
+      /Cannot overwrite existing video's verified asset URL during recovery/,
+    );
+    assert.match(recoverPhp, /UPDATE uploaded_video_assets/);
   });
 });

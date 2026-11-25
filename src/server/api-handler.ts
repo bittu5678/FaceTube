@@ -1489,6 +1489,7 @@ interface ServerStore {
     user_id: string;
     user_name: string;
     video_id?: string | null;
+    video_url?: string | null;
     purpose: string;
     plan_id?: string | null;
     content_type?: string | null;
@@ -3498,7 +3499,7 @@ export function validateUploadedVideoAssetNode(
       return {
         valid: true,
         relativePath,
-        publicUrl: `https://${PRODUCTION_API_DOMAIN}${relativePath}`,
+        publicUrl: `${PRODUCTION_API_DOMAIN}${relativePath}`,
       };
     } catch {
       continue;
@@ -3567,7 +3568,9 @@ function extractCanonicalVideoAssetRelativePathNode(
     return null;
   }
   if (decoded.includes("..") || decoded.includes("\\")) return null;
-  const match = decoded.replace(/\\/g, "/").match(/^\/?(?:api\/)?(uploads\/videos\/([A-Za-z0-9._-]+))$/);
+  const match = decoded
+    .replace(/\\/g, "/")
+    .match(/^\/?(?:api\/)?(uploads\/videos\/([A-Za-z0-9._-]+))$/);
   if (!match || !match[2]) return null;
   return `/uploads/videos/${match[2]}`;
 }
@@ -4891,6 +4894,127 @@ async function dispatchApiRequest(
           }
         }
 
+        let boundVideoUrlPath: string | null = null;
+        const rawOrderVideoUrl = String(payload.videoUrl || payload.video_url || "").trim();
+        if (rawOrderVideoUrl !== "") {
+          const canonOrderAssetPath = extractCanonicalVideoAssetRelativePathNode(
+            rawOrderVideoUrl,
+            env,
+          );
+          if (!canonOrderAssetPath) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Invalid videoUrl format. Asset must reference /uploads/videos/.",
+              },
+              400,
+            );
+          }
+
+          if (pool) {
+            try {
+              const hasAssetsTbl = await checkUploadAssetsTableExistsNode(pool);
+              if (!hasAssetsTbl) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error:
+                      "Upload asset ownership tracking schema (uploaded_video_assets) has not been applied yet. Payment order was not created.",
+                  },
+                  503,
+                );
+              }
+              const [assetRows]: any = await pool.query(
+                `SELECT user_id, video_id, order_id FROM uploaded_video_assets WHERE relative_path = ? LIMIT 1`,
+                [canonOrderAssetPath],
+              );
+              const assetRow = assetRows?.[0] || null;
+              if (!assetRow) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error:
+                      "Uploaded video asset ownership record was not found. Please re-upload your video file while signed in.",
+                  },
+                  422,
+                );
+              }
+              if (
+                String(assetRow.user_id || "")
+                  .trim()
+                  .toUpperCase() !== effectiveUserId.toUpperCase()
+              ) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: "Unauthorized: Uploaded video asset belongs to another user.",
+                  },
+                  403,
+                );
+              }
+              const assetVid = String(assetRow.video_id || "").trim();
+              if (assetVid && videoId && assetVid !== videoId) {
+                return jsonResponse(
+                  {
+                    success: false,
+                    error: "Conflict: Uploaded video asset is already linked to another video.",
+                  },
+                  409,
+                );
+              }
+            } catch (_eAssetOrder) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: isMysqlConnectionUnavailableError(_eAssetOrder)
+                    ? "Database connection unavailable verifying uploaded video asset ownership."
+                    : "Database error verifying uploaded video asset ownership.",
+                },
+                isMysqlConnectionUnavailableError(_eAssetOrder) ? 503 : 500,
+              );
+            }
+          } else {
+            const storeAsset = (store.uploadedAssets || []).find(
+              (a) => a.relative_path === canonOrderAssetPath,
+            );
+            if (!storeAsset) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error:
+                    "Uploaded video asset ownership record was not found. Please re-upload your video file while signed in.",
+                },
+                422,
+              );
+            }
+            if (
+              String(storeAsset.user_id || "")
+                .trim()
+                .toUpperCase() !== effectiveUserId.toUpperCase()
+            ) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Unauthorized: Uploaded video asset belongs to another user.",
+                },
+                403,
+              );
+            }
+            const assetVid = String(storeAsset.video_id || "").trim();
+            if (assetVid && videoId && assetVid !== videoId) {
+              return jsonResponse(
+                {
+                  success: false,
+                  error: "Conflict: Uploaded video asset is already linked to another video.",
+                },
+                409,
+              );
+            }
+          }
+
+          boundVideoUrlPath = canonOrderAssetPath;
+        }
+
         if (pool && purpose === "premium_video_upload") {
           let reserveTableRows: any[] = [];
           try {
@@ -4971,6 +5095,27 @@ async function dispatchApiRequest(
                 500,
               );
             }
+
+            if (boundVideoUrlPath) {
+              try {
+                const [colRows]: any = await pool.query(
+                  `SELECT COLUMN_NAME
+                   FROM INFORMATION_SCHEMA.COLUMNS
+                   WHERE TABLE_SCHEMA = DATABASE()
+                     AND TABLE_NAME = 'payment_orders'
+                     AND COLUMN_NAME = 'video_url'
+                   LIMIT 1`,
+                );
+                if (Array.isArray(colRows) && colRows.length > 0) {
+                  await pool.query(`UPDATE payment_orders SET video_url = ? WHERE order_id = ?`, [
+                    boundVideoUrlPath,
+                    result.orderId,
+                  ]);
+                }
+              } catch {
+                // Optional video_url column on payment_orders may not be migrated yet
+              }
+            }
           } catch (_ePo) {
             if (isMysqlConnectionUnavailableError(_ePo)) {
               return jsonResponse(
@@ -4998,6 +5143,7 @@ async function dispatchApiRequest(
             user_id: effectiveUserId,
             user_name: payload.userName || authUser?.name || "Creator",
             video_id: videoId || null,
+            ...(boundVideoUrlPath ? { video_url: boundVideoUrlPath } : {}),
             purpose,
             plan_id: planId || null,
             content_type: payload.contentType || null,
@@ -8037,6 +8183,22 @@ async function dispatchApiRequest(
 
       let hasUploadAssetsTable = false;
       if (pool) {
+        // 5b. Verify Global Pool reserve schema readiness BEFORE asset schema & Razorpay API
+        const reserveReady = await checkGlobalPoolReserveSchemaReadyNode(pool);
+        if (!reserveReady.ready) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: reserveReady.error || "Global Pool reserve schema is not ready.",
+            },
+            reserveReady.status || 503,
+          );
+        }
+
         try {
           hasUploadAssetsTable = await checkUploadAssetsTableExistsNode(pool);
           if (hasUploadAssetsTable) {
@@ -8088,8 +8250,7 @@ async function dispatchApiRequest(
                     paymentId,
                     orderId,
                     videoId,
-                    error:
-                      "Conflict: Uploaded video asset is already linked to a different video.",
+                    error: "Conflict: Uploaded video asset is already linked to a different video.",
                   },
                   409,
                 );
@@ -8274,25 +8435,7 @@ async function dispatchApiRequest(
             "FaceTube Creator",
         ).trim() || "FaceTube Creator";
 
-      // 6. Verify Global Pool reserve schema readiness BEFORE calling Razorpay API
-      if (pool) {
-        const reserveReady = await checkGlobalPoolReserveSchemaReadyNode(pool);
-        if (!reserveReady.ready) {
-          return jsonResponse(
-            {
-              recovered: false,
-              verified: false,
-              paymentId,
-              orderId,
-              videoId,
-              error: reserveReady.error || "Global Pool reserve schema is not ready.",
-            },
-            reserveReady.status || 503,
-          );
-        }
-      }
-
-      // 7. Fetch original payment directly from Razorpay API (GET ONLY — NEVER /orders, /capture, or /refund)
+      // 6. Fetch original payment directly from Razorpay API (GET ONLY — NEVER /orders, /capture, or /refund)
       const authHeader = "Basic " + Buffer.from(`${keyId}:${secretKey}`).toString("base64");
       let pData: any = null;
       try {
@@ -9199,7 +9342,10 @@ async function dispatchApiRequest(
             409,
           );
         }
-        if ((lockedOrder as any).video_url && String((lockedOrder as any).video_url).trim() !== "") {
+        if (
+          (lockedOrder as any).video_url &&
+          String((lockedOrder as any).video_url).trim() !== ""
+        ) {
           const lockedOrderAssetCanon = extractCanonicalVideoAssetRelativePathNode(
             (lockedOrder as any).video_url,
             env,
@@ -13738,7 +13884,8 @@ async function dispatchApiRequest(
             );
             orderRow = ordRows?.[0] || null;
           } else {
-            orderRow = (store.paymentOrders || []).find((o) => o.order_id === optionalOrderId) || null;
+            orderRow =
+              (store.paymentOrders || []).find((o) => o.order_id === optionalOrderId) || null;
           }
           if (!orderRow) {
             return jsonResponse(
@@ -13837,39 +13984,54 @@ async function dispatchApiRequest(
         await fs.promises.writeFile(targetPath, Buffer.from(arrayBuf));
 
         const relativePath = `/uploads/videos/${uniqueName}`;
-        const publicUrl = `https://${PRODUCTION_API_DOMAIN}${relativePath}`;
+        const publicUrl = `${PRODUCTION_API_DOMAIN}${relativePath}`;
         const nowIso = new Date().toISOString();
         const assetId = `ast_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
 
         if (pool) {
           try {
             const hasAssetsTable = await checkUploadAssetsTableExistsNode(pool);
-            if (hasAssetsTable) {
-              await pool.query(
-                `INSERT INTO uploaded_video_assets
-                 (id, user_id, file_name, relative_path, public_url, video_id, order_id, size_bytes, format, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-                [
-                  assetId,
-                  uploaderUserId,
-                  uniqueName,
-                  relativePath,
-                  publicUrl,
-                  optionalVideoId || null,
-                  optionalOrderId || null,
-                  videoFile.size,
-                  ext,
-                ],
-              );
-            } else {
-              console.warn(
-                "[uploads/video] uploaded_video_assets table missing; saved media file without DB asset ownership row.",
+            if (!hasAssetsTable) {
+              await fs.promises.unlink(targetPath).catch(() => undefined);
+              return jsonResponse(
+                {
+                  success: false,
+                  error:
+                    "Upload asset ownership tracking schema (uploaded_video_assets) has not been applied yet. Video upload aborted safely.",
+                },
+                503,
               );
             }
+            await pool.query(
+              `INSERT INTO uploaded_video_assets
+               (id, user_id, file_name, relative_path, public_url, video_id, order_id, size_bytes, format, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+              [
+                assetId,
+                uploaderUserId,
+                uniqueName,
+                relativePath,
+                publicUrl,
+                optionalVideoId || null,
+                optionalOrderId || null,
+                videoFile.size,
+                ext,
+              ],
+            );
           } catch (assetErr: unknown) {
-            console.warn(
+            await fs.promises.unlink(targetPath).catch(() => undefined);
+            console.error(
               "[uploads/video] Failed to persist asset ownership row:",
               assetErr instanceof Error ? assetErr.message : String(assetErr),
+            );
+            return jsonResponse(
+              {
+                success: false,
+                error: isMysqlConnectionUnavailableError(assetErr)
+                  ? "Database connection unavailable while recording uploaded asset ownership."
+                  : "Database error recording uploaded asset ownership.",
+              },
+              isMysqlConnectionUnavailableError(assetErr) ? 503 : 500,
             );
           }
         } else {
@@ -13897,6 +14059,7 @@ async function dispatchApiRequest(
             success: true,
             assetId,
             url: relativePath,
+            relativePath,
             fileName: uniqueName,
             format: ext,
             fileSize: fileSizeMb,
@@ -13946,10 +14109,7 @@ async function dispatchApiRequest(
       if (authErr instanceof AuthDatabaseError) {
         return jsonResponse({ success: false, error: authErr.message }, authErr.status);
       }
-      return jsonResponse(
-        { success: false, error: "Authentication service error." },
-        503,
-      );
+      return jsonResponse({ success: false, error: "Authentication service error." }, 503);
     }
     if (!authUser) {
       return jsonResponse(
