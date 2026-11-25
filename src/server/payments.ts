@@ -1381,6 +1381,301 @@ export async function createServerPaymentOrder(
   };
 }
 
+function buildDuplicateStoreResponse(
+  existingTx: PersistentPremiumTxRecord,
+  req: {
+    orderId: string;
+    paymentId: string;
+    userId: string;
+    videoId?: string | undefined;
+    purpose: "premium_video_upload" | "ads_promotion" | "paid_subscription";
+    metadata?: Record<string, unknown> | undefined;
+  },
+  eligiblePremiumCreatorIds: Array<
+    string | { userId: string; videoId?: string; adEarnings?: number }
+  >,
+): PaymentVerifyResult {
+  const expectedTxType = req.purpose === "premium_video_upload" ? "premium_upload" : req.purpose;
+  const orderMismatch = Boolean(existingTx.orderId) && existingTx.orderId !== req.orderId;
+  const userMismatch =
+    String(existingTx.userId || "")
+      .trim()
+      .toUpperCase() !== req.userId.trim().toUpperCase();
+  const existingVideoId = String(existingTx.videoId || "").trim();
+  const reqVideoId = String(req.videoId || req.metadata?.["videoId"] || "").trim();
+  const vidMismatch = existingVideoId !== "" && existingVideoId !== reqVideoId;
+  if (
+    orderMismatch ||
+    userMismatch ||
+    vidMismatch ||
+    existingTx.transactionType !== expectedTxType
+  ) {
+    return {
+      verified: false,
+      paymentId: req.paymentId,
+      orderId: req.orderId,
+      amount: 0,
+      purpose: req.purpose,
+      error: "Conflict: Payment ID has already been used for a different order, video, or user.",
+    };
+  }
+
+  const eligibleCount = Math.max(1, eligiblePremiumCreatorIds.length);
+  const dupPoolDistributed = existingTx.globalPoolDistributed ?? existingTx.globalPoolAllocation;
+  const dupPoolReserve =
+    existingTx.globalPoolReserve ??
+    Math.max(0, Number((existingTx.globalPoolAllocation - dupPoolDistributed).toFixed(2)));
+  const dupPoolStatus: GlobalPoolStatus =
+    existingTx.globalPoolStatus ??
+    (dupPoolReserve <= 0
+      ? "settled"
+      : dupPoolDistributed <= 0
+        ? "pending_reserve"
+        : "partial_reserve");
+  const perMemberShare = existingTx.isSpecial
+    ? 0
+    : Number((dupPoolDistributed / eligibleCount).toFixed(4));
+  const dupGst = existingTx.gstAmount ?? 0.9;
+  const dupPg = existingTx.pgFee ?? 0.1;
+  const dupRefStatus =
+    existingTx.referralStatus ?? (existingTx.referrerId ? "credited" : "unassigned_pending");
+
+  return {
+    verified: true,
+    paymentId: existingTx.paymentId,
+    orderId: existingTx.orderId,
+    amount: existingTx.amount,
+    purpose: existingTx.transactionType,
+    txNumber: existingTx.txNumber,
+    isSpecialTransaction: existingTx.isSpecial,
+    specialTag: existingTx.specialTag,
+    distribution: {
+      directReferralAmount: existingTx.referralCommission,
+      referrerId: existingTx.referrerId,
+      referralStatus: dupRefStatus,
+      adminAmount: existingTx.adminAllocation,
+      globalPoolAmount: existingTx.globalPoolAllocation,
+      globalPoolDistributedAmount: dupPoolDistributed,
+      globalPoolReserveAmount: dupPoolReserve,
+      globalPoolStatus: dupPoolStatus,
+      gstAmount: dupGst,
+      pgFeeAmount: dupPg,
+      taxAndFees: Number((dupGst + dupPg).toFixed(2)),
+      totalAmount: existingTx.amount,
+      eligibleMembersCount: existingTx.isSpecial ? 0 : eligibleCount,
+      perMemberShare,
+      totalReferralAmount: existingTx.referralCommission,
+    },
+    duplicate: true,
+    error: "Payment has already been processed (idempotent duplicate request)",
+  };
+}
+
+function executePremiumStoreSettlementLocked(
+  state: PersistentPremiumState,
+  req: {
+    orderId: string;
+    paymentId: string;
+    userId: string;
+    userName?: string | undefined;
+    videoId?: string | undefined;
+    purpose: "premium_video_upload" | "ads_promotion" | "paid_subscription";
+    metadata?: Record<string, unknown> | undefined;
+  },
+  eligiblePremiumCreatorIds: Array<
+    string | { userId: string; videoId?: string; adEarnings?: number }
+  >,
+  referrerUserId?: string | null,
+): PaymentVerifyResult {
+  // Increment global sequence persistently: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12...
+  state.lastTxNumber += 1;
+  const currentTxNumber = state.lastTxNumber;
+  const isSpecial = false;
+
+  // Reject self-referral and never trust client-supplied req.referrerUserId
+  const uploaderNorm = req.userId.trim().toUpperCase();
+  const rawServerRefId = (referrerUserId || null)?.trim().toUpperCase() || null;
+  const refId = rawServerRefId && rawServerRefId !== uploaderNorm ? rawServerRefId : null;
+  const hasValidReferrer = Boolean(refId && refId.length > 0);
+
+  const referralCommission = PRICING_CONFIG.PREMIUM_VIDEO.REFERRAL_SHARE; // ₹1.00
+  const referralStatus: "credited" | "unassigned_pending" = hasValidReferrer
+    ? "credited"
+    : "unassigned_pending";
+  const adminAllocation = PRICING_CONFIG.PREMIUM_VIDEO.ADMIN_SHARE; // ₹1.00 strictly fixed
+  const globalPoolAllocation = PRICING_CONFIG.PREMIUM_VIDEO.GLOBAL_POOL_SHARE; // ₹3.00 strictly fixed
+  const gstAmount = PRICING_CONFIG.PREMIUM_VIDEO.GST_AMOUNT; // ₹0.90
+  const pgFee = PRICING_CONFIG.PREMIUM_VIDEO.PG_FEE; // ₹0.10
+  const taxAndFees = PRICING_CONFIG.PREMIUM_VIDEO.TAX_AND_FEES; // ₹1.00
+
+  const eligibleItems: Array<{ userId: string; videoId?: string; adEarnings: number }> = [];
+  const seenCreatorKeys = new Set<string>();
+  for (const item of eligiblePremiumCreatorIds) {
+    if (typeof item === "string") {
+      const norm = item.trim().toUpperCase();
+      if (norm.length > 0 && norm !== uploaderNorm && !seenCreatorKeys.has(norm)) {
+        seenCreatorKeys.add(norm);
+        eligibleItems.push({ userId: norm, adEarnings: 0 });
+      }
+    } else if (item && typeof item === "object") {
+      const norm = String(item.userId || "")
+        .trim()
+        .toUpperCase();
+      const key = item.videoId ? `${norm}:${item.videoId}` : norm;
+      if (norm.length > 0 && norm !== uploaderNorm && !seenCreatorKeys.has(key)) {
+        seenCreatorKeys.add(key);
+        eligibleItems.push({
+          userId: norm,
+          ...(item.videoId ? { videoId: item.videoId } : {}),
+          adEarnings: Math.max(0, Number(item.adEarnings) || 0),
+        });
+      }
+    }
+  }
+  const eligibleCount = eligibleItems.length;
+
+  const poolPaise = 300;
+  let distributedPaise = 0;
+  let reservePaise = poolPaise;
+  let perMemberShare = 0.0;
+  const creatorPayouts: Array<{
+    userId: string;
+    videoId?: string;
+    amount: number;
+    amountPaise: number;
+  }> = [];
+
+  if (eligibleCount === 0) {
+    distributedPaise = 0;
+    reservePaise = poolPaise;
+  } else {
+    const weighted = calculateWeightedPoolPayouts(poolPaise, eligibleItems);
+    distributedPaise = weighted.distributedPaise;
+    reservePaise = weighted.residualPaise;
+    perMemberShare = weighted.payouts.length > 0 ? weighted.payouts[0]!.amount : 0;
+
+    for (const p of weighted.payouts) {
+      creatorPayouts.push({
+        userId: p.userId,
+        ...(p.videoId ? { videoId: p.videoId } : {}),
+        amount: p.amount,
+        amountPaise: p.amountPaise,
+      });
+    }
+  }
+
+  const globalPoolDistributed = distributedPaise / 100;
+  const globalPoolReserve = reservePaise / 100;
+  const globalPoolStatus: GlobalPoolStatus =
+    reservePaise === 0 ? "settled" : distributedPaise === 0 ? "pending_reserve" : "partial_reserve";
+  const globalPoolReserveReason: GlobalPoolReserveReason | null =
+    reservePaise === 0
+      ? null
+      : eligibleCount === 0
+        ? "no_eligible_videos"
+        : distributedPaise === 0
+          ? "insufficient_distributable_paise"
+          : "rounding_residual";
+
+  const resolvedVideoId = req.videoId || req.metadata?.["videoId"]?.toString() || "";
+  const nowIso = new Date().toISOString();
+  let reserveId: string | null = null;
+
+  if (reservePaise > 0 && globalPoolReserveReason) {
+    if (!state.globalPoolReserves) {
+      state.globalPoolReserves = [];
+    }
+    const alreadyReserved = state.globalPoolReserves.find((r) => r.paymentId === req.paymentId);
+    if (alreadyReserved) {
+      reserveId = alreadyReserved.id;
+    } else {
+      reserveId = `gpr_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+      state.globalPoolReserves.push({
+        id: reserveId,
+        paymentId: req.paymentId,
+        orderId: req.orderId,
+        txNumber: currentTxNumber,
+        sourceUserId: uploaderNorm,
+        sourceVideoId: resolvedVideoId || null,
+        reserveAmount: globalPoolReserve,
+        reservePaise,
+        reserveReason: globalPoolReserveReason,
+        status: "pending",
+        settledBatchId: null,
+        settledAt: null,
+        settledBy: null,
+        notes:
+          globalPoolReserveReason === "no_eligible_videos"
+            ? `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool reserve (0 eligible previous videos at TX #${currentTxNumber})`
+            : globalPoolReserveReason === "insufficient_distributable_paise"
+              ? `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool reserve (insufficient distributable paise across ${eligibleCount} eligible videos at TX #${currentTxNumber})`
+              : `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool rounding residual at TX #${currentTxNumber}`,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    }
+  }
+
+  const specialTag = "NORMAL_PREMIUM";
+  const record: PersistentPremiumTxRecord = {
+    txNumber: currentTxNumber,
+    paymentId: req.paymentId,
+    orderId: req.orderId,
+    videoId: resolvedVideoId,
+    userId: req.userId,
+    userName: req.userName || req.metadata?.["userName"]?.toString() || "FaceTube Creator",
+    referrerId: refId,
+    amount: PRICING_CONFIG.PREMIUM_VIDEO.TOTAL_PRICE,
+    transactionType: "premium_upload",
+    isSpecial,
+    specialTag,
+    referralCommission,
+    adminAllocation,
+    globalPoolAllocation,
+    globalPoolDistributed,
+    globalPoolReserve,
+    globalPoolStatus,
+    gstAmount,
+    pgFee,
+    referralStatus,
+    createdAt: nowIso,
+  };
+
+  state.transactions.unshift(record);
+  savePersistentState(state);
+
+  return {
+    verified: true,
+    paymentId: req.paymentId,
+    orderId: req.orderId,
+    amount: PRICING_CONFIG.PREMIUM_VIDEO.TOTAL_PRICE,
+    purpose: req.purpose,
+    txNumber: currentTxNumber,
+    isSpecialTransaction: isSpecial,
+    specialTag,
+    distribution: {
+      directReferralAmount: referralCommission,
+      referrerId: refId,
+      referralStatus,
+      adminAmount: adminAllocation,
+      globalPoolAmount: globalPoolAllocation,
+      globalPoolDistributedAmount: globalPoolDistributed,
+      globalPoolReserveAmount: globalPoolReserve,
+      globalPoolStatus,
+      globalPoolReserveReason,
+      globalPoolReserveId: reserveId,
+      gstAmount,
+      pgFeeAmount: pgFee,
+      taxAndFees,
+      totalAmount: PRICING_CONFIG.PREMIUM_VIDEO.TOTAL_PRICE,
+      eligibleMembersCount: eligibleCount,
+      perMemberShare,
+      creatorPayouts,
+      totalReferralAmount: referralCommission,
+    },
+  };
+}
+
 /**
  * Server-side payment verification and distribution logic with atomic, persistent transaction sequence.
  * 1. Checks RAZORPAY_KEY_SECRET and strictly fails closed if missing.
@@ -1725,209 +2020,12 @@ export async function verifyServerPayment(
 
     // 2. PREMIUM VIDEO UPLOAD PROCESSING
     if (req.purpose === "premium_video_upload") {
-      // Increment global sequence persistently: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12...
-      state.lastTxNumber += 1;
-      const currentTxNumber = state.lastTxNumber;
-
-      // Uniform ₹6 distribution across every transaction (including #11, #21, #31, #41...)
-      const isSpecial = false;
-
-      // Reject self-referral and never trust client-supplied req.referrerUserId
-      const uploaderNorm = req.userId.trim().toUpperCase();
-      const rawServerRefId = (referrerUserId || null)?.trim().toUpperCase() || null;
-      const refId = rawServerRefId && rawServerRefId !== uploaderNorm ? rawServerRefId : null;
-      const hasValidReferrer = Boolean(refId && refId.length > 0);
-
-      // Uniform Phase 1.1 Allocation:
-      // Referral = ₹1.00 ('credited' if valid referrer, 'unassigned_pending' if missing/invalid)
-      // Admin = ₹1.00 ALWAYS (never receives 0-eligible fallback or rounding residual paise)
-      // GST = ₹0.90, PG = ₹0.10
-      // Global Pool = ₹3.00 ALWAYS (distributed + pending reserve = ₹3.00)
-      const referralCommission = PRICING_CONFIG.PREMIUM_VIDEO.REFERRAL_SHARE; // ₹1.00
-      const referralStatus: "credited" | "unassigned_pending" = hasValidReferrer
-        ? "credited"
-        : "unassigned_pending";
-      const adminAllocation = PRICING_CONFIG.PREMIUM_VIDEO.ADMIN_SHARE; // ₹1.00 strictly fixed
-      const globalPoolAllocation = PRICING_CONFIG.PREMIUM_VIDEO.GLOBAL_POOL_SHARE; // ₹3.00 strictly fixed
-      const gstAmount = PRICING_CONFIG.PREMIUM_VIDEO.GST_AMOUNT; // ₹0.90
-      const pgFee = PRICING_CONFIG.PREMIUM_VIDEO.PG_FEE; // ₹0.10
-      const taxAndFees = PRICING_CONFIG.PREMIUM_VIDEO.TAX_AND_FEES; // ₹1.00
-
-      // Filter eligible previous videos / creators: strictly exclude current uploader and deduplicate
-      const eligibleItems: Array<{ userId: string; videoId?: string; adEarnings: number }> = [];
-      const seenCreatorKeys = new Set<string>();
-      for (const item of eligiblePremiumCreatorIds) {
-        if (typeof item === "string") {
-          const norm = item.trim().toUpperCase();
-          if (norm.length > 0 && norm !== uploaderNorm && !seenCreatorKeys.has(norm)) {
-            seenCreatorKeys.add(norm);
-            eligibleItems.push({ userId: norm, adEarnings: 0 });
-          }
-        } else if (item && typeof item === "object") {
-          const norm = String(item.userId || "")
-            .trim()
-            .toUpperCase();
-          const key = item.videoId ? `${norm}:${item.videoId}` : norm;
-          if (norm.length > 0 && norm !== uploaderNorm && !seenCreatorKeys.has(key)) {
-            seenCreatorKeys.add(key);
-            eligibleItems.push({
-              userId: norm,
-              ...(item.videoId ? { videoId: item.videoId } : {}),
-              adEarnings: Math.max(0, Number(item.adEarnings) || 0),
-            });
-          }
-        }
-      }
-      const eligibleCount = eligibleItems.length;
-
-      const poolPaise = 300;
-      let distributedPaise = 0;
-      let reservePaise = poolPaise;
-      let perMemberShare = 0.0;
-      const creatorPayouts: Array<{
-        userId: string;
-        videoId?: string;
-        amount: number;
-        amountPaise: number;
-      }> = [];
-
-      if (eligibleCount === 0) {
-        // Zero eligible previous videos: hold entire ₹3.00 (300 paise) in pending Global Pool reserve
-        distributedPaise = 0;
-        reservePaise = poolPaise;
-      } else {
-        // Distribute 300 paise using per-video weighted Ads Earnings Share; any residual stays in reserve
-        const weighted = calculateWeightedPoolPayouts(poolPaise, eligibleItems);
-        distributedPaise = weighted.distributedPaise;
-        reservePaise = weighted.residualPaise;
-        perMemberShare = weighted.payouts.length > 0 ? weighted.payouts[0]!.amount : 0;
-
-        for (const p of weighted.payouts) {
-          creatorPayouts.push({
-            userId: p.userId,
-            ...(p.videoId ? { videoId: p.videoId } : {}),
-            amount: p.amount,
-            amountPaise: p.amountPaise,
-          });
-        }
-      }
-
-      const globalPoolDistributed = distributedPaise / 100;
-      const globalPoolReserve = reservePaise / 100;
-      const globalPoolStatus: GlobalPoolStatus =
-        reservePaise === 0
-          ? "settled"
-          : distributedPaise === 0
-            ? "pending_reserve"
-            : "partial_reserve";
-      const globalPoolReserveReason: GlobalPoolReserveReason | null =
-        reservePaise === 0
-          ? null
-          : eligibleCount === 0
-            ? "no_eligible_videos"
-            : distributedPaise === 0
-              ? "insufficient_distributable_paise"
-              : "rounding_residual";
-
-      const resolvedVideoId = req.videoId || req.metadata?.["videoId"]?.toString() || "";
-      const nowIso = new Date().toISOString();
-      let reserveId: string | null = null;
-
-      if (reservePaise > 0 && globalPoolReserveReason) {
-        if (!state.globalPoolReserves) {
-          state.globalPoolReserves = [];
-        }
-        const alreadyReserved = state.globalPoolReserves.find((r) => r.paymentId === req.paymentId);
-        if (alreadyReserved) {
-          reserveId = alreadyReserved.id;
-        } else {
-          reserveId = `gpr_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
-          state.globalPoolReserves.push({
-            id: reserveId,
-            paymentId: req.paymentId,
-            orderId: req.orderId,
-            txNumber: currentTxNumber,
-            sourceUserId: uploaderNorm,
-            sourceVideoId: resolvedVideoId || null,
-            reserveAmount: globalPoolReserve,
-            reservePaise,
-            reserveReason: globalPoolReserveReason,
-            status: "pending",
-            settledBatchId: null,
-            settledAt: null,
-            settledBy: null,
-            notes:
-              globalPoolReserveReason === "no_eligible_videos"
-                ? `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool reserve (0 eligible previous videos at TX #${currentTxNumber})`
-                : globalPoolReserveReason === "insufficient_distributable_paise"
-                  ? `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool reserve (insufficient distributable paise across ${eligibleCount} eligible videos at TX #${currentTxNumber})`
-                  : `Pending ₹${globalPoolReserve.toFixed(2)} Global Pool rounding residual at TX #${currentTxNumber}`,
-            createdAt: nowIso,
-            updatedAt: nowIso,
-          });
-        }
-      }
-
-      const specialTag = "NORMAL_PREMIUM";
-
-      // Create persistent transaction record
-      const record: PersistentPremiumTxRecord = {
-        txNumber: currentTxNumber,
-        paymentId: req.paymentId,
-        orderId: req.orderId,
-        videoId: resolvedVideoId,
-        userId: req.userId,
-        userName: req.userName || req.metadata?.["userName"]?.toString() || "FaceTube Creator",
-        referrerId: refId,
-        amount: PRICING_CONFIG.PREMIUM_VIDEO.TOTAL_PRICE, // ₹6.00
-        transactionType: "premium_upload",
-        isSpecial,
-        specialTag,
-        referralCommission,
-        adminAllocation,
-        globalPoolAllocation,
-        globalPoolDistributed,
-        globalPoolReserve,
-        globalPoolStatus,
-        gstAmount,
-        pgFee,
-        referralStatus,
-        createdAt: nowIso,
-      };
-
-      state.transactions.unshift(record);
-      savePersistentState(state);
-
-      return {
-        verified: true,
-        paymentId: req.paymentId,
-        orderId: req.orderId,
-        amount: PRICING_CONFIG.PREMIUM_VIDEO.TOTAL_PRICE,
-        purpose: req.purpose,
-        txNumber: currentTxNumber,
-        isSpecialTransaction: isSpecial,
-        specialTag,
-        distribution: {
-          directReferralAmount: referralCommission,
-          referrerId: refId,
-          referralStatus,
-          adminAmount: adminAllocation,
-          globalPoolAmount: globalPoolAllocation,
-          globalPoolDistributedAmount: globalPoolDistributed,
-          globalPoolReserveAmount: globalPoolReserve,
-          globalPoolStatus,
-          globalPoolReserveReason,
-          globalPoolReserveId: reserveId,
-          gstAmount,
-          pgFeeAmount: pgFee,
-          taxAndFees,
-          totalAmount: PRICING_CONFIG.PREMIUM_VIDEO.TOTAL_PRICE,
-          eligibleMembersCount: eligibleCount,
-          perMemberShare,
-          creatorPayouts,
-          totalReferralAmount: referralCommission,
-        },
-      };
+      return executePremiumStoreSettlementLocked(
+        state,
+        req,
+        eligiblePremiumCreatorIds,
+        referrerUserId,
+      );
     }
 
     // 2b. PAID SUBSCRIPTION PROCESSING
@@ -2069,6 +2167,52 @@ export async function verifyServerPayment(
         missingLevels: dist.missingLevels,
       },
     };
+  });
+}
+
+export async function recoverCapturedPremiumInStore(
+  params: {
+    orderId: string;
+    paymentId: string;
+    userId: string;
+    userName?: string;
+    videoId: string;
+  },
+  eligiblePremiumCreatorIds: Array<
+    string | { userId: string; videoId?: string; adEarnings?: number }
+  > = [],
+  referrerUserId?: string | null,
+): Promise<PaymentVerifyResult> {
+  return withLock(async () => {
+    const state = loadPersistentState();
+    const existingTx = state.transactions.find((t) => t.paymentId === params.paymentId);
+    if (existingTx) {
+      return buildDuplicateStoreResponse(
+        existingTx,
+        {
+          orderId: params.orderId,
+          paymentId: params.paymentId,
+          userId: params.userId,
+          videoId: params.videoId,
+          purpose: "premium_video_upload",
+        },
+        eligiblePremiumCreatorIds,
+      );
+    }
+
+    return executePremiumStoreSettlementLocked(
+      state,
+      {
+        orderId: params.orderId,
+        paymentId: params.paymentId,
+        userId: params.userId,
+        userName: params.userName,
+        videoId: params.videoId,
+        purpose: "premium_video_upload",
+      },
+      eligiblePremiumCreatorIds,
+      referrerUserId,
+    );
   });
 }
 

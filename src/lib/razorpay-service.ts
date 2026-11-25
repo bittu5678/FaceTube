@@ -896,3 +896,83 @@ export async function initiatePaidSubscriptionPayment(
     params.onFailure(err?.message || "Could not initiate payment gateway.");
   }
 }
+
+export interface RecoverCapturedPaymentParams {
+  orderId: string;
+  paymentId: string;
+  videoId: string;
+  userId: string;
+  title: string;
+  videoUrl: string;
+  description?: string;
+  thumbnailUrl?: string;
+  contentType?: "short" | "long";
+  category?: string;
+  visibility?: "public" | "unlisted" | "private";
+  duration?: string;
+  creatorName?: string;
+}
+
+export interface RecoverCapturedPaymentResult {
+  recovered: boolean;
+  verified: boolean;
+  duplicate?: boolean;
+  videoPublished?: boolean;
+  alreadyPublished?: boolean;
+  paymentId: string;
+  orderId: string;
+  videoId: string;
+  amount: number;
+  currency: string;
+  txNumber?: number;
+  distribution?: any;
+  assetPath?: string;
+  video?: any;
+  missingAsset?: string;
+  message?: string;
+  error?: string;
+}
+
+/**
+ * Reconciles a previously captured ₹6 Sponsor Video payment on the server.
+ * Never creates a new Razorpay order, opens checkout, captures, or charges again.
+ */
+export async function recoverCapturedPremiumPayment(
+  params: RecoverCapturedPaymentParams,
+): Promise<RecoverCapturedPaymentResult> {
+  const orderId = String(params.orderId || "").trim();
+  const paymentId = String(params.paymentId || "").trim();
+  const videoId = String(params.videoId || "").trim();
+  const userId = String(params.userId || "").trim();
+  const title = String(params.title || "").trim();
+  const videoUrl = String(params.videoUrl || "").trim();
+
+  if (!userId) {
+    throw new Error("Please sign in to recover your Sponsor payment.");
+  }
+  if (!orderId || !paymentId || !videoId) {
+    throw new Error("Order ID, Payment ID, and Video ID are required for recovery.");
+  }
+  if (!title) {
+    throw new Error("Please enter a video title for publishing.");
+  }
+  if (!videoUrl) {
+    throw new Error("Please provide or upload the original video asset path.");
+  }
+
+  return await api.payments.recoverCaptured({
+    orderId,
+    paymentId,
+    videoId,
+    userId,
+    title,
+    videoUrl,
+    ...(params.description !== undefined ? { description: params.description } : {}),
+    ...(params.thumbnailUrl !== undefined ? { thumbnailUrl: params.thumbnailUrl } : {}),
+    ...(params.contentType !== undefined ? { contentType: params.contentType } : {}),
+    ...(params.category !== undefined ? { category: params.category } : {}),
+    ...(params.visibility !== undefined ? { visibility: params.visibility } : {}),
+    ...(params.duration !== undefined ? { duration: params.duration } : {}),
+    ...(params.creatorName !== undefined ? { creatorName: params.creatorName } : {}),
+  });
+}

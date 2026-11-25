@@ -34,6 +34,8 @@ import {
   updatePersistentRefundRequest,
   type RefundRequestRecord,
   resolveRazorpayRemotePolicy,
+  recoverCapturedPremiumInStore,
+  type PaymentVerifyResult,
 } from "./payments.ts";
 import {
   sendWelcomeEmailServer,
@@ -1531,6 +1533,19 @@ interface ServerStore {
     created_at: string;
     updated_at: string;
   }>;
+  uploadedAssets?: Array<{
+    id: string;
+    user_id: string;
+    file_name: string;
+    relative_path: string;
+    public_url: string;
+    video_id?: string | null;
+    order_id?: string | null;
+    size_bytes: number;
+    format: string;
+    created_at: string;
+    updated_at: string;
+  }>;
 }
 
 /**
@@ -2150,6 +2165,7 @@ function createEmptyProductionStore(): ServerStore {
     paymentOrders: [],
     subscriptionRefundRequests: [],
     channelSubscriptions: [],
+    uploadedAssets: [],
   };
 }
 
@@ -2205,6 +2221,7 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
           inMemoryStore.subscriptionRefundRequests = [];
         if (!inMemoryStore.kycAuditLog) inMemoryStore.kycAuditLog = [];
         if (!inMemoryStore.channelSubscriptions) inMemoryStore.channelSubscriptions = [];
+        if (!inMemoryStore.uploadedAssets) inMemoryStore.uploadedAssets = [];
         if (Array.isArray(inMemoryStore.videos)) {
           const verifiedSeedIds = new Set([
             "vid-seed-001",
@@ -2249,6 +2266,7 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
   if (!inMemoryStore.subscriptionRefundRequests) inMemoryStore.subscriptionRefundRequests = [];
   if (!inMemoryStore.kycAuditLog) inMemoryStore.kycAuditLog = [];
   if (!inMemoryStore.channelSubscriptions) inMemoryStore.channelSubscriptions = [];
+  if (!inMemoryStore.uploadedAssets) inMemoryStore.uploadedAssets = [];
   saveStore(inMemoryStore, env);
   return inMemoryStore;
 }
@@ -2358,15 +2376,115 @@ function resolveStoredVisibilityFailClosed(value: unknown): "public" | "unlisted
   return "private";
 }
 
-function jsonResponse(data: unknown, status = 200): Response {
+function buildApiCorsHeaders(
+  request?: Request,
+  env?: Record<string, string | undefined>,
+  extraHeaders?: Record<string, string>,
+): Record<string, string> {
+  const allowedOrigins = new Set<string>([
+    "https://facetube.online",
+    "https://www.facetube.online",
+  ]);
+  const appEnv = readEnvValue(env, "APP_ENV").toLowerCase();
+  const nodeEnv = readEnvValue(env, "NODE_ENV").toLowerCase();
+  if (
+    ["development", "dev", "local", "test"].includes(appEnv) ||
+    ["development", "dev", "local", "test"].includes(nodeEnv)
+  ) {
+    allowedOrigins.add("http://localhost:3000");
+    allowedOrigins.add("http://127.0.0.1:3000");
+  }
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json; charset=utf-8",
+    ...extraHeaders,
+  };
+
+  const origin = (request?.headers.get("Origin") || "").trim();
+  if (origin) {
+    headers["Vary"] = "Origin";
+    if (allowedOrigins.has(origin.toLowerCase())) {
+      headers["Access-Control-Allow-Origin"] = origin;
+      headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS";
+      headers["Access-Control-Allow-Headers"] =
+        "Content-Type, Authorization, X-Authorization, x-authorization, X-Requested-With, Accept, Origin";
+      headers["Access-Control-Allow-Credentials"] = "true";
+      headers["Access-Control-Max-Age"] = "86400";
+    }
+  } else {
+    headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS";
+    headers["Access-Control-Allow-Headers"] =
+      "Content-Type, Authorization, X-Authorization, x-authorization, X-Requested-With, Accept, Origin";
+  }
+
+  return headers;
+}
+
+function buildOptionsCorsResponse(
+  request: Request,
+  env?: Record<string, string | undefined>,
+): Response {
+  const allowedOrigins = new Set<string>([
+    "https://facetube.online",
+    "https://www.facetube.online",
+  ]);
+  const appEnv = readEnvValue(env, "APP_ENV").toLowerCase();
+  const nodeEnv = readEnvValue(env, "NODE_ENV").toLowerCase();
+  if (
+    ["development", "dev", "local", "test"].includes(appEnv) ||
+    ["development", "dev", "local", "test"].includes(nodeEnv)
+  ) {
+    allowedOrigins.add("http://localhost:3000");
+    allowedOrigins.add("http://127.0.0.1:3000");
+  }
+
+  const origin = (request.headers.get("Origin") || "").trim();
+  if (origin) {
+    if (allowedOrigins.has(origin.toLowerCase())) {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          Vary: "Origin",
+          "Access-Control-Allow-Origin": origin,
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers":
+            "Content-Type, Authorization, X-Authorization, x-authorization, X-Requested-With, Accept, Origin",
+          "Access-Control-Allow-Credentials": "true",
+          "Access-Control-Max-Age": "86400",
+        },
+      });
+    }
+    return new Response(
+      JSON.stringify({ success: false, error: "CORS origin denied by policy." }),
+      {
+        status: 403,
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          Vary: "Origin",
+        },
+      },
+    );
+  }
+
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers":
+        "Content-Type, Authorization, X-Authorization, x-authorization, X-Requested-With, Accept, Origin",
+    },
+  });
+}
+
+function createJsonResponse(
+  data: unknown,
+  status = 200,
+  request?: Request,
+  env?: Record<string, string | undefined>,
+): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Authorization",
-    },
+    headers: buildApiCorsHeaders(request, env),
   });
 }
 
@@ -2553,16 +2671,20 @@ export type AuthResult =
 export function requireAuth(
   authUser: AuthUser | null,
   requestedUserId?: string | null,
+  request?: Request,
+  env?: Record<string, string | undefined>,
 ): AuthResult {
   if (!authUser) {
     return {
       success: false,
-      response: jsonResponse(
+      response: createJsonResponse(
         {
           success: false,
           error: "Authentication required. Please provide a valid Bearer session token.",
         },
         401,
+        request,
+        env,
       ),
     };
   }
@@ -2579,12 +2701,14 @@ export function requireAuth(
     if (!isAdmin) {
       return {
         success: false,
-        response: jsonResponse(
+        response: createJsonResponse(
           {
             success: false,
             error: "Unauthorized: Cross-user access is restricted to verified administrators.",
           },
           403,
+          request,
+          env,
         ),
       };
     }
@@ -2593,6 +2717,8 @@ export function requireAuth(
 
   return { success: true, user: authUser, effectiveUserId };
 }
+
+const baseRequireAuth = requireAuth;
 
 /**
  * Resolves a user's direct sponsor unambiguously from MySQL using exact user_id
@@ -3120,7 +3246,10 @@ export async function resolvePersistedVideoThumbnail(params: {
   try {
     const buffer = Buffer.from(base64Payload, "base64");
     if (buffer.length > 0) {
-      const imgUploadDir = path.resolve(process.cwd(), "uploads", "images");
+      const uploadsBaseDir = process.env["FACETUBE_UPLOADS_DIR"]?.trim();
+      const imgUploadDir = uploadsBaseDir
+        ? path.resolve(uploadsBaseDir, "images")
+        : path.resolve(process.cwd(), "uploads", "images");
       await fs.promises.mkdir(imgUploadDir, { recursive: true });
       const safeVidId = params.vidId.replace(/[^a-zA-Z0-9_-]/g, "_");
       const imgFileName = `thumb_${safeVidId}.${imgExt}`;
@@ -3134,6 +3263,1312 @@ export async function resolvePersistedVideoThumbnail(params: {
   return fallbackThumbnailUrl;
 }
 
+const ALLOWED_RECOVER_VIDEO_EXTENSIONS = new Set([".mp4", ".webm", ".ogg", ".mov", ".m4v", ".mkv"]);
+const TRUSTED_VIDEO_ASSET_HOSTS = new Set([
+  "api.facetube.online",
+  "facetube.online",
+  "www.facetube.online",
+  "localhost",
+  "127.0.0.1",
+]);
+
+let recoveryStoreLockPromise: Promise<void> = Promise.resolve();
+
+function withRecoveryStoreLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prev = recoveryStoreLockPromise;
+  let release!: () => void;
+  recoveryStoreLockPromise = new Promise<void>((res) => {
+    release = res;
+  });
+  return prev
+    .catch(() => {})
+    .then(async () => {
+      try {
+        return await fn();
+      } finally {
+        release();
+      }
+    });
+}
+
+function getVideoUploadDirectoriesNode(env?: Record<string, string | undefined>): string[] {
+  const dirs: string[] = [];
+  const uploadsOverride =
+    readEnvValue(env, "FACETUBE_UPLOADS_DIR") || process.env["FACETUBE_UPLOADS_DIR"]?.trim();
+  if (uploadsOverride) {
+    dirs.push(path.resolve(uploadsOverride, "videos"));
+  }
+  dirs.push(path.resolve(process.cwd(), "uploads", "videos"));
+  dirs.push(path.resolve(process.cwd(), "public", "uploads", "videos"));
+  dirs.push(path.resolve(process.cwd(), "api", "uploads", "videos"));
+
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const d of dirs) {
+    const norm = path.normalize(d);
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      unique.push(norm);
+    }
+  }
+  return unique;
+}
+
+export function validateUploadedVideoAssetNode(
+  rawVideoUrl: string,
+  env?: Record<string, string | undefined>,
+): {
+  valid: boolean;
+  status?: number;
+  missingAsset?: string;
+  relativePath?: string;
+  publicUrl?: string;
+  error?: string;
+} {
+  const trimmed = String(rawVideoUrl || "").trim();
+  if (!trimmed || ["null", "undefined", "nan"].includes(trimmed.toLowerCase())) {
+    return {
+      valid: false,
+      status: 422,
+      missingAsset: "video_url",
+      error: "Original uploaded video URL/path is missing. Cannot publish an incomplete video.",
+    };
+  }
+  if (/^(blob|data):/i.test(trimmed)) {
+    return {
+      valid: false,
+      status: 422,
+      missingAsset: "video_url",
+      error:
+        "Temporary browser blob/data URLs cannot be published. Provide the uploaded server video asset path.",
+    };
+  }
+  if (/^(javascript|file):/i.test(trimmed)) {
+    return {
+      valid: false,
+      status: 400,
+      missingAsset: "video_url",
+      error: "Invalid video asset scheme rejected.",
+    };
+  }
+  let hasControlChar = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const code = trimmed.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) {
+      hasControlChar = true;
+      break;
+    }
+  }
+  if (hasControlChar || trimmed.includes("..")) {
+    return {
+      valid: false,
+      status: 400,
+      missingAsset: "video_url",
+      error: "Invalid video asset path: path traversal or control characters rejected.",
+    };
+  }
+
+  let candidatePath = trimmed;
+  if (/^https?:\/\//i.test(trimmed)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      return {
+        valid: false,
+        status: 400,
+        missingAsset: "video_url",
+        error: "Invalid video asset URL format.",
+      };
+    }
+    const host = parsed.hostname.toLowerCase();
+    const extraHosts = [
+      readEnvValue(env, "PUBLIC_API_HOST"),
+      readEnvValue(env, "FACETUBE_API_BASE_URL"),
+      readEnvValue(env, "API_BASE_URL"),
+    ]
+      .map((val) => {
+        const clean = (val || "").trim();
+        if (!clean) return "";
+        if (/^https?:\/\//i.test(clean)) {
+          try {
+            return new URL(clean).hostname.toLowerCase();
+          } catch {
+            return "";
+          }
+        }
+        return clean.replace(/:\d+$/, "").toLowerCase();
+      })
+      .filter(Boolean);
+    const isTrusted = TRUSTED_VIDEO_ASSET_HOSTS.has(host) || extraHosts.includes(host);
+    if (!isTrusted) {
+      return {
+        valid: false,
+        status: 403,
+        missingAsset: "video_url",
+        error:
+          "Untrusted external video URL rejected. Recovery requires a local FaceTube upload asset.",
+      };
+    }
+    candidatePath = parsed.pathname || "";
+  }
+
+  let decodedPath = "";
+  try {
+    decodedPath = decodeURIComponent(candidatePath);
+  } catch {
+    return {
+      valid: false,
+      status: 400,
+      missingAsset: "video_url",
+      error: "Invalid video asset path encoding.",
+    };
+  }
+  for (let i = 0; i < decodedPath.length; i++) {
+    const code = decodedPath.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) {
+      return {
+        valid: false,
+        status: 400,
+        missingAsset: "video_url",
+        error: "Invalid video asset path: control characters rejected.",
+      };
+    }
+  }
+  if (decodedPath.includes("..") || decodedPath.includes("\\")) {
+    return {
+      valid: false,
+      status: 400,
+      missingAsset: "video_url",
+      error: "Invalid video asset path: path traversal or backslashes rejected.",
+    };
+  }
+
+  const normalizedPath = decodedPath.replace(/\\/g, "/");
+  const match = normalizedPath.match(/^\/?(?:api\/)?(uploads\/videos\/([A-Za-z0-9._-]+))$/);
+  if (!match || !match[2]) {
+    return {
+      valid: false,
+      status: 400,
+      missingAsset: "video_url",
+      error: "Invalid video asset location. Expected a verified /uploads/videos/<file> asset.",
+    };
+  }
+
+  const fileName = match[2];
+  const ext = path.extname(fileName).toLowerCase();
+  if (!ALLOWED_RECOVER_VIDEO_EXTENSIONS.has(ext)) {
+    return {
+      valid: false,
+      status: 400,
+      missingAsset: "video_url",
+      error: "Unsupported video file extension for recovery.",
+    };
+  }
+
+  const uploadDirs = getVideoUploadDirectoriesNode(env);
+  let escapedSymlink = false;
+  for (const dir of uploadDirs) {
+    if (!fs.existsSync(dir)) {
+      continue;
+    }
+    let realRoot: string;
+    try {
+      realRoot = fs.realpathSync(dir);
+    } catch {
+      continue;
+    }
+    const candidateFile = path.join(dir, fileName);
+    if (!fs.existsSync(candidateFile)) {
+      continue;
+    }
+    try {
+      const realFile = fs.realpathSync(candidateFile);
+      const rootPrefix = realRoot.endsWith(path.sep) ? realRoot : realRoot + path.sep;
+      if (!realFile.startsWith(rootPrefix)) {
+        escapedSymlink = true;
+        continue;
+      }
+      const stat = fs.statSync(realFile);
+      if (!stat.isFile() || stat.size <= 0) {
+        continue;
+      }
+      fs.accessSync(realFile, fs.constants.R_OK);
+      const relativePath = `/uploads/videos/${fileName}`;
+      return {
+        valid: true,
+        relativePath,
+        publicUrl: `https://${PRODUCTION_API_DOMAIN}${relativePath}`,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  if (escapedSymlink) {
+    return {
+      valid: false,
+      status: 403,
+      missingAsset: "video_file",
+      error: "Invalid video asset: symlink outside upload storage directory rejected.",
+    };
+  }
+
+  return {
+    valid: false,
+    status: 422,
+    missingAsset: "video_file",
+    error: `Original uploaded video file (/uploads/videos/${fileName}) is missing or empty on the server. Stop safely before publishing.`,
+  };
+}
+
+function extractCanonicalVideoAssetRelativePathNode(
+  rawUrl: string | null | undefined,
+  env?: Record<string, string | undefined>,
+): string | null {
+  const trimmed = String(rawUrl || "").trim();
+  if (!trimmed) return null;
+  let candidatePath = trimmed;
+  if (/^https?:\/\//i.test(trimmed)) {
+    let parsed: URL;
+    try {
+      parsed = new URL(trimmed);
+    } catch {
+      return null;
+    }
+    const host = parsed.hostname.toLowerCase();
+    const extraHosts = [
+      readEnvValue(env, "PUBLIC_API_HOST"),
+      readEnvValue(env, "FACETUBE_API_BASE_URL"),
+      readEnvValue(env, "API_BASE_URL"),
+    ]
+      .map((val) => {
+        const clean = (val || "").trim();
+        if (!clean) return "";
+        if (/^https?:\/\//i.test(clean)) {
+          try {
+            return new URL(clean).hostname.toLowerCase();
+          } catch {
+            return "";
+          }
+        }
+        return clean.replace(/:\d+$/, "").toLowerCase();
+      })
+      .filter(Boolean);
+    if (!TRUSTED_VIDEO_ASSET_HOSTS.has(host) && !extraHosts.includes(host)) {
+      return null;
+    }
+    candidatePath = parsed.pathname || "";
+  }
+  let decoded = candidatePath;
+  try {
+    decoded = decodeURIComponent(candidatePath);
+  } catch {
+    return null;
+  }
+  if (decoded.includes("..") || decoded.includes("\\")) return null;
+  const match = decoded.replace(/\\/g, "/").match(/^\/?(?:api\/)?(uploads\/videos\/([A-Za-z0-9._-]+))$/);
+  if (!match || !match[2]) return null;
+  return `/uploads/videos/${match[2]}`;
+}
+
+async function checkUploadAssetsTableExistsNode(qConn: {
+  query: (sql: string, params?: any[]) => Promise<any>;
+}): Promise<boolean> {
+  const [rows]: any = await qConn.query(
+    `SELECT TABLE_NAME
+     FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = 'uploaded_video_assets'
+     LIMIT 1`,
+  );
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+interface PremiumMysqlSchemaInfo {
+  hasAdEarningsCol: boolean;
+  hasIsBlockedCol: boolean;
+  hasPromoPaymentIdCol: boolean;
+  hasPromoAppliedAtCol: boolean;
+  hasCountryCodeCol: boolean;
+  hasPtAccountingCols: boolean;
+  hasPtPoolBreakdownCols: boolean;
+  hasPremAccountingCols: boolean;
+  hasPremPoolBreakdownCols: boolean;
+  hasGlobalPoolReservesTable: boolean;
+  hasReserveReasonInsufficientEnum: boolean;
+}
+
+async function checkGlobalPoolReserveSchemaReadyNode(qConn: {
+  query: (sql: string, params?: any[]) => Promise<any>;
+}): Promise<{ ready: boolean; status?: number; error?: string }> {
+  try {
+    const [tblRows]: any = await qConn.query(
+      `SELECT TABLE_NAME
+       FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'global_pool_reserves'
+       LIMIT 1`,
+    );
+    if (!Array.isArray(tblRows) || tblRows.length === 0) {
+      return {
+        ready: false,
+        status: 503,
+        error:
+          "Global Pool reserve schema migration has not been applied yet. Recovery aborted safely before settlement.",
+      };
+    }
+    return { ready: true };
+  } catch (err: unknown) {
+    if (isMysqlConnectionUnavailableError(err)) {
+      return {
+        ready: false,
+        status: 503,
+        error: "Database connection unavailable while checking Global Pool reserve schema.",
+      };
+    }
+    return {
+      ready: false,
+      status: 503,
+      error: "Unable to verify Global Pool reserve schema readiness. Recovery aborted safely.",
+    };
+  }
+}
+
+async function inspectPremiumMysqlSchemaNode(
+  qConn: { query: (sql: string, params?: any[]) => Promise<any> },
+  preVerifiedReserveTable: boolean,
+): Promise<PremiumMysqlSchemaInfo> {
+  let hasAdEarningsCol = false;
+  let hasIsBlockedCol = false;
+  let hasPromoPaymentIdCol = false;
+  let hasPromoAppliedAtCol = false;
+  let hasCountryCodeCol = false;
+  let hasPtGstCol = false;
+  let hasPtPgFeeCol = false;
+  let hasPtRefStatusCol = false;
+  let hasPtPoolDistCol = false;
+  let hasPtPoolResCol = false;
+  let hasPtPoolStatusCol = false;
+  let hasPremGstCol = false;
+  let hasPremPgFeeCol = false;
+  let hasPremRefStatusCol = false;
+  let hasPremPoolDistCol = false;
+  let hasPremPoolResCol = false;
+  let hasPremPoolStatusCol = false;
+  let hasGlobalPoolReservesTable = preVerifiedReserveTable;
+  let hasReserveReasonInsufficientEnum = false;
+
+  try {
+    const [colRows]: any = await qConn.query(
+      `SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND ((TABLE_NAME = 'uploaded_videos' AND COLUMN_NAME IN ('ad_earnings', 'is_blocked', 'promotion_payment_id', 'country_code'))
+           OR (TABLE_NAME = 'payment_orders' AND COLUMN_NAME = 'promotion_applied_at')
+           OR (TABLE_NAME = 'global_pool_reserves' AND COLUMN_NAME = 'reserve_reason')
+           OR (TABLE_NAME = 'payment_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status'))
+           OR (TABLE_NAME = 'premium_transactions' AND COLUMN_NAME IN ('gst_amount', 'pg_fee', 'referral_status', 'global_pool_distributed', 'global_pool_reserve', 'global_pool_status')))`,
+    );
+    for (const colRow of colRows || []) {
+      const tbl = String(colRow.TABLE_NAME || "").toLowerCase();
+      const col = String(colRow.COLUMN_NAME || "").toLowerCase();
+      const colType = String(colRow.COLUMN_TYPE || "").toLowerCase();
+      if (tbl === "uploaded_videos") {
+        if (col === "ad_earnings") hasAdEarningsCol = true;
+        else if (col === "is_blocked") hasIsBlockedCol = true;
+        else if (col === "promotion_payment_id") hasPromoPaymentIdCol = true;
+        else if (col === "country_code") hasCountryCodeCol = true;
+      } else if (tbl === "payment_orders" && col === "promotion_applied_at") {
+        hasPromoAppliedAtCol = true;
+      } else if (tbl === "global_pool_reserves" && col === "reserve_reason") {
+        if (colType.includes("insufficient_distributable_paise")) {
+          hasReserveReasonInsufficientEnum = true;
+        }
+      } else if (tbl === "payment_transactions") {
+        if (col === "gst_amount") hasPtGstCol = true;
+        else if (col === "pg_fee") hasPtPgFeeCol = true;
+        else if (col === "referral_status") hasPtRefStatusCol = true;
+        else if (col === "global_pool_distributed") hasPtPoolDistCol = true;
+        else if (col === "global_pool_reserve") hasPtPoolResCol = true;
+        else if (col === "global_pool_status") hasPtPoolStatusCol = true;
+      } else if (tbl === "premium_transactions") {
+        if (col === "gst_amount") hasPremGstCol = true;
+        else if (col === "pg_fee") hasPremPgFeeCol = true;
+        else if (col === "referral_status") hasPremRefStatusCol = true;
+        else if (col === "global_pool_distributed") hasPremPoolDistCol = true;
+        else if (col === "global_pool_reserve") hasPremPoolResCol = true;
+        else if (col === "global_pool_status") hasPremPoolStatusCol = true;
+      }
+    }
+  } catch {
+    // Keep conservative column defaults
+  }
+
+  if (!hasGlobalPoolReservesTable) {
+    const reserveCheck = await checkGlobalPoolReserveSchemaReadyNode(qConn);
+    hasGlobalPoolReservesTable = reserveCheck.ready;
+  }
+
+  return {
+    hasAdEarningsCol,
+    hasIsBlockedCol,
+    hasPromoPaymentIdCol,
+    hasPromoAppliedAtCol,
+    hasCountryCodeCol,
+    hasPtAccountingCols: hasPtGstCol && hasPtPgFeeCol && hasPtRefStatusCol,
+    hasPtPoolBreakdownCols: hasPtPoolDistCol && hasPtPoolResCol && hasPtPoolStatusCol,
+    hasPremAccountingCols: hasPremGstCol && hasPremPgFeeCol && hasPremRefStatusCol,
+    hasPremPoolBreakdownCols: hasPremPoolDistCol && hasPremPoolResCol && hasPremPoolStatusCol,
+    hasGlobalPoolReservesTable,
+    hasReserveReasonInsufficientEnum,
+  };
+}
+
+async function executePremiumMysqlSettlementNode(
+  conn: PoolConnection,
+  schema: PremiumMysqlSchemaInfo,
+  params: {
+    orderId: string;
+    paymentId: string;
+    uploaderId: string;
+    userName: string;
+    videoId: string;
+  },
+): Promise<{
+  settled: boolean;
+  status?: number;
+  error?: string;
+  txNumber?: number;
+  isSpecialTransaction?: boolean;
+  specialTag?: string;
+  distribution?: Record<string, any>;
+}> {
+  const { orderId, paymentId, uploaderId, userName, videoId } = params;
+  const amount = 6.0;
+
+  const [adminRows]: any = await conn.query(
+    `SELECT user_id FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1`,
+  );
+  const adminUserId = adminRows?.[0]?.user_id || "FT102857";
+
+  const [cntRows]: any = await conn.query(
+    `SELECT COUNT(*) as total FROM payment_transactions WHERE purpose = 'premium_video_upload' FOR UPDATE`,
+  );
+  const txNumber = Number(cntRows?.[0]?.total || 0) + 1;
+  const specialTag = "NORMAL_PREMIUM";
+
+  const directSponsor = await resolveDirectSponsorMysql(uploaderId, conn);
+  const verifiedReferrerId: string | null = directSponsor?.user_id || null;
+
+  const hasReferrer = Boolean(verifiedReferrerId);
+  const referralCommission = 1.0;
+  const referralStatus: "credited" | "unassigned_pending" = hasReferrer
+    ? "credited"
+    : "unassigned_pending";
+  const adminAllocation = 1.0;
+  const globalPoolAllocation = 3.0;
+  const gstAmount = 0.9;
+  const pgFeeAmount = 0.1;
+  const taxAndFees = 1.0;
+
+  const adEarningsExpr = schema.hasAdEarningsCol
+    ? "COALESCE(ad_earnings, 0.00) AS ad_earnings"
+    : "0.00 AS ad_earnings";
+  const blockedFilter = schema.hasIsBlockedCol
+    ? "\n   AND (is_blocked = 0 OR is_blocked IS NULL)"
+    : "";
+  const [eligibleRows]: any = await conn.query(
+    `SELECT id AS video_id, user_id, ${adEarningsExpr}
+     FROM uploaded_videos
+     WHERE (video_type = 'premium' OR payment_status = 'paid')
+       AND UPPER(user_id) != UPPER(?)${blockedFilter}
+     ORDER BY created_at ASC, id ASC`,
+    [uploaderId],
+  );
+  const eligibleVideos: Array<{ userId: string; videoId: string; adEarnings: number }> =
+    Array.isArray(eligibleRows)
+      ? eligibleRows.map((r: any) => ({
+          userId: String(r.user_id).trim().toUpperCase(),
+          videoId: String(r.video_id).trim(),
+          adEarnings: Math.max(0, Number(r.ad_earnings) || 0),
+        }))
+      : [];
+  const eligibleCreatorCount = eligibleVideos.length;
+
+  const poolPaise = 300;
+  let distributedPaise = 0;
+  let reservePaise = poolPaise;
+  const creatorPayouts: Array<{
+    userId: string;
+    videoId?: string;
+    amount: number;
+    amountPaise: number;
+  }> = [];
+
+  if (eligibleCreatorCount > 0) {
+    const weighted = calculateWeightedPoolPayouts(poolPaise, eligibleVideos);
+    distributedPaise = weighted.distributedPaise;
+    reservePaise = weighted.residualPaise;
+    for (const p of weighted.payouts) {
+      creatorPayouts.push({
+        userId: p.userId,
+        ...(p.videoId !== undefined ? { videoId: p.videoId } : {}),
+        amount: p.amount,
+        amountPaise: p.amountPaise,
+      });
+    }
+  }
+
+  const globalPoolDistributed = distributedPaise / 100;
+  const globalPoolReserve = reservePaise / 100;
+  const globalPoolStatus: GlobalPoolStatus =
+    reservePaise === 0 ? "settled" : distributedPaise === 0 ? "pending_reserve" : "partial_reserve";
+  const globalPoolReserveReason: GlobalPoolReserveReason | null =
+    reservePaise === 0
+      ? null
+      : eligibleCreatorCount === 0
+        ? "no_eligible_videos"
+        : distributedPaise === 0
+          ? "insufficient_distributable_paise"
+          : "rounding_residual";
+
+  if (reservePaise > 0 && !schema.hasGlobalPoolReservesTable) {
+    return {
+      settled: false,
+      status: 503,
+      error:
+        "Global Pool reserve schema migration has not been applied yet. Transaction safely rolled back.",
+    };
+  }
+
+  // 1. Insert into payment_transactions
+  if (schema.hasPtAccountingCols && schema.hasPtPoolBreakdownCols) {
+    await conn.query(
+      `INSERT INTO payment_transactions (
+        order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+        tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation,
+        global_pool_distributed, global_pool_reserve, global_pool_status,
+        gst_amount, pg_fee, referral_status, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'premium_video_upload', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        orderId,
+        paymentId,
+        uploaderId,
+        userName,
+        videoId || null,
+        amount,
+        txNumber,
+        specialTag,
+        referralCommission,
+        adminAllocation,
+        globalPoolAllocation,
+        globalPoolDistributed,
+        globalPoolReserve,
+        globalPoolStatus,
+        gstAmount,
+        pgFeeAmount,
+        referralStatus,
+      ],
+    );
+  } else if (schema.hasPtAccountingCols) {
+    await conn.query(
+      `INSERT INTO payment_transactions (
+        order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+        tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation,
+        gst_amount, pg_fee, referral_status, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'premium_video_upload', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        orderId,
+        paymentId,
+        uploaderId,
+        userName,
+        videoId || null,
+        amount,
+        txNumber,
+        specialTag,
+        referralCommission,
+        adminAllocation,
+        globalPoolAllocation,
+        gstAmount,
+        pgFeeAmount,
+        referralStatus,
+      ],
+    );
+  } else {
+    await conn.query(
+      `INSERT INTO payment_transactions (
+        order_id, payment_id, user_id, user_name, video_id, purpose, amount,
+        tx_number, is_special, special_tag, referral_commission, admin_allocation, global_pool_allocation, created_at
+      ) VALUES (?, ?, ?, ?, ?, 'premium_video_upload', ?, ?, 0, ?, ?, ?, ?, NOW())`,
+      [
+        orderId,
+        paymentId,
+        uploaderId,
+        userName,
+        videoId || null,
+        amount,
+        txNumber,
+        specialTag,
+        referralCommission,
+        adminAllocation,
+        globalPoolAllocation,
+      ],
+    );
+  }
+
+  // 2. Insert into premium_transactions audit table
+  try {
+    if (schema.hasPremAccountingCols && schema.hasPremPoolBreakdownCols) {
+      await conn.query(
+        `INSERT INTO premium_transactions (
+          id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+          amount, transaction_type, is_special, special_tag, referral_commission,
+          admin_allocation, global_pool_allocation, global_pool_distributed, global_pool_reserve, global_pool_status,
+          gst_amount, pg_fee, referral_status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'premium_upload', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          crypto.randomUUID(),
+          txNumber,
+          paymentId,
+          orderId,
+          videoId || null,
+          uploaderId,
+          verifiedReferrerId,
+          amount,
+          specialTag,
+          referralCommission,
+          adminAllocation,
+          globalPoolAllocation,
+          globalPoolDistributed,
+          globalPoolReserve,
+          globalPoolStatus,
+          gstAmount,
+          pgFeeAmount,
+          referralStatus,
+        ],
+      );
+    } else if (schema.hasPremAccountingCols) {
+      await conn.query(
+        `INSERT INTO premium_transactions (
+          id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+          amount, transaction_type, is_special, special_tag, referral_commission,
+          admin_allocation, global_pool_allocation, gst_amount, pg_fee, referral_status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'premium_upload', 0, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+        [
+          crypto.randomUUID(),
+          txNumber,
+          paymentId,
+          orderId,
+          videoId || null,
+          uploaderId,
+          verifiedReferrerId,
+          amount,
+          specialTag,
+          referralCommission,
+          adminAllocation,
+          globalPoolAllocation,
+          gstAmount,
+          pgFeeAmount,
+          referralStatus,
+        ],
+      );
+    } else {
+      await conn.query(
+        `INSERT INTO premium_transactions (
+          id, tx_number, payment_id, order_id, video_id, user_id, referrer_id,
+          amount, transaction_type, is_special, special_tag, referral_commission,
+          admin_allocation, global_pool_allocation, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'premium_upload', 0, ?, ?, ?, ?, NOW())`,
+        [
+          crypto.randomUUID(),
+          txNumber,
+          paymentId,
+          orderId,
+          videoId || null,
+          uploaderId,
+          verifiedReferrerId,
+          amount,
+          specialTag,
+          referralCommission,
+          adminAllocation,
+          globalPoolAllocation,
+        ],
+      );
+    }
+  } catch (ePt: unknown) {
+    if (!isMysqlMissingTableError(ePt)) {
+      throw ePt;
+    }
+  }
+
+  // 3. Direct referral income or unassigned pending ledger entry
+  if (verifiedReferrerId) {
+    const txRefId = `TX_REF_${paymentId}`;
+    await conn.query(
+      `INSERT INTO income_ledger (
+        id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+        income_type, amount, status, special_tag, description, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'referral_income', 1.0000, 'settled', ?, ?, NOW())`,
+      [
+        crypto.randomUUID(),
+        txRefId,
+        verifiedReferrerId,
+        uploaderId,
+        userName,
+        videoId || null,
+        specialTag,
+        `Direct referral commission (₹1.00) for eligible Premium Video upload by ${userName} (${uploaderId})`,
+      ],
+    );
+
+    await conn.query(
+      `INSERT INTO wallet_balances (user_id, balance, total_earned, total_withdrawn, referral_income, global_income, adsense_income, affiliate_income, updated_at)
+       VALUES (?, 1.00, 1.00, 0.00, 1.00, 0.00, 0.00, 0.00, NOW())
+       ON DUPLICATE KEY UPDATE
+         balance = balance + 1.00,
+         total_earned = total_earned + 1.00,
+         referral_income = referral_income + 1.00,
+         updated_at = NOW()`,
+      [verifiedReferrerId],
+    );
+  } else {
+    const txRefPendingId = `TX_REF_PENDING_${paymentId}`;
+    await conn.query(
+      `INSERT INTO income_ledger (
+        id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+        income_type, amount, status, special_tag, description, created_at
+      ) VALUES (?, ?, 'UNASSIGNED_REFERRAL', ?, ?, ?, 'referral_income', 1.0000, 'pending', 'REFERRAL_UNASSIGNED_PENDING', ?, NOW())`,
+      [
+        crypto.randomUUID(),
+        txRefPendingId,
+        uploaderId,
+        userName,
+        videoId || null,
+        `Unassigned referral allocation (₹1.00 pending) — no valid referrer for Premium Video #${txNumber} upload by ${userName} (${uploaderId})`,
+      ],
+    );
+  }
+
+  // 4. Admin allocation (₹1.00 strictly fixed)
+  const txAdmId = `TX_ADM_${paymentId}`;
+  const admDesc = `Admin Allocation (₹${adminAllocation.toFixed(2)}) for Premium Video #${txNumber} upload by ${userName} (${uploaderId})`;
+  await conn.query(
+    `INSERT INTO income_ledger (
+      id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+      income_type, amount, status, special_tag, description, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'admin_allocation', ?, 'settled', ?, ?, NOW())`,
+    [
+      crypto.randomUUID(),
+      txAdmId,
+      adminUserId,
+      uploaderId,
+      userName,
+      videoId || null,
+      adminAllocation,
+      specialTag,
+      admDesc,
+    ],
+  );
+  await conn.query(
+    `INSERT INTO wallet_balances (user_id, balance, total_earned, total_withdrawn, referral_income, global_income, adsense_income, affiliate_income, updated_at)
+     VALUES (?, ?, ?, 0.00, 0.00, 0.00, 0.00, 0.00, NOW())
+     ON DUPLICATE KEY UPDATE
+       balance = balance + VALUES(balance),
+       total_earned = total_earned + VALUES(total_earned),
+       updated_at = NOW()`,
+    [adminUserId, adminAllocation, adminAllocation],
+  );
+
+  // 5. Weighted Global Pool creator payouts
+  for (const payout of creatorPayouts) {
+    if (payout.amount <= 0) continue;
+    const txGlbId = `TX_GLB_${paymentId}_${payout.videoId || payout.userId}`;
+    const glbDesc = payout.videoId
+      ? `Per-Video Ads Earnings Share for video #${payout.videoId} (₹${payout.amount.toFixed(2)} share of ₹3 pool for Premium Video #${txNumber})`
+      : `Per-Video Ads Earnings Share (₹${payout.amount.toFixed(2)} share of ₹3 pool for Premium Video #${txNumber})`;
+
+    await conn.query(
+      `INSERT INTO income_ledger (
+        id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+        income_type, amount, status, special_tag, description, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'global_income', ?, 'settled', ?, ?, NOW())`,
+      [
+        crypto.randomUUID(),
+        txGlbId,
+        payout.userId,
+        uploaderId,
+        userName,
+        payout.videoId || videoId || null,
+        payout.amount,
+        specialTag,
+        glbDesc,
+      ],
+    );
+    await conn.query(
+      `INSERT INTO wallet_balances (user_id, balance, total_earned, total_withdrawn, referral_income, global_income, adsense_income, affiliate_income, updated_at)
+       VALUES (?, ?, ?, 0.00, 0.00, ?, 0.00, 0.00, NOW())
+       ON DUPLICATE KEY UPDATE
+         balance = balance + VALUES(balance),
+         total_earned = total_earned + VALUES(total_earned),
+         global_income = global_income + VALUES(global_income),
+         updated_at = NOW()`,
+      [payout.userId, payout.amount, payout.amount, payout.amount],
+    );
+  }
+
+  // 6. Pending Global Pool reserve (if unallocated)
+  let globalPoolReserveId: string | null = null;
+  if (reservePaise > 0 && globalPoolReserveReason) {
+    const txGlbReserveId = `TX_GLB_RESERVE_${paymentId}`;
+    const reserveDesc =
+      globalPoolReserveReason === "no_eligible_videos"
+        ? `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — 0 eligible previous videos for Premium Video #${txNumber})`
+        : globalPoolReserveReason === "insufficient_distributable_paise"
+          ? `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — insufficient distributable paise across ${eligibleCreatorCount} eligible videos for Premium Video #${txNumber})`
+          : `Global Pool pending reserve (₹${globalPoolReserve.toFixed(2)} — integer-paise rounding residual for Premium Video #${txNumber})`;
+
+    await conn.query(
+      `INSERT INTO income_ledger (
+        id, transaction_id, user_id, source_user_id, source_user_name, video_id,
+        income_type, amount, status, special_tag, description, created_at
+      ) VALUES (?, ?, 'GLOBAL_POOL_RESERVE', ?, ?, ?, 'global_income', ?, 'pending', 'GLOBAL_POOL_PENDING_RESERVE', ?, NOW())`,
+      [
+        crypto.randomUUID(),
+        txGlbReserveId,
+        uploaderId,
+        userName,
+        videoId || null,
+        globalPoolReserve,
+        reserveDesc,
+      ],
+    );
+
+    globalPoolReserveId = `gpr_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
+    const sqlReserveReason =
+      globalPoolReserveReason === "insufficient_distributable_paise" &&
+      !schema.hasReserveReasonInsufficientEnum
+        ? "rounding_residual"
+        : globalPoolReserveReason;
+    await conn.query(
+      `INSERT INTO global_pool_reserves (
+        id, payment_id, order_id, tx_number, source_user_id, source_video_id,
+        reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, NOW(), NOW())`,
+      [
+        globalPoolReserveId,
+        paymentId,
+        orderId,
+        txNumber,
+        uploaderId,
+        videoId || null,
+        globalPoolReserve,
+        reservePaise,
+        sqlReserveReason,
+        reserveDesc,
+      ],
+    );
+  }
+
+  return {
+    settled: true,
+    txNumber,
+    isSpecialTransaction: false,
+    specialTag,
+    distribution: {
+      directReferralAmount: referralCommission,
+      referrerId: verifiedReferrerId,
+      referralStatus,
+      adminAmount: adminAllocation,
+      adminPercent: Math.round((adminAllocation / amount) * 100),
+      globalPoolAmount: globalPoolAllocation,
+      globalPoolDistributedAmount: globalPoolDistributed,
+      globalPoolReserveAmount: globalPoolReserve,
+      globalPoolStatus,
+      globalPoolReserveReason,
+      globalPoolReserveId,
+      gstAmount,
+      pgFeeAmount,
+      taxAndFees,
+      totalAmount: amount,
+      eligibleMembersCount: eligibleCreatorCount,
+      perMemberShare:
+        eligibleCreatorCount > 0 && creatorPayouts.length > 0 ? creatorPayouts[0]!.amount : 0,
+      creatorPayouts,
+      totalReferralAmount: referralCommission,
+    },
+  };
+}
+
+async function upsertRecoveredVideoMysqlNode(
+  conn: PoolConnection,
+  schema: PremiumMysqlSchemaInfo,
+  params: {
+    videoId: string;
+    uploaderId: string;
+    creatorName: string;
+    title: string;
+    description: string;
+    videoUrl: string;
+    thumbnailUrl: string;
+    contentType: "short" | "long";
+    category: string;
+    duration: string;
+    visibility: "public" | "unlisted" | "private";
+    paymentId: string;
+    existingVideo: any;
+    detectedCountryCode: string;
+  },
+): Promise<Record<string, any>> {
+  const {
+    videoId,
+    uploaderId,
+    creatorName,
+    title,
+    description,
+    videoUrl,
+    thumbnailUrl,
+    contentType,
+    category,
+    duration,
+    visibility,
+    paymentId,
+    existingVideo,
+    detectedCountryCode,
+  } = params;
+
+  if (schema.hasCountryCodeCol) {
+    await conn.query(
+      `INSERT INTO uploaded_videos (
+        id, user_id, creator_name, title, description, video_url, thumbnail_url,
+        video_type, content_type, category, duration, views, likes,
+        payment_status, payment_id, payment_amount, is_promoted, visibility, country_code,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'premium', ?, ?, ?, 0, 0, 'paid', ?, 6.00, 0, ?, ?, NOW(), NOW())
+      ON DUPLICATE KEY UPDATE
+        creator_name = VALUES(creator_name),
+        title = VALUES(title),
+        description = VALUES(description),
+        video_url = VALUES(video_url),
+        thumbnail_url = VALUES(thumbnail_url),
+        video_type = 'premium',
+        content_type = VALUES(content_type),
+        category = VALUES(category),
+        duration = VALUES(duration),
+        payment_status = 'paid',
+        payment_id = VALUES(payment_id),
+        payment_amount = 6.00,
+        visibility = VALUES(visibility),
+        updated_at = NOW()`,
+      [
+        videoId,
+        uploaderId,
+        creatorName,
+        title,
+        description,
+        videoUrl,
+        thumbnailUrl,
+        contentType,
+        category,
+        duration,
+        paymentId,
+        visibility,
+        detectedCountryCode,
+      ],
+    );
+  } else {
+    await conn.query(
+      `INSERT INTO uploaded_videos (
+        id, user_id, creator_name, title, description, video_url, thumbnail_url,
+        video_type, content_type, category, duration, views, likes,
+        payment_status, payment_id, payment_amount, is_promoted, visibility,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'premium', ?, ?, ?, 0, 0, 'paid', ?, 6.00, 0, ?, NOW(), NOW())
+      ON DUPLICATE KEY UPDATE
+        creator_name = VALUES(creator_name),
+        title = VALUES(title),
+        description = VALUES(description),
+        video_url = VALUES(video_url),
+        thumbnail_url = VALUES(thumbnail_url),
+        video_type = 'premium',
+        content_type = VALUES(content_type),
+        category = VALUES(category),
+        duration = VALUES(duration),
+        payment_status = 'paid',
+        payment_id = VALUES(payment_id),
+        payment_amount = 6.00,
+        visibility = VALUES(visibility),
+        updated_at = NOW()`,
+      [
+        videoId,
+        uploaderId,
+        creatorName,
+        title,
+        description,
+        videoUrl,
+        thumbnailUrl,
+        contentType,
+        category,
+        duration,
+        paymentId,
+        visibility,
+      ],
+    );
+  }
+
+  const persistedCountryCode = existingVideo
+    ? normalizeCountryCode(existingVideo.country_code)
+    : schema.hasCountryCodeCol
+      ? detectedCountryCode
+      : UNKNOWN_COUNTRY_CODE;
+
+  const nowIso = new Date().toISOString();
+  return {
+    id: videoId,
+    user_id: uploaderId,
+    userId: uploaderId,
+    creator_name: creatorName,
+    creatorName,
+    title,
+    description,
+    video_url: videoUrl,
+    videoUrl,
+    thumbnail_url: thumbnailUrl,
+    thumbnailUrl,
+    video_type: "premium",
+    videoType: "premium",
+    content_type: contentType,
+    contentType,
+    category,
+    duration,
+    visibility,
+    country_code: persistedCountryCode,
+    countryCode: persistedCountryCode,
+    views: existingVideo ? Number(existingVideo.views || 0) : 0,
+    likes: existingVideo ? Number(existingVideo.likes || 0) : 0,
+    payment_status: "paid",
+    paymentStatus: "paid",
+    payment_id: paymentId,
+    paymentId,
+    payment_amount: 6.0,
+    paymentAmount: 6.0,
+    is_promoted: existingVideo ? Boolean(existingVideo.is_promoted) : false,
+    isPromoted: existingVideo ? Boolean(existingVideo.is_promoted) : false,
+    created_at: existingVideo?.created_at || nowIso,
+    updated_at: nowIso,
+  };
+}
+
+function applyRecoveredPremiumStoreWalletLedger(
+  targetStore: ServerStore,
+  params: {
+    paymentId: string;
+    uploaderId: string;
+    userName: string;
+    videoId: string;
+    verifiedReferrerId: string | null;
+    result: PaymentVerifyResult;
+  },
+): void {
+  const { paymentId, uploaderId, userName, videoId, verifiedReferrerId, result } = params;
+  if (!result.distribution) return;
+
+  const alreadyHasLedger = targetStore.walletTransactions.some(
+    (t: any) =>
+      t.transactionId === `TX_ADM_${paymentId}` ||
+      t.transaction_id === `TX_ADM_${paymentId}` ||
+      t.transactionId === `TX_REF_${paymentId}` ||
+      t.transaction_id === `TX_REF_${paymentId}` ||
+      t.transactionId === `TX_REF_PENDING_${paymentId}` ||
+      t.transaction_id === `TX_REF_PENDING_${paymentId}` ||
+      t.transactionId === `TX_GLB_RESERVE_${paymentId}` ||
+      t.transaction_id === `TX_GLB_RESERVE_${paymentId}`,
+  );
+  if (alreadyHasLedger) return;
+
+  if (!targetStore.wallets) targetStore.wallets = {};
+  const ensureWallet = (uid: string) => {
+    let w = targetStore.wallets[uid];
+    if (!w) {
+      w = {
+        balance: 0,
+        total_earned: 0,
+        total_withdrawn: 0,
+        referral_income: 0,
+        global_income: 0,
+        adsense_income: 0,
+        affiliate_income: 0,
+        updated_at: new Date().toISOString(),
+      };
+      targetStore.wallets[uid] = w;
+    }
+    return w;
+  };
+
+  if (
+    verifiedReferrerId &&
+    result.distribution.directReferralAmount &&
+    result.distribution.directReferralAmount > 0
+  ) {
+    const comm = Number(result.distribution.directReferralAmount);
+    const w = ensureWallet(verifiedReferrerId);
+    w.balance += comm;
+    w.total_earned += comm;
+    w.referral_income += comm;
+    w.updated_at = new Date().toISOString();
+
+    const txRefId = `TX_REF_${paymentId}`;
+    targetStore.walletTransactions.unshift({
+      id: `tx-ref-${Date.now()}`,
+      transactionId: txRefId,
+      transaction_id: txRefId,
+      userId: verifiedReferrerId,
+      user_id: verifiedReferrerId,
+      sourceUserId: uploaderId,
+      source_user_id: uploaderId,
+      sourceUserName: userName,
+      source_user_name: userName,
+      videoId: videoId || "",
+      video_id: videoId || "",
+      incomeType: "referral_income",
+      income_type: "referral_income",
+      amount: comm,
+      status: "settled",
+      specialTag: result.specialTag,
+      description: `Direct referral commission (₹${comm.toFixed(2)}) for eligible Premium Video upload by ${userName} (${uploaderId})`,
+      createdAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+  } else if (result.distribution.directReferralAmount > 0) {
+    const comm = Number(result.distribution.directReferralAmount);
+    const txRefPendingId = `TX_REF_PENDING_${paymentId}`;
+    targetStore.walletTransactions.unshift({
+      id: `tx-ref-pending-${Date.now()}`,
+      transactionId: txRefPendingId,
+      transaction_id: txRefPendingId,
+      userId: "UNASSIGNED_REFERRAL",
+      user_id: "UNASSIGNED_REFERRAL",
+      sourceUserId: uploaderId,
+      source_user_id: uploaderId,
+      sourceUserName: userName,
+      source_user_name: userName,
+      videoId: videoId || "",
+      video_id: videoId || "",
+      incomeType: "referral_income",
+      income_type: "referral_income",
+      amount: comm,
+      status: "pending",
+      specialTag: "REFERRAL_UNASSIGNED_PENDING",
+      description: `Unassigned referral allocation (₹${comm.toFixed(2)} pending) — no valid referrer for Premium Video #${result.txNumber || 0} upload by ${userName} (${uploaderId})`,
+      createdAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+  }
+
+  const adminAmount = Number(result.distribution.adminAmount || 0);
+  if (adminAmount > 0) {
+    const adminUser = targetStore.users.find((u) => u.role === "admin") || {
+      user_id: "FT102857",
+    };
+    const adminUserId = adminUser.user_id;
+    const w = ensureWallet(adminUserId);
+    w.balance += adminAmount;
+    w.total_earned += adminAmount;
+    w.updated_at = new Date().toISOString();
+
+    const txAdmId = `TX_ADM_${paymentId}`;
+    targetStore.walletTransactions.unshift({
+      id: `tx-adm-${Date.now()}`,
+      transactionId: txAdmId,
+      transaction_id: txAdmId,
+      userId: adminUserId,
+      user_id: adminUserId,
+      sourceUserId: uploaderId,
+      source_user_id: uploaderId,
+      sourceUserName: userName,
+      source_user_name: userName,
+      videoId: videoId || "",
+      video_id: videoId || "",
+      incomeType: "admin_allocation",
+      income_type: "admin_allocation",
+      amount: adminAmount,
+      status: "settled",
+      specialTag: result.specialTag,
+      description: `Admin Allocation (₹${adminAmount.toFixed(2)}) for Premium Video #${result.txNumber || 0} upload by ${userName} (${uploaderId})`,
+      createdAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+  }
+
+  for (const payout of result.distribution.creatorPayouts || []) {
+    if (payout.amount <= 0) continue;
+    const w = ensureWallet(payout.userId);
+    w.balance += payout.amount;
+    w.total_earned += payout.amount;
+    w.global_income += payout.amount;
+    w.updated_at = new Date().toISOString();
+
+    const txGlbId = `TX_GLB_${paymentId}_${payout.videoId || payout.userId}`;
+    const glbDesc = payout.videoId
+      ? `Per-Video Ads Earnings Share for video #${payout.videoId} (₹${payout.amount.toFixed(2)} share of ₹3 pool for Premium Video #${result.txNumber || 0})`
+      : `Per-Video Ads Earnings Share (₹${payout.amount.toFixed(2)} share of ₹3 pool for Premium Video #${result.txNumber || 0})`;
+
+    targetStore.walletTransactions.unshift({
+      id: `tx-glb-${Date.now()}-${payout.videoId || payout.userId}`,
+      transactionId: txGlbId,
+      transaction_id: txGlbId,
+      userId: payout.userId,
+      user_id: payout.userId,
+      sourceUserId: uploaderId,
+      source_user_id: uploaderId,
+      sourceUserName: userName,
+      source_user_name: userName,
+      videoId: payout.videoId || videoId || "",
+      video_id: payout.videoId || videoId || "",
+      incomeType: "global_income",
+      income_type: "global_income",
+      amount: payout.amount,
+      status: "settled",
+      specialTag: result.specialTag,
+      description: glbDesc,
+      createdAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+  }
+
+  const reserveAmt = Number(result.distribution.globalPoolReserveAmount || 0);
+  if (reserveAmt > 0) {
+    const txGlbReserveId = `TX_GLB_RESERVE_${paymentId}`;
+    const reserveDesc =
+      result.distribution.globalPoolReserveReason === "no_eligible_videos"
+        ? `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — 0 eligible previous videos for Premium Video #${result.txNumber || 0})`
+        : result.distribution.globalPoolReserveReason === "insufficient_distributable_paise"
+          ? `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — insufficient distributable paise across eligible videos for Premium Video #${result.txNumber || 0})`
+          : `Global Pool pending reserve (₹${reserveAmt.toFixed(2)} — integer-paise rounding residual for Premium Video #${result.txNumber || 0})`;
+
+    targetStore.walletTransactions.unshift({
+      id: `tx-glb-reserve-${Date.now()}`,
+      transactionId: txGlbReserveId,
+      transaction_id: txGlbReserveId,
+      userId: "GLOBAL_POOL_RESERVE",
+      user_id: "GLOBAL_POOL_RESERVE",
+      sourceUserId: uploaderId,
+      source_user_id: uploaderId,
+      sourceUserName: userName,
+      source_user_name: userName,
+      videoId: videoId || "",
+      video_id: videoId || "",
+      incomeType: "global_income",
+      income_type: "global_income",
+      amount: reserveAmt,
+      status: "pending",
+      specialTag: "GLOBAL_POOL_PENDING_RESERVE",
+      description: reserveDesc,
+      createdAt: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+  }
+}
+
 export async function handleApiRequest(
   request: Request,
   env?: Record<string, string | undefined>,
@@ -3143,7 +4578,7 @@ export async function handleApiRequest(
     return await dispatchApiRequest(request, env, requestMeta);
   } catch (err: unknown) {
     if (err instanceof AuthDatabaseError) {
-      return jsonResponse({ success: false, error: err.message }, err.status);
+      return createJsonResponse({ success: false, error: err.message }, err.status, request, env);
     }
     throw err;
   }
@@ -3154,6 +4589,10 @@ async function dispatchApiRequest(
   env?: Record<string, string | undefined>,
   requestMeta?: ApiRequestMeta,
 ): Promise<Response | null> {
+  const jsonResponse = (data: unknown, status = 200) =>
+    createJsonResponse(data, status, request, env);
+  const requireAuth = (authUser: AuthUser | null, requestedUserId?: string | null) =>
+    baseRequireAuth(authUser, requestedUserId, request, env);
   const getAuthUserFromRequest = (
     req: Request,
     st: ServerStore,
@@ -3165,14 +4604,7 @@ async function dispatchApiRequest(
   const pathname = url.pathname;
 
   if (request.method === "OPTIONS") {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Authorization",
-      },
-    });
+    return buildOptionsCorsResponse(request, env);
   }
 
   // Normalize path: strip /api/ and .php extension
@@ -5977,6 +7409,2189 @@ async function dispatchApiRequest(
         const msg = err instanceof Error ? err.message : String(err);
         return jsonResponse({ verified: false, error: "Payment verification failed: " + msg }, 500);
       }
+    }
+  }
+
+  if (route === "payments/recover-captured" || route === "payment/recover-captured") {
+    if (method !== "POST") {
+      return jsonResponse({ recovered: false, verified: false, error: "Method Not Allowed" }, 405);
+    }
+
+    try {
+      const readEnv = (key: string) => readEnvValue(env, key);
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+      const pool = getMysqlPool();
+      const payload = await request.json().catch(() => ({}));
+
+      const orderId = String(payload.orderId || payload.order_id || "").trim();
+      const paymentId = String(payload.paymentId || payload.payment_id || "").trim();
+      const videoId = String(payload.videoId || payload.video_id || "").trim();
+      const requestedUserId = String(payload.userId || payload.user_id || "").trim();
+
+      if (!orderId || !paymentId || !videoId) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            error: "Invalid recovery request: orderId, paymentId, and videoId are required.",
+          },
+          400,
+        );
+      }
+
+      if (payload.purpose !== undefined && String(payload.purpose).trim() !== "") {
+        if (String(payload.purpose).trim().toLowerCase() !== "premium_video_upload") {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error:
+                "Recovery only supports Sponsor Video uploads (purpose: premium_video_upload).",
+            },
+            400,
+          );
+        }
+      }
+
+      if (payload.currency !== undefined && String(payload.currency).trim() !== "") {
+        if (String(payload.currency).trim().toUpperCase() !== "INR") {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Invalid currency: Sponsor video recovery requires INR.",
+            },
+            400,
+          );
+        }
+      }
+
+      if (payload.amount !== undefined && payload.amount !== null && payload.amount !== "") {
+        const numAmt = Number(payload.amount);
+        if (!Number.isFinite(numAmt) || Math.abs(numAmt - 6.0) > 0.01) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Invalid amount: Sponsor video recovery requires exact ₹6.00 INR (600 paise).",
+            },
+            400,
+          );
+        }
+      }
+
+      // 1. Fail-closed server-side Razorpay credential check (never bypassed, never exposed)
+      const sanitizeKey = (val: string) => val.replace(/^["']|["']$/g, "").trim();
+      const keyId = sanitizeKey(readEnv("RAZORPAY_KEY_ID"));
+      const secretKey = sanitizeKey(readEnv("RAZORPAY_KEY_SECRET"));
+      if (!keyId || !secretKey) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error:
+              "Payment gateway verification is unavailable on server. RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET must be configured.",
+          },
+          500,
+        );
+      }
+
+      if ((isProduction || process.env["NODE_ENV"] === "production") && !pool) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error:
+              "Database connection unavailable. In production, payment recovery requires persistent database storage.",
+          },
+          503,
+        );
+      }
+
+      // 2. Strict authenticated user check (strict owner match, no cross-user bypass)
+      let authUser: AuthUser | null = null;
+      try {
+        authUser = await getAuthUserFromRequest(request, store, pool, env);
+      } catch (authErr: any) {
+        if (authErr instanceof AuthDatabaseError) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: authErr.message,
+            },
+            authErr.status,
+          );
+        }
+        throw authErr;
+      }
+
+      if (!authUser) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Authentication required. Please log in to recover this payment.",
+          },
+          401,
+        );
+      }
+
+      const authUserId = String(authUser.user_id || "").trim();
+      if (requestedUserId && requestedUserId.toUpperCase() !== authUserId.toUpperCase()) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Unauthorized: Recovery request user does not match authenticated user.",
+          },
+          403,
+        );
+      }
+
+      // 3. Validate original payment order, strict ownership, purpose, amount, currency, and video mapping
+      let preOrder: any = null;
+      let preExistingVideo: any = null;
+      if (pool) {
+        try {
+          const [poRows]: any = await pool.query(
+            `SELECT * FROM payment_orders WHERE order_id = ? LIMIT 1`,
+            [orderId],
+          );
+          preOrder = poRows?.[0] || null;
+        } catch (dbErr: unknown) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: isMysqlConnectionUnavailableError(dbErr)
+                ? "Database connection unavailable during order lookup."
+                : "Database error looking up original payment order.",
+            },
+            isMysqlConnectionUnavailableError(dbErr) ? 503 : 500,
+          );
+        }
+      } else {
+        preOrder = (store.paymentOrders || []).find((o) => o.order_id === orderId) || null;
+      }
+
+      if (!preOrder) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Original payment order not found.",
+          },
+          404,
+        );
+      }
+
+      const orderUserId = String(preOrder.user_id || "").trim();
+      if (orderUserId.toUpperCase() !== authUserId.toUpperCase()) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Unauthorized: Authenticated user does not own the original payment order.",
+          },
+          403,
+        );
+      }
+
+      if (
+        String(preOrder.purpose || "")
+          .trim()
+          .toLowerCase() !== "premium_video_upload"
+      ) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Invalid order purpose: recovery requires a premium_video_upload order.",
+          },
+          400,
+        );
+      }
+
+      if (
+        String(preOrder.currency || "INR")
+          .trim()
+          .toUpperCase() !== "INR"
+      ) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Invalid order currency: expected INR.",
+          },
+          400,
+        );
+      }
+
+      if (Math.abs(Number(preOrder.amount || 0) - 6.0) > 0.01) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Invalid order amount: Sponsor video recovery requires ₹6.00 INR (600 paise).",
+          },
+          400,
+        );
+      }
+
+      const orderVideoId = String(preOrder.video_id || "").trim();
+      if (!orderVideoId) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Original payment order is not linked to any video ID.",
+          },
+          400,
+        );
+      }
+      if (orderVideoId !== videoId) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: `Conflict: Original order is linked to video '${orderVideoId}', not '${videoId}'.`,
+          },
+          409,
+        );
+      }
+
+      if (preOrder.status === "paid" && preOrder.payment_id && preOrder.payment_id !== paymentId) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Conflict: Payment order was already settled with a different payment ID.",
+          },
+          409,
+        );
+      }
+
+      // 4. Anti-reuse & existing video checks
+      if (pool) {
+        try {
+          const [reuseOrderRows]: any = await pool.query(
+            `SELECT order_id FROM payment_orders WHERE payment_id = ? AND order_id != ? LIMIT 1`,
+            [paymentId, orderId],
+          );
+          if (reuseOrderRows && reuseOrderRows.length > 0) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Conflict: Payment ID is already linked to another payment order.",
+              },
+              409,
+            );
+          }
+
+          const [reuseVidRows]: any = await pool.query(
+            `SELECT id FROM uploaded_videos WHERE payment_id = ? AND id != ? LIMIT 1`,
+            [paymentId, videoId],
+          );
+          if (reuseVidRows && reuseVidRows.length > 0) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Conflict: Payment ID is already linked to another video.",
+              },
+              409,
+            );
+          }
+
+          const [preTxRows]: any = await pool.query(
+            `SELECT * FROM payment_transactions WHERE payment_id = ? LIMIT 1`,
+            [paymentId],
+          );
+          const preTx = preTxRows?.[0];
+          if (preTx) {
+            const txOrderMismatch = Boolean(preTx.order_id) && String(preTx.order_id) !== orderId;
+            const txUserMismatch =
+              String(preTx.user_id || "")
+                .trim()
+                .toUpperCase() !== orderUserId.toUpperCase();
+            const txVideo = String(preTx.video_id || "").trim();
+            const txVideoMismatch = txVideo !== "" && txVideo !== videoId;
+            if (
+              txOrderMismatch ||
+              txUserMismatch ||
+              txVideoMismatch ||
+              String(preTx.purpose || "") !== "premium_video_upload"
+            ) {
+              return jsonResponse(
+                {
+                  recovered: false,
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  videoId,
+                  error:
+                    "Conflict: Payment ID has already been recorded for a different order, video, or user.",
+                },
+                409,
+              );
+            }
+          }
+
+          const [preVidRows]: any = await pool.query(
+            `SELECT * FROM uploaded_videos WHERE id = ? LIMIT 1`,
+            [videoId],
+          );
+          preExistingVideo = preVidRows?.[0] || null;
+        } catch (preDbErr: unknown) {
+          console.error(
+            "[recover-captured] MySQL pre-check error:",
+            preDbErr instanceof Error ? preDbErr.message : String(preDbErr),
+          );
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: isMysqlConnectionUnavailableError(preDbErr)
+                ? "Database connection unavailable verifying payment/video records."
+                : "Database error verifying payment/video records.",
+            },
+            isMysqlConnectionUnavailableError(preDbErr) ? 503 : 500,
+          );
+        }
+      } else {
+        const reuseOrder = (store.paymentOrders || []).find(
+          (o) => o.payment_id === paymentId && o.order_id !== orderId,
+        );
+        if (reuseOrder) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Conflict: Payment ID is already linked to another payment order.",
+            },
+            409,
+          );
+        }
+
+        const reuseVid = (store.videos || []).find(
+          (v) => v.payment_id === paymentId && v.id !== videoId,
+        );
+        if (reuseVid) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Conflict: Payment ID is already linked to another video.",
+            },
+            409,
+          );
+        }
+
+        const persistentTxs = await getPersistentTransactions();
+        const preTx = persistentTxs.find((t) => t.paymentId === paymentId);
+        if (preTx) {
+          const txOrderMismatch = Boolean(preTx.orderId) && preTx.orderId !== orderId;
+          const txUserMismatch =
+            String(preTx.userId || "")
+              .trim()
+              .toUpperCase() !== orderUserId.toUpperCase();
+          const txVideo = String(preTx.videoId || "").trim();
+          const txVideoMismatch = txVideo !== "" && txVideo !== videoId;
+          if (
+            txOrderMismatch ||
+            txUserMismatch ||
+            txVideoMismatch ||
+            preTx.transactionType !== "premium_upload"
+          ) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Conflict: Payment ID has already been recorded for a different order, video, or user.",
+              },
+              409,
+            );
+          }
+        }
+
+        preExistingVideo = (store.videos || []).find((v) => v.id === videoId) || null;
+      }
+
+      if (preExistingVideo) {
+        if (
+          String(preExistingVideo.user_id || "")
+            .trim()
+            .toUpperCase() !== orderUserId.toUpperCase()
+        ) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Unauthorized: Existing video record belongs to a different user.",
+            },
+            403,
+          );
+        }
+        if (String(preExistingVideo.video_type || "").toLowerCase() === "free") {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Free video uploads cannot be recovered as ₹6 Sponsor videos.",
+            },
+            400,
+          );
+        }
+        if (preExistingVideo.payment_id && String(preExistingVideo.payment_id) !== paymentId) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Conflict: Existing video is already linked to a different payment ID.",
+            },
+            409,
+          );
+        }
+      }
+
+      // 5. Validate title & original uploaded video asset BEFORE gateway call or DB mutation
+      const title = String(payload.title ?? preExistingVideo?.title ?? "").trim();
+      if (!title) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            missingAsset: "title",
+            error: "Video title is required to publish the recovered Sponsor video.",
+          },
+          422,
+        );
+      }
+
+      const description =
+        payload.description !== undefined
+          ? String(payload.description).trim()
+          : String(preExistingVideo?.description || "").trim();
+
+      const rawClientVideoUrl = String(payload.videoUrl ?? payload.video_url ?? "").trim();
+      const existingVideoCanonicalPath = preExistingVideo?.video_url
+        ? extractCanonicalVideoAssetRelativePathNode(preExistingVideo.video_url, env)
+        : null;
+      if (preExistingVideo?.video_url && rawClientVideoUrl !== "") {
+        const clientCanonicalPath = extractCanonicalVideoAssetRelativePathNode(
+          rawClientVideoUrl,
+          env,
+        );
+        if (
+          !existingVideoCanonicalPath ||
+          !clientCanonicalPath ||
+          clientCanonicalPath !== existingVideoCanonicalPath
+        ) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error:
+                "Conflict: Cannot overwrite existing video's verified asset URL during recovery.",
+            },
+            409,
+          );
+        }
+      }
+
+      const rawVideoUrl = rawClientVideoUrl || String(preExistingVideo?.video_url ?? "").trim();
+      const assetValidation = validateUploadedVideoAssetNode(rawVideoUrl, env);
+      if (!assetValidation.valid || !assetValidation.publicUrl || !assetValidation.relativePath) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            missingAsset: assetValidation.missingAsset || "video_url",
+            error:
+              assetValidation.error ||
+              "Original uploaded video asset is missing or invalid. Stop safely before publishing.",
+          },
+          assetValidation.status || 422,
+        );
+      }
+      const resolvedVideoUrl = assetValidation.publicUrl;
+
+      // Verify payment order video_url binding if recorded on preOrder
+      if (preOrder.video_url && String(preOrder.video_url).trim() !== "") {
+        const orderAssetCanon = extractCanonicalVideoAssetRelativePathNode(preOrder.video_url, env);
+        if (!orderAssetCanon || orderAssetCanon !== assetValidation.relativePath) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error:
+                "Conflict: Original payment order is linked to a different uploaded video asset.",
+            },
+            409,
+          );
+        }
+      }
+
+      // Verify uploaded video asset belongs to authenticated order owner and matches order/video
+      const hasMatchedExistingVideoRecord = Boolean(
+        preExistingVideo &&
+        String(preExistingVideo.user_id || "")
+          .trim()
+          .toUpperCase() === orderUserId.toUpperCase() &&
+        existingVideoCanonicalPath &&
+        existingVideoCanonicalPath === assetValidation.relativePath,
+      );
+
+      let hasUploadAssetsTable = false;
+      if (pool) {
+        try {
+          hasUploadAssetsTable = await checkUploadAssetsTableExistsNode(pool);
+          if (hasUploadAssetsTable) {
+            const [assetRows]: any = await pool.query(
+              `SELECT * FROM uploaded_video_assets WHERE relative_path = ? LIMIT 1`,
+              [assetValidation.relativePath],
+            );
+            const assetRow = assetRows?.[0] || null;
+            if (!assetRow) {
+              if (!hasMatchedExistingVideoRecord) {
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    missingAsset: "video_file",
+                    error:
+                      "Uploaded video asset ownership record is missing. Please re-upload your video file while signed in.",
+                  },
+                  422,
+                );
+              }
+            } else {
+              if (
+                String(assetRow.user_id || "")
+                  .trim()
+                  .toUpperCase() !== orderUserId.toUpperCase()
+              ) {
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    error: "Unauthorized: Uploaded video asset belongs to a different user.",
+                  },
+                  403,
+                );
+              }
+              const assetVideoId = String(assetRow.video_id || "").trim();
+              if (assetVideoId && assetVideoId !== videoId) {
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    error:
+                      "Conflict: Uploaded video asset is already linked to a different video.",
+                  },
+                  409,
+                );
+              }
+              const assetOrderId = String(assetRow.order_id || "").trim();
+              if (assetOrderId && assetOrderId !== orderId) {
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    error:
+                      "Conflict: Uploaded video asset is already linked to a different payment order.",
+                  },
+                  409,
+                );
+              }
+            }
+          } else if (!hasMatchedExistingVideoRecord) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Upload asset ownership tracking schema (uploaded_video_assets) has not been applied yet. Recovery aborted safely before settlement.",
+              },
+              503,
+            );
+          }
+        } catch (assetDbErr: unknown) {
+          console.error(
+            "[recover-captured] Asset ownership lookup error:",
+            assetDbErr instanceof Error ? assetDbErr.message : String(assetDbErr),
+          );
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: isMysqlConnectionUnavailableError(assetDbErr)
+                ? "Database connection unavailable while verifying uploaded asset ownership."
+                : "Database error verifying uploaded asset ownership.",
+            },
+            isMysqlConnectionUnavailableError(assetDbErr) ? 503 : 500,
+          );
+        }
+      } else {
+        const assetRec = (store.uploadedAssets || []).find(
+          (a) => a.relative_path === assetValidation.relativePath,
+        );
+        if (!assetRec) {
+          if (!hasMatchedExistingVideoRecord) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                missingAsset: "video_file",
+                error:
+                  "Uploaded video asset ownership record is missing. Please re-upload your video file while signed in.",
+              },
+              422,
+            );
+          }
+        } else {
+          if (
+            String(assetRec.user_id || "")
+              .trim()
+              .toUpperCase() !== orderUserId.toUpperCase()
+          ) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Unauthorized: Uploaded video asset belongs to a different user.",
+              },
+              403,
+            );
+          }
+          const assetVideoId = String(assetRec.video_id || "").trim();
+          if (assetVideoId && assetVideoId !== videoId) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Conflict: Uploaded video asset is already linked to a different video.",
+              },
+              409,
+            );
+          }
+          const assetOrderId = String(assetRec.order_id || "").trim();
+          if (assetOrderId && assetOrderId !== orderId) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Conflict: Uploaded video asset is already linked to a different payment order.",
+              },
+              409,
+            );
+          }
+        }
+      }
+
+      const rawContentType = String(
+        payload.contentType ??
+          payload.content_type ??
+          preOrder.content_type ??
+          preExistingVideo?.content_type ??
+          "long",
+      )
+        .trim()
+        .toLowerCase();
+      const contentType = rawContentType || "long";
+      if (contentType !== "short" && contentType !== "long") {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Invalid contentType. Allowed values: short, long.",
+          },
+          400,
+        );
+      }
+
+      const category =
+        String(payload.category ?? preExistingVideo?.category ?? "General").trim() || "General";
+
+      const rawVisibility = String(payload.visibility ?? preExistingVideo?.visibility ?? "public")
+        .trim()
+        .toLowerCase();
+      const visibility = (rawVisibility || "public") as "public" | "unlisted" | "private";
+      if (visibility !== "public" && visibility !== "unlisted" && visibility !== "private") {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Invalid visibility value. Allowed values: public, unlisted, private.",
+          },
+          400,
+        );
+      }
+
+      const duration =
+        String(payload.duration ?? preExistingVideo?.duration ?? "").trim() ||
+        (contentType === "short" ? "0:45" : "1:00");
+      const rawThumbnailUrl =
+        payload.thumbnailUrl ?? payload.thumbnail_url ?? preExistingVideo?.thumbnail_url;
+      const creatorName =
+        String(
+          payload.creatorName ??
+            payload.creator_name ??
+            preExistingVideo?.creator_name ??
+            authUser.channel_name ??
+            authUser.name ??
+            preOrder.user_name ??
+            "FaceTube Creator",
+        ).trim() || "FaceTube Creator";
+
+      // 6. Verify Global Pool reserve schema readiness BEFORE calling Razorpay API
+      if (pool) {
+        const reserveReady = await checkGlobalPoolReserveSchemaReadyNode(pool);
+        if (!reserveReady.ready) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: reserveReady.error || "Global Pool reserve schema is not ready.",
+            },
+            reserveReady.status || 503,
+          );
+        }
+      }
+
+      // 7. Fetch original payment directly from Razorpay API (GET ONLY — NEVER /orders, /capture, or /refund)
+      const authHeader = "Basic " + Buffer.from(`${keyId}:${secretKey}`).toString("base64");
+      let pData: any = null;
+      try {
+        const pRes = await fetch(
+          `https://api.razorpay.com/v1/payments/${encodeURIComponent(paymentId)}`,
+          {
+            method: "GET",
+            headers: {
+              Authorization: authHeader,
+              "Content-Type": "application/json",
+            },
+          },
+        );
+        if (!pRes.ok) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Razorpay payment lookup failed with gateway.",
+            },
+            pRes.status >= 500 ? 502 : 400,
+          );
+        }
+        pData = await pRes.json();
+      } catch (fetchErr: unknown) {
+        console.error(
+          "[recover-captured] Razorpay remote lookup error:",
+          fetchErr instanceof Error ? fetchErr.message : String(fetchErr),
+        );
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Unable to reach Razorpay payment gateway. Please try again.",
+          },
+          502,
+        );
+      }
+
+      if (!pData || typeof pData !== "object") {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Invalid response structure from Razorpay gateway.",
+          },
+          400,
+        );
+      }
+
+      if (!pData.id || String(pData.id) !== paymentId) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Razorpay payment ID mismatch.",
+          },
+          400,
+        );
+      }
+
+      if (!pData.order_id || String(pData.order_id) !== orderId) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Razorpay payment does not belong to the exact original order ID.",
+          },
+          400,
+        );
+      }
+
+      const gatewayStatus = String(pData.status || "")
+        .trim()
+        .toLowerCase();
+      if (gatewayStatus !== "captured") {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: `Only already-captured payments can be recovered (gateway status: ${pData.status || "unknown"}). Capture was intentionally not called.`,
+          },
+          400,
+        );
+      }
+
+      if (Number(pData.amount) !== 600) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Razorpay payment amount mismatch: expected 600 paise (₹6.00 INR).",
+          },
+          400,
+        );
+      }
+
+      if (
+        String(pData.currency || "")
+          .trim()
+          .toUpperCase() !== "INR"
+      ) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error: "Razorpay payment currency mismatch: expected INR.",
+          },
+          400,
+        );
+      }
+
+      if (pData.notes && typeof pData.notes === "object") {
+        const noteVideoId = String(pData.notes.videoId || "").trim();
+        if (noteVideoId && noteVideoId !== videoId) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Conflict: Razorpay payment notes point to a different video ID.",
+            },
+            409,
+          );
+        }
+        const noteUserId = String(pData.notes.userId || "").trim();
+        if (noteUserId && noteUserId.toUpperCase() !== orderUserId.toUpperCase()) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Unauthorized: Razorpay payment notes belong to a different user.",
+            },
+            403,
+          );
+        }
+        const notePurpose = String(pData.notes.purpose || "")
+          .trim()
+          .toLowerCase();
+        if (notePurpose && notePurpose !== "premium_video_upload") {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Invalid Razorpay payment purpose in gateway notes.",
+            },
+            400,
+          );
+        }
+      }
+
+      const detectedCountryCode = resolveTrustedRequestCountryCode(request, env, requestMeta);
+      const uploaderNorm = orderUserId.toUpperCase();
+      const userName =
+        String(preOrder.user_name || authUser.name || creatorName).trim() || "Creator";
+
+      // 8a. MySQL ACID Recovery Path
+      if (pool) {
+        let schema: PremiumMysqlSchemaInfo;
+        let conn: PoolConnection;
+        try {
+          schema = await inspectPremiumMysqlSchemaNode(pool, true);
+          conn = await pool.getConnection();
+        } catch (connErr: unknown) {
+          console.error(
+            "[recover-captured] MySQL connection/schema init error:",
+            connErr instanceof Error ? connErr.message : String(connErr),
+          );
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: isMysqlConnectionUnavailableError(connErr)
+                ? "Database connection unavailable during recovery. Please try again."
+                : "Database error preparing payment recovery.",
+            },
+            isMysqlConnectionUnavailableError(connErr) ? 503 : 500,
+          );
+        }
+        try {
+          await conn.beginTransaction();
+
+          const [lockedPoRows]: any = await conn.query(
+            `SELECT * FROM payment_orders WHERE order_id = ? FOR UPDATE`,
+            [orderId],
+          );
+          const lockedOrder = lockedPoRows?.[0];
+          if (!lockedOrder) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Original payment order not found.",
+              },
+              404,
+            );
+          }
+
+          if (
+            String(lockedOrder.user_id || "")
+              .trim()
+              .toUpperCase() !== authUserId.toUpperCase()
+          ) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Unauthorized: Authenticated user does not own the original payment order.",
+              },
+              403,
+            );
+          }
+
+          if (
+            String(lockedOrder.purpose || "")
+              .trim()
+              .toLowerCase() !== "premium_video_upload" ||
+            String(lockedOrder.currency || "INR")
+              .trim()
+              .toUpperCase() !== "INR" ||
+            Math.abs(Number(lockedOrder.amount || 0) - 6.0) > 0.01
+          ) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Original payment order metadata mismatch (expected ₹6 INR premium_video_upload).",
+              },
+              400,
+            );
+          }
+
+          const lockedOrderVideoId = String(lockedOrder.video_id || "").trim();
+          if (!lockedOrderVideoId || lockedOrderVideoId !== videoId) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Conflict: Original payment order video mapping mismatch.",
+              },
+              409,
+            );
+          }
+
+          if (
+            lockedOrder.status === "paid" &&
+            lockedOrder.payment_id &&
+            String(lockedOrder.payment_id) !== paymentId
+          ) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Conflict: Payment order was already settled with a different payment ID.",
+              },
+              409,
+            );
+          }
+
+          const [reuseVidLocked]: any = await conn.query(
+            `SELECT id FROM uploaded_videos WHERE payment_id = ? AND id != ? LIMIT 1 FOR UPDATE`,
+            [paymentId, videoId],
+          );
+          if (reuseVidLocked && reuseVidLocked.length > 0) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Conflict: Payment ID is already linked to another video.",
+              },
+              409,
+            );
+          }
+
+          const [lockedVidRows]: any = await conn.query(
+            `SELECT * FROM uploaded_videos WHERE id = ? FOR UPDATE`,
+            [videoId],
+          );
+          const lockedVideo = lockedVidRows?.[0] || null;
+
+          if (lockedVideo) {
+            if (
+              String(lockedVideo.user_id || "")
+                .trim()
+                .toUpperCase() !== uploaderNorm
+            ) {
+              await conn.rollback();
+              return jsonResponse(
+                {
+                  recovered: false,
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  videoId,
+                  error: "Unauthorized: Video record belongs to a different user.",
+                },
+                403,
+              );
+            }
+            if (String(lockedVideo.video_type || "").toLowerCase() === "free") {
+              await conn.rollback();
+              return jsonResponse(
+                {
+                  recovered: false,
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  videoId,
+                  error: "Free video uploads cannot be recovered as ₹6 Sponsor videos.",
+                },
+                400,
+              );
+            }
+            if (lockedVideo.payment_id && String(lockedVideo.payment_id) !== paymentId) {
+              await conn.rollback();
+              return jsonResponse(
+                {
+                  recovered: false,
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  videoId,
+                  error: "Conflict: Video is already linked to a different payment ID.",
+                },
+                409,
+              );
+            }
+            if (lockedVideo.video_url && rawClientVideoUrl !== "") {
+              const lockedCanon = extractCanonicalVideoAssetRelativePathNode(
+                lockedVideo.video_url,
+                env,
+              );
+              if (!lockedCanon || lockedCanon !== assetValidation.relativePath) {
+                await conn.rollback();
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    error:
+                      "Conflict: Cannot overwrite existing video's verified asset URL during recovery.",
+                  },
+                  409,
+                );
+              }
+            }
+          }
+
+          if (lockedOrder.video_url && String(lockedOrder.video_url).trim() !== "") {
+            const lockedOrderAsset = extractCanonicalVideoAssetRelativePathNode(
+              lockedOrder.video_url,
+              env,
+            );
+            if (!lockedOrderAsset || lockedOrderAsset !== assetValidation.relativePath) {
+              await conn.rollback();
+              return jsonResponse(
+                {
+                  recovered: false,
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  videoId,
+                  error:
+                    "Conflict: Original payment order is linked to a different uploaded video asset.",
+                },
+                409,
+              );
+            }
+          }
+
+          const lockedExistingMatchesAsset = Boolean(
+            lockedVideo &&
+            String(lockedVideo.user_id || "")
+              .trim()
+              .toUpperCase() === uploaderNorm &&
+            extractCanonicalVideoAssetRelativePathNode(lockedVideo.video_url, env) ===
+              assetValidation.relativePath,
+          );
+          if (hasUploadAssetsTable) {
+            const [lockedAssetRows]: any = await conn.query(
+              `SELECT * FROM uploaded_video_assets WHERE relative_path = ? FOR UPDATE`,
+              [assetValidation.relativePath],
+            );
+            const lockedAssetRow = lockedAssetRows?.[0] || null;
+            if (!lockedAssetRow) {
+              if (!lockedExistingMatchesAsset) {
+                await conn.rollback();
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    missingAsset: "video_file",
+                    error:
+                      "Uploaded video asset ownership record is missing. Please re-upload your video file while signed in.",
+                  },
+                  422,
+                );
+              }
+            } else {
+              if (
+                String(lockedAssetRow.user_id || "")
+                  .trim()
+                  .toUpperCase() !== uploaderNorm
+              ) {
+                await conn.rollback();
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    error: "Unauthorized: Uploaded video asset belongs to a different user.",
+                  },
+                  403,
+                );
+              }
+              const lockedAssetVid = String(lockedAssetRow.video_id || "").trim();
+              if (lockedAssetVid && lockedAssetVid !== videoId) {
+                await conn.rollback();
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    error: "Conflict: Uploaded video asset is already linked to a different video.",
+                  },
+                  409,
+                );
+              }
+              const lockedAssetOrd = String(lockedAssetRow.order_id || "").trim();
+              if (lockedAssetOrd && lockedAssetOrd !== orderId) {
+                await conn.rollback();
+                return jsonResponse(
+                  {
+                    recovered: false,
+                    verified: false,
+                    paymentId,
+                    orderId,
+                    videoId,
+                    error:
+                      "Conflict: Uploaded video asset is already linked to a different payment order.",
+                  },
+                  409,
+                );
+              }
+              await conn.query(
+                `UPDATE uploaded_video_assets
+                 SET video_id = COALESCE(NULLIF(video_id, ''), ?),
+                     order_id = COALESCE(NULLIF(order_id, ''), ?),
+                     updated_at = NOW()
+                 WHERE id = ?`,
+                [videoId, orderId, lockedAssetRow.id],
+              );
+            }
+          } else if (!lockedExistingMatchesAsset) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Upload asset ownership tracking schema (uploaded_video_assets) has not been applied yet. Recovery aborted safely before settlement.",
+              },
+              503,
+            );
+          }
+
+          const [lockedTxRows]: any = await conn.query(
+            `SELECT * FROM payment_transactions WHERE payment_id = ? FOR UPDATE`,
+            [paymentId],
+          );
+          const lockedExistingTx = lockedTxRows?.[0] || null;
+
+          if (lockedExistingTx) {
+            const dupRes = await buildMysqlDuplicateVerifyResult(
+              conn,
+              lockedExistingTx,
+              orderId,
+              paymentId,
+              uploaderNorm,
+              videoId,
+              "premium_video_upload",
+              "Payment already settled previously.",
+            );
+            if (dupRes.status !== 200) {
+              await conn.rollback();
+              return jsonResponse({ ...dupRes.body, recovered: false, videoId }, dupRes.status);
+            }
+
+            const videoAlreadyPaidAndLinked = Boolean(
+              lockedVideo &&
+              String(lockedVideo.payment_status || "").toLowerCase() === "paid" &&
+              String(lockedVideo.payment_id || "") === paymentId,
+            );
+            const orderAlreadyPaid = Boolean(
+              lockedOrder.status === "paid" && String(lockedOrder.payment_id || "") === paymentId,
+            );
+
+            if (videoAlreadyPaidAndLinked && orderAlreadyPaid) {
+              await conn.rollback();
+              return jsonResponse({
+                ...dupRes.body,
+                recovered: true,
+                verified: true,
+                duplicate: true,
+                alreadyPublished: true,
+                videoPublished: false,
+                videoId,
+                currency: "INR",
+                assetPath: assetValidation.relativePath,
+                video: lockedVideo,
+                message:
+                  "Captured payment and Sponsor video are already settled and published (idempotent duplicate).",
+              });
+            }
+
+            // Partial recovery: payment settlement exists, so NEVER re-credit ledger/wallet/reserves.
+            let publishedVideo = lockedVideo;
+            let videoPublishedNow = false;
+            if (!videoAlreadyPaidAndLinked) {
+              const finalThumbnailUrl = await resolvePersistedVideoThumbnail({
+                vidId: videoId,
+                category,
+                rawThumbnailUrl,
+              });
+              publishedVideo = await upsertRecoveredVideoMysqlNode(conn, schema, {
+                videoId,
+                uploaderId: uploaderNorm,
+                creatorName,
+                title,
+                description,
+                videoUrl: resolvedVideoUrl,
+                thumbnailUrl: finalThumbnailUrl,
+                contentType: contentType as "short" | "long",
+                category,
+                duration,
+                visibility,
+                paymentId,
+                existingVideo: lockedVideo,
+                detectedCountryCode,
+              });
+              videoPublishedNow = true;
+            }
+
+            if (!orderAlreadyPaid) {
+              await conn.query(
+                `UPDATE payment_orders SET status = 'paid', payment_id = ?, updated_at = NOW() WHERE order_id = ?`,
+                [paymentId, orderId],
+              );
+            }
+
+            await conn.commit();
+            return jsonResponse({
+              ...dupRes.body,
+              recovered: true,
+              verified: true,
+              duplicate: true,
+              alreadyPublished: !videoPublishedNow,
+              videoPublished: videoPublishedNow,
+              videoId,
+              currency: "INR",
+              assetPath: assetValidation.relativePath,
+              video: publishedVideo,
+              message: videoPublishedNow
+                ? "Existing payment settlement verified without duplicate credits; missing Sponsor video record was recovered and published."
+                : "Existing payment settlement verified and order status reconciled (idempotent duplicate).",
+            });
+          }
+
+          if (lockedOrder.status === "paid") {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Conflict: Payment order is marked paid without a matching verified payment transaction record.",
+              },
+              409,
+            );
+          }
+
+          // Fresh recovery: shared Phase 1.1 ₹6 settlement + uploaded_videos upsert + order paid
+          const settlement = await executePremiumMysqlSettlementNode(conn, schema, {
+            orderId,
+            paymentId,
+            uploaderId: uploaderNorm,
+            userName,
+            videoId,
+          });
+          if (!settlement.settled) {
+            await conn.rollback();
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: settlement.error || "Failed to settle recovered payment.",
+              },
+              settlement.status || 503,
+            );
+          }
+
+          const finalThumbnailUrl = await resolvePersistedVideoThumbnail({
+            vidId: videoId,
+            category,
+            rawThumbnailUrl,
+          });
+          const publishedVideo = await upsertRecoveredVideoMysqlNode(conn, schema, {
+            videoId,
+            uploaderId: uploaderNorm,
+            creatorName,
+            title,
+            description,
+            videoUrl: resolvedVideoUrl,
+            thumbnailUrl: finalThumbnailUrl,
+            contentType: contentType as "short" | "long",
+            category,
+            duration,
+            visibility,
+            paymentId,
+            existingVideo: lockedVideo,
+            detectedCountryCode,
+          });
+
+          await conn.query(
+            `UPDATE payment_orders SET status = 'paid', payment_id = ?, updated_at = NOW() WHERE order_id = ?`,
+            [paymentId, orderId],
+          );
+
+          await conn.commit();
+
+          return jsonResponse({
+            recovered: true,
+            verified: true,
+            duplicate: false,
+            videoPublished: true,
+            alreadyPublished: false,
+            paymentId,
+            orderId,
+            videoId,
+            amount: 6.0,
+            currency: "INR",
+            purpose: "premium_video_upload",
+            txNumber: settlement.txNumber,
+            isSpecialTransaction: settlement.isSpecialTransaction,
+            specialTag: settlement.specialTag,
+            distribution: settlement.distribution,
+            assetPath: assetValidation.relativePath,
+            video: publishedVideo,
+            message: "Orphaned captured ₹6 Sponsor payment reconciled and video published safely.",
+          });
+        } catch (txErr: any) {
+          try {
+            await conn.rollback();
+          } catch {
+            // Ignore rollback warning
+          }
+          if (!isMysqlConnectionUnavailableError(txErr) && isMysqlDuplicateKeyError(txErr)) {
+            try {
+              const [raceRows]: any = await pool.query(
+                `SELECT * FROM payment_transactions WHERE payment_id = ? LIMIT 1`,
+                [paymentId],
+              );
+              if (raceRows && raceRows.length > 0) {
+                const raceRes = await buildMysqlDuplicateVerifyResult(
+                  pool,
+                  raceRows[0],
+                  orderId,
+                  paymentId,
+                  uploaderNorm,
+                  videoId,
+                  "premium_video_upload",
+                  "Concurrent recovery detected and resolved safely without duplicate accounting.",
+                );
+                if (raceRes.status === 200) {
+                  const [raceVidRows]: any = await pool.query(
+                    `SELECT * FROM uploaded_videos WHERE id = ? LIMIT 1`,
+                    [videoId],
+                  );
+                  const raceVid = raceVidRows?.[0] || null;
+                  return jsonResponse({
+                    ...raceRes.body,
+                    recovered: true,
+                    videoId,
+                    videoPublished: false,
+                    alreadyPublished: Boolean(raceVid),
+                    ...(raceVid ? { video: raceVid } : {}),
+                  });
+                }
+                return jsonResponse({ ...raceRes.body, recovered: false, videoId }, raceRes.status);
+              }
+            } catch {
+              // Fall through
+            }
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Conflict: Duplicate accounting entry prevented transaction recording. Transaction safely rolled back.",
+              },
+              409,
+            );
+          }
+          if (isMysqlConnectionUnavailableError(txErr)) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Database connection unavailable during recovery. Transaction was safely rolled back.",
+              },
+              503,
+            );
+          }
+          throw txErr;
+        } finally {
+          conn.release();
+        }
+      }
+
+      // 8b. Non-production JSON store ACID Recovery Path (mutex-serialized with fresh store reload)
+      if (process.env["NODE_ENV"] === "production") {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            paymentId,
+            orderId,
+            videoId,
+            error:
+              "Database connection unavailable. In production, payment recovery requires persistent database storage.",
+          },
+          503,
+        );
+      }
+
+      return await withRecoveryStoreLock(async () => {
+        const latestStore = loadStore(env);
+        const lockedOrder = (latestStore.paymentOrders || []).find((o) => o.order_id === orderId);
+        if (!lockedOrder) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Original payment order not found.",
+            },
+            404,
+          );
+        }
+        if (
+          String(lockedOrder.user_id || "")
+            .trim()
+            .toUpperCase() !== authUserId.toUpperCase()
+        ) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Unauthorized: Authenticated user does not own the original payment order.",
+            },
+            403,
+          );
+        }
+        if (
+          String(lockedOrder.purpose || "")
+            .trim()
+            .toLowerCase() !== "premium_video_upload" ||
+          String(lockedOrder.currency || "INR")
+            .trim()
+            .toUpperCase() !== "INR" ||
+          Math.abs(Number(lockedOrder.amount || 0) - 6.0) > 0.01
+        ) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error:
+                "Original payment order metadata mismatch (expected ₹6 INR premium_video_upload).",
+            },
+            400,
+          );
+        }
+        const lockedOrderVideoId = String(lockedOrder.video_id || "").trim();
+        if (!lockedOrderVideoId || lockedOrderVideoId !== videoId) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Conflict: Original payment order video mapping mismatch.",
+            },
+            409,
+          );
+        }
+        if (
+          lockedOrder.status === "paid" &&
+          lockedOrder.payment_id &&
+          lockedOrder.payment_id !== paymentId
+        ) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Conflict: Payment order was already settled with a different payment ID.",
+            },
+            409,
+          );
+        }
+        if ((lockedOrder as any).video_url && String((lockedOrder as any).video_url).trim() !== "") {
+          const lockedOrderAssetCanon = extractCanonicalVideoAssetRelativePathNode(
+            (lockedOrder as any).video_url,
+            env,
+          );
+          if (!lockedOrderAssetCanon || lockedOrderAssetCanon !== assetValidation.relativePath) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Conflict: Original payment order is linked to a different uploaded video asset.",
+              },
+              409,
+            );
+          }
+        }
+
+        const reuseOrderLocked = (latestStore.paymentOrders || []).find(
+          (o) => o.payment_id === paymentId && o.order_id !== orderId,
+        );
+        if (reuseOrderLocked) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Conflict: Payment ID is already linked to another payment order.",
+            },
+            409,
+          );
+        }
+
+        const reuseVidLocked = (latestStore.videos || []).find(
+          (v) => v.payment_id === paymentId && v.id !== videoId,
+        );
+        if (reuseVidLocked) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: "Conflict: Payment ID is already linked to another video.",
+            },
+            409,
+          );
+        }
+
+        const existingVidIdx = (latestStore.videos || []).findIndex((v) => v.id === videoId);
+        const existingVid = existingVidIdx >= 0 ? latestStore.videos[existingVidIdx] : undefined;
+        if (existingVid) {
+          if (
+            String(existingVid.user_id || "")
+              .trim()
+              .toUpperCase() !== uploaderNorm
+          ) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Unauthorized: Video record belongs to a different user.",
+              },
+              403,
+            );
+          }
+          if (String(existingVid.video_type || "").toLowerCase() === "free") {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Free video uploads cannot be recovered as ₹6 Sponsor videos.",
+              },
+              400,
+            );
+          }
+          if (existingVid.payment_id && String(existingVid.payment_id) !== paymentId) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Conflict: Video is already linked to a different payment ID.",
+              },
+              409,
+            );
+          }
+          if (existingVid.video_url && rawClientVideoUrl !== "") {
+            const existingCanon = extractCanonicalVideoAssetRelativePathNode(
+              existingVid.video_url,
+              env,
+            );
+            if (!existingCanon || existingCanon !== assetValidation.relativePath) {
+              return jsonResponse(
+                {
+                  recovered: false,
+                  verified: false,
+                  paymentId,
+                  orderId,
+                  videoId,
+                  error:
+                    "Conflict: Cannot overwrite existing video's verified asset URL during recovery.",
+                },
+                409,
+              );
+            }
+          }
+        }
+
+        const existingStoreVidMatchesAsset = Boolean(
+          existingVid &&
+          String(existingVid.user_id || "")
+            .trim()
+            .toUpperCase() === uploaderNorm &&
+          extractCanonicalVideoAssetRelativePathNode(existingVid.video_url, env) ===
+            assetValidation.relativePath,
+        );
+        const lockedAssetRec = (latestStore.uploadedAssets || []).find(
+          (a) => a.relative_path === assetValidation.relativePath,
+        );
+        if (!lockedAssetRec) {
+          if (!existingStoreVidMatchesAsset) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                missingAsset: "video_file",
+                error:
+                  "Uploaded video asset ownership record is missing. Please re-upload your video file while signed in.",
+              },
+              422,
+            );
+          }
+        } else {
+          if (
+            String(lockedAssetRec.user_id || "")
+              .trim()
+              .toUpperCase() !== uploaderNorm
+          ) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Unauthorized: Uploaded video asset belongs to a different user.",
+              },
+              403,
+            );
+          }
+          const recVideoId = String(lockedAssetRec.video_id || "").trim();
+          if (recVideoId && recVideoId !== videoId) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error: "Conflict: Uploaded video asset is already linked to a different video.",
+              },
+              409,
+            );
+          }
+          const recOrderId = String(lockedAssetRec.order_id || "").trim();
+          if (recOrderId && recOrderId !== orderId) {
+            return jsonResponse(
+              {
+                recovered: false,
+                verified: false,
+                paymentId,
+                orderId,
+                videoId,
+                error:
+                  "Conflict: Uploaded video asset is already linked to a different payment order.",
+              },
+              409,
+            );
+          }
+        }
+
+        const directSponsor = resolveDirectSponsorFromUsers(uploaderNorm, latestStore.users);
+        const verifiedReferrerId: string | null = directSponsor?.user_id || null;
+        const storeEligibleVideos = (latestStore.videos || [])
+          .filter(
+            (v) =>
+              (v.video_type === "premium" || v.payment_status === "paid") &&
+              v.user_id.toUpperCase() !== uploaderNorm &&
+              !v.is_blocked,
+          )
+          .map((v) => ({
+            userId: v.user_id.toUpperCase(),
+            videoId: v.id,
+            adEarnings: Number(v.ad_earnings) || 0,
+          }));
+
+        const settlement = await recoverCapturedPremiumInStore(
+          {
+            orderId,
+            paymentId,
+            userId: uploaderNorm,
+            userName,
+            videoId,
+          },
+          storeEligibleVideos,
+          verifiedReferrerId,
+        );
+
+        if (!settlement.verified) {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error: settlement.error || "Conflict validating payment settlement.",
+            },
+            409,
+          );
+        }
+
+        const isSettlementDuplicate = Boolean(settlement.duplicate);
+        if (!isSettlementDuplicate && lockedOrder.status === "paid") {
+          return jsonResponse(
+            {
+              recovered: false,
+              verified: false,
+              paymentId,
+              orderId,
+              videoId,
+              error:
+                "Conflict: Payment order is marked paid without a matching verified payment transaction record.",
+            },
+            409,
+          );
+        }
+
+        if (!isSettlementDuplicate) {
+          applyRecoveredPremiumStoreWalletLedger(latestStore, {
+            paymentId,
+            uploaderId: uploaderNorm,
+            userName,
+            videoId,
+            verifiedReferrerId,
+            result: settlement,
+          });
+        }
+
+        const videoAlreadyPaidAndLinked = Boolean(
+          existingVid &&
+          existingVid.payment_status === "paid" &&
+          existingVid.payment_id === paymentId,
+        );
+        const orderAlreadyPaid = Boolean(
+          lockedOrder.status === "paid" && lockedOrder.payment_id === paymentId,
+        );
+
+        if (isSettlementDuplicate && videoAlreadyPaidAndLinked && orderAlreadyPaid) {
+          if (lockedAssetRec && (!lockedAssetRec.video_id || !lockedAssetRec.order_id)) {
+            lockedAssetRec.video_id = lockedAssetRec.video_id || videoId;
+            lockedAssetRec.order_id = lockedAssetRec.order_id || orderId;
+            lockedAssetRec.updated_at = new Date().toISOString();
+            saveStore(latestStore, env);
+          }
+          return jsonResponse({
+            ...settlement,
+            recovered: true,
+            verified: true,
+            duplicate: true,
+            alreadyPublished: true,
+            videoPublished: false,
+            videoId,
+            currency: "INR",
+            assetPath: assetValidation.relativePath,
+            video: existingVid,
+            message:
+              "Captured payment and Sponsor video are already settled and published (idempotent duplicate).",
+          });
+        }
+
+        const nowIso = new Date().toISOString();
+        let publishedVideo = existingVid;
+        let videoPublishedNow = false;
+        if (!videoAlreadyPaidAndLinked) {
+          const finalThumbnailUrl = await resolvePersistedVideoThumbnail({
+            vidId: videoId,
+            category,
+            rawThumbnailUrl,
+          });
+          const persistedCountry = existingVid ? existingVid.country_code : detectedCountryCode;
+          const upsertedVideo: ServerStore["videos"][number] = {
+            ...(existingVid || {}),
+            id: videoId,
+            user_id: existingVid ? existingVid.user_id : uploaderNorm,
+            creator_name: creatorName,
+            title,
+            description,
+            video_url: resolvedVideoUrl,
+            thumbnail_url: finalThumbnailUrl,
+            video_type: "premium",
+            content_type: contentType as "short" | "long",
+            category,
+            duration,
+            views: existingVid ? Number(existingVid.views || 0) : 0,
+            likes: existingVid ? Number(existingVid.likes || 0) : 0,
+            payment_status: "paid",
+            payment_id: paymentId,
+            payment_amount: 6.0,
+            is_promoted: existingVid ? Boolean(existingVid.is_promoted) : false,
+            visibility,
+            ...(persistedCountry !== undefined ? { country_code: persistedCountry } : {}),
+            created_at: existingVid?.created_at || nowIso,
+            updated_at: nowIso,
+          };
+          if (existingVidIdx >= 0) {
+            latestStore.videos[existingVidIdx] = upsertedVideo;
+          } else {
+            latestStore.videos.unshift(upsertedVideo);
+          }
+          publishedVideo = upsertedVideo;
+          videoPublishedNow = true;
+        }
+
+        if (lockedAssetRec) {
+          lockedAssetRec.video_id = lockedAssetRec.video_id || videoId;
+          lockedAssetRec.order_id = lockedAssetRec.order_id || orderId;
+          lockedAssetRec.updated_at = nowIso;
+        }
+        lockedOrder.status = "paid";
+        lockedOrder.payment_id = paymentId;
+        lockedOrder.updated_at = nowIso;
+        saveStore(latestStore, env);
+
+        return jsonResponse({
+          ...settlement,
+          recovered: true,
+          verified: true,
+          duplicate: isSettlementDuplicate,
+          alreadyPublished: !videoPublishedNow,
+          videoPublished: videoPublishedNow,
+          videoId,
+          currency: "INR",
+          assetPath: assetValidation.relativePath,
+          video: publishedVideo,
+          message: isSettlementDuplicate
+            ? videoPublishedNow
+              ? "Existing payment settlement verified without duplicate credits; missing Sponsor video record was recovered and published."
+              : "Existing payment settlement verified and order status reconciled (idempotent duplicate)."
+            : "Orphaned captured ₹6 Sponsor payment reconciled and video published safely.",
+        });
+      });
+    } catch (err: unknown) {
+      console.error(
+        "[recover-captured] Unexpected error:",
+        err instanceof Error ? err.message : String(err),
+      );
+      if (isMysqlConnectionUnavailableError(err)) {
+        return jsonResponse(
+          {
+            recovered: false,
+            verified: false,
+            error: "Database connection unavailable during payment recovery.",
+          },
+          503,
+        );
+      }
+      return jsonResponse(
+        {
+          recovered: false,
+          verified: false,
+          error: "Internal server error during payment recovery.",
+        },
+        500,
+      );
     }
   }
 
@@ -10057,6 +13672,42 @@ async function dispatchApiRequest(
   if (route === "uploads/video") {
     if (method === "POST") {
       try {
+        const readEnv = (key: string) => readEnvValue(env, key);
+        const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+        const pool = getMysqlPool();
+        if ((isProduction || process.env["NODE_ENV"] === "production") && !pool) {
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                "Database connection unavailable. Authentication is required to upload videos.",
+            },
+            503,
+          );
+        }
+
+        let authUser: AuthUser | null = null;
+        try {
+          authUser = await getAuthUserFromRequest(request, store, pool, env);
+        } catch (authErr: unknown) {
+          if (authErr instanceof AuthDatabaseError) {
+            return jsonResponse({ success: false, error: authErr.message }, authErr.status);
+          }
+          return jsonResponse(
+            { success: false, error: "Authentication service error during upload." },
+            503,
+          );
+        }
+        if (!authUser) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "Authentication required. Please log in before uploading a video file.",
+            },
+            401,
+          );
+        }
+
         const formData = await request.formData();
         const file = formData.get("video");
 
@@ -10068,6 +13719,83 @@ async function dispatchApiRequest(
             },
             400,
           );
+        }
+
+        const optionalVideoId = String(
+          formData.get("videoId") || formData.get("video_id") || "",
+        ).trim();
+        const optionalOrderId = String(
+          formData.get("orderId") || formData.get("order_id") || "",
+        ).trim();
+        const uploaderUserId = String(authUser.user_id || "").trim();
+
+        if (optionalOrderId) {
+          let orderRow: any = null;
+          if (pool) {
+            const [ordRows]: any = await pool.query(
+              `SELECT order_id, user_id, video_id FROM payment_orders WHERE order_id = ? LIMIT 1`,
+              [optionalOrderId],
+            );
+            orderRow = ordRows?.[0] || null;
+          } else {
+            orderRow = (store.paymentOrders || []).find((o) => o.order_id === optionalOrderId) || null;
+          }
+          if (!orderRow) {
+            return jsonResponse(
+              { success: false, error: "Linked payment order was not found." },
+              404,
+            );
+          }
+          if (
+            String(orderRow.user_id || "")
+              .trim()
+              .toUpperCase() !== uploaderUserId.toUpperCase()
+          ) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Unauthorized: Cannot link video upload to another user's payment order.",
+              },
+              403,
+            );
+          }
+          const ordVid = String(orderRow.video_id || "").trim();
+          if (optionalVideoId && ordVid && ordVid !== optionalVideoId) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Conflict: Uploaded videoId does not match linked payment order video_id.",
+              },
+              409,
+            );
+          }
+        }
+
+        if (optionalVideoId) {
+          let vidRow: any = null;
+          if (pool) {
+            const [vRows]: any = await pool.query(
+              `SELECT id, user_id FROM uploaded_videos WHERE id = ? LIMIT 1`,
+              [optionalVideoId],
+            );
+            vidRow = vRows?.[0] || null;
+          } else {
+            vidRow = (store.videos || []).find((v) => v.id === optionalVideoId) || null;
+          }
+          if (
+            vidRow &&
+            String(vidRow.user_id || "")
+              .trim()
+              .toUpperCase() !== uploaderUserId.toUpperCase()
+          ) {
+            return jsonResponse(
+              {
+                success: false,
+                error: "Unauthorized: Cannot attach video upload to another user's video record.",
+              },
+              403,
+            );
+          }
         }
 
         const videoFile = file as File;
@@ -10099,7 +13827,8 @@ async function dispatchApiRequest(
           );
         }
 
-        const uploadDir = path.resolve(process.cwd(), "uploads", "videos");
+        const uploadDir =
+          getVideoUploadDirectoriesNode(env)[0] || path.resolve(process.cwd(), "uploads", "videos");
         await fs.promises.mkdir(uploadDir, { recursive: true });
 
         const uniqueName = `vid_${Date.now()}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
@@ -10107,31 +13836,276 @@ async function dispatchApiRequest(
         const arrayBuf = await videoFile.arrayBuffer();
         await fs.promises.writeFile(targetPath, Buffer.from(arrayBuf));
 
+        const relativePath = `/uploads/videos/${uniqueName}`;
+        const publicUrl = `https://${PRODUCTION_API_DOMAIN}${relativePath}`;
+        const nowIso = new Date().toISOString();
+        const assetId = `ast_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
+
+        if (pool) {
+          try {
+            const hasAssetsTable = await checkUploadAssetsTableExistsNode(pool);
+            if (hasAssetsTable) {
+              await pool.query(
+                `INSERT INTO uploaded_video_assets
+                 (id, user_id, file_name, relative_path, public_url, video_id, order_id, size_bytes, format, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+                [
+                  assetId,
+                  uploaderUserId,
+                  uniqueName,
+                  relativePath,
+                  publicUrl,
+                  optionalVideoId || null,
+                  optionalOrderId || null,
+                  videoFile.size,
+                  ext,
+                ],
+              );
+            } else {
+              console.warn(
+                "[uploads/video] uploaded_video_assets table missing; saved media file without DB asset ownership row.",
+              );
+            }
+          } catch (assetErr: unknown) {
+            console.warn(
+              "[uploads/video] Failed to persist asset ownership row:",
+              assetErr instanceof Error ? assetErr.message : String(assetErr),
+            );
+          }
+        } else {
+          if (!store.uploadedAssets) store.uploadedAssets = [];
+          store.uploadedAssets.unshift({
+            id: assetId,
+            user_id: uploaderUserId,
+            file_name: uniqueName,
+            relative_path: relativePath,
+            public_url: publicUrl,
+            video_id: optionalVideoId || null,
+            order_id: optionalOrderId || null,
+            size_bytes: videoFile.size,
+            format: ext,
+            created_at: nowIso,
+            updated_at: nowIso,
+          });
+          saveStore(store, env);
+        }
+
         const fileSizeMb = `${(videoFile.size / (1024 * 1024)).toFixed(2)} MB`;
 
         return jsonResponse(
           {
             success: true,
-            url: `/uploads/videos/${uniqueName}`,
+            assetId,
+            url: relativePath,
             fileName: uniqueName,
             format: ext,
             fileSize: fileSizeMb,
             sizeBytes: videoFile.size,
-            uploadedAt: new Date().toISOString(),
+            uploadedAt: nowIso,
           },
           201,
         );
-      } catch (uploadErr: any) {
-        console.error("Video upload server error:", uploadErr);
+      } catch (uploadErr: unknown) {
+        console.error(
+          "Video upload server error:",
+          uploadErr instanceof Error ? uploadErr.message : String(uploadErr),
+        );
         return jsonResponse(
           {
             success: false,
-            error:
-              "Server failed to process video upload: " + (uploadErr?.message || "Unknown error"),
+            error: "Server failed to process video upload. Please try again.",
           },
           500,
         );
       }
+    }
+    return jsonResponse({ success: false, error: "Method Not Allowed." }, 405);
+  }
+
+  if (route === "uploads/my-assets") {
+    if (method !== "GET") {
+      return jsonResponse({ success: false, error: "Method Not Allowed." }, 405);
+    }
+    const readEnv = (key: string) => readEnvValue(env, key);
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+    const pool = getMysqlPool();
+    if ((isProduction || process.env["NODE_ENV"] === "production") && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Database connection unavailable while listing uploaded assets.",
+        },
+        503,
+      );
+    }
+
+    let authUser: AuthUser | null = null;
+    try {
+      authUser = await getAuthUserFromRequest(request, store, pool, env);
+    } catch (authErr: unknown) {
+      if (authErr instanceof AuthDatabaseError) {
+        return jsonResponse({ success: false, error: authErr.message }, authErr.status);
+      }
+      return jsonResponse(
+        { success: false, error: "Authentication service error." },
+        503,
+      );
+    }
+    if (!authUser) {
+      return jsonResponse(
+        { success: false, error: "Authentication required to view uploaded assets." },
+        401,
+      );
+    }
+
+    const authUid = String(authUser.user_id || "").trim();
+    const seenPaths = new Set<string>();
+    const assets: Array<{
+      id: string;
+      fileName: string;
+      relativePath: string;
+      publicUrl: string;
+      videoId: string | null;
+      orderId: string | null;
+      sizeBytes: number;
+      format: string;
+      uploadedAt: string;
+      fileExists: boolean;
+    }> = [];
+    let schemaReady = false;
+
+    try {
+      if (pool) {
+        schemaReady = await checkUploadAssetsTableExistsNode(pool);
+        if (schemaReady) {
+          const [assetRows]: any = await pool.query(
+            `SELECT id, file_name, relative_path, public_url, video_id, order_id, size_bytes, format, created_at
+             FROM uploaded_video_assets
+             WHERE UPPER(user_id) = UPPER(?)
+             ORDER BY created_at DESC
+             LIMIT 50`,
+            [authUid],
+          );
+          for (const r of assetRows || []) {
+            const rel = extractCanonicalVideoAssetRelativePathNode(r.relative_path, env);
+            if (!rel || seenPaths.has(rel)) continue;
+            seenPaths.add(rel);
+            const diskValid = validateUploadedVideoAssetNode(rel, env);
+            assets.push({
+              id: String(r.id),
+              fileName: String(r.file_name || rel.replace("/uploads/videos/", "")),
+              relativePath: rel,
+              publicUrl: diskValid.publicUrl || String(r.public_url || rel),
+              videoId: r.video_id ? String(r.video_id) : null,
+              orderId: r.order_id ? String(r.order_id) : null,
+              sizeBytes: Number(r.size_bytes || 0),
+              format: String(r.format || path.extname(rel).replace(/^\./, "") || "mp4"),
+              uploadedAt: String(r.created_at || new Date().toISOString()),
+              fileExists: Boolean(diskValid.valid),
+            });
+          }
+        }
+        const [vidRows]: any = await pool.query(
+          `SELECT id, video_url, created_at
+           FROM uploaded_videos
+           WHERE UPPER(user_id) = UPPER(?)
+           ORDER BY created_at DESC
+           LIMIT 50`,
+          [authUid],
+        );
+        for (const v of vidRows || []) {
+          const rel = extractCanonicalVideoAssetRelativePathNode(v.video_url, env);
+          if (!rel || seenPaths.has(rel)) continue;
+          const diskValid = validateUploadedVideoAssetNode(rel, env);
+          if (!diskValid.valid) continue;
+          seenPaths.add(rel);
+          assets.push({
+            id: `vid-asset-${v.id}`,
+            fileName: rel.replace("/uploads/videos/", ""),
+            relativePath: rel,
+            publicUrl: diskValid.publicUrl || rel,
+            videoId: String(v.id),
+            orderId: null,
+            sizeBytes: 0,
+            format: path.extname(rel).replace(/^\./, "") || "mp4",
+            uploadedAt: String(v.created_at || new Date().toISOString()),
+            fileExists: true,
+          });
+        }
+      } else {
+        schemaReady = true;
+        for (const r of store.uploadedAssets || []) {
+          if (
+            String(r.user_id || "")
+              .trim()
+              .toUpperCase() !== authUid.toUpperCase()
+          ) {
+            continue;
+          }
+          const rel = extractCanonicalVideoAssetRelativePathNode(r.relative_path, env);
+          if (!rel || seenPaths.has(rel)) continue;
+          seenPaths.add(rel);
+          const diskValid = validateUploadedVideoAssetNode(rel, env);
+          assets.push({
+            id: r.id,
+            fileName: r.file_name,
+            relativePath: rel,
+            publicUrl: diskValid.publicUrl || r.public_url,
+            videoId: r.video_id || null,
+            orderId: r.order_id || null,
+            sizeBytes: Number(r.size_bytes || 0),
+            format: r.format || "mp4",
+            uploadedAt: r.created_at,
+            fileExists: Boolean(diskValid.valid),
+          });
+        }
+        for (const v of store.videos || []) {
+          if (
+            String(v.user_id || "")
+              .trim()
+              .toUpperCase() !== authUid.toUpperCase()
+          ) {
+            continue;
+          }
+          const rel = extractCanonicalVideoAssetRelativePathNode(v.video_url, env);
+          if (!rel || seenPaths.has(rel)) continue;
+          const diskValid = validateUploadedVideoAssetNode(rel, env);
+          if (!diskValid.valid) continue;
+          seenPaths.add(rel);
+          assets.push({
+            id: `vid-asset-${v.id}`,
+            fileName: rel.replace("/uploads/videos/", ""),
+            relativePath: rel,
+            publicUrl: diskValid.publicUrl || rel,
+            videoId: v.id,
+            orderId: null,
+            sizeBytes: 0,
+            format: path.extname(rel).replace(/^\./, "") || "mp4",
+            uploadedAt: v.created_at,
+            fileExists: true,
+          });
+        }
+      }
+
+      return jsonResponse({
+        success: true,
+        schemaReady,
+        assets,
+      });
+    } catch (err: unknown) {
+      console.error(
+        "[uploads/my-assets] Error listing uploaded assets:",
+        err instanceof Error ? err.message : String(err),
+      );
+      return jsonResponse(
+        {
+          success: false,
+          error: isMysqlConnectionUnavailableError(err)
+            ? "Database connection unavailable while listing uploaded assets."
+            : "Database error while listing uploaded assets.",
+        },
+        isMysqlConnectionUnavailableError(err) ? 503 : 500,
+      );
     }
   }
 
@@ -26001,12 +29975,7 @@ async function dispatchApiRequest(
             `[FaceTube AI Error] route=${route} status=${err.status} code=${err.code} message=${sanitizedMessage}`,
           );
         }
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json; charset=utf-8",
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, OPTIONS, PUT, DELETE",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Authorization",
-        };
+        const headers = buildApiCorsHeaders(request, env);
         return new Response(
           JSON.stringify({
             success: false,
@@ -26054,11 +30023,9 @@ async function dispatchApiRequest(
             }),
             {
               status: 429,
-              headers: {
-                "Content-Type": "application/json; charset=utf-8",
+              headers: buildApiCorsHeaders(request, env, {
                 "Retry-After": String(rate.retryAfterSec),
-                "Access-Control-Allow-Origin": "*",
-              },
+              }),
             },
           );
         }
@@ -26241,11 +30208,9 @@ async function dispatchApiRequest(
             }),
             {
               status: 429,
-              headers: {
-                "Content-Type": "application/json; charset=utf-8",
+              headers: buildApiCorsHeaders(request, env, {
                 "Retry-After": String(rate.retryAfterSec),
-                "Access-Control-Allow-Origin": "*",
-              },
+              }),
             },
           );
         }
@@ -26381,11 +30346,9 @@ async function dispatchApiRequest(
             }),
             {
               status: 429,
-              headers: {
-                "Content-Type": "application/json; charset=utf-8",
+              headers: buildApiCorsHeaders(request, env, {
                 "Retry-After": String(rate.retryAfterSec),
-                "Access-Control-Allow-Origin": "*",
-              },
+              }),
             },
           );
         }
@@ -26463,11 +30426,9 @@ async function dispatchApiRequest(
             }),
             {
               status: 429,
-              headers: {
-                "Content-Type": "application/json; charset=utf-8",
+              headers: buildApiCorsHeaders(request, env, {
                 "Retry-After": String(rate.retryAfterSec),
-                "Access-Control-Allow-Origin": "*",
-              },
+              }),
             },
           );
         }

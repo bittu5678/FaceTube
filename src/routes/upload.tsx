@@ -96,6 +96,7 @@ import {
 import {
   initiatePremiumVideoPayment,
   initiateAdsPromotionPayment,
+  recoverCapturedPremiumPayment,
   preloadRazorpayScript,
   shouldClearPendingPremiumPaymentOnFailure,
   type PendingPremiumPaymentProof,
@@ -108,12 +109,14 @@ export type VideoFormatChoice = "short" | "long";
 interface UploadSearch {
   mode?: MainUploadMode;
   format?: VideoFormatChoice;
+  recover?: boolean;
 }
 
 export const Route = createFileRoute("/upload")({
   validateSearch: (search: Record<string, unknown>): UploadSearch => {
     const rawMode = search["mode"];
     const rawFormat = search["format"];
+    const rawRecover = search["recover"];
     const validModes: MainUploadMode[] = ["free", "premium", "ad_promotion", "image", "bulk"];
     const validFormats: VideoFormatChoice[] = ["short", "long"];
 
@@ -121,12 +124,17 @@ export const Route = createFileRoute("/upload")({
       typeof rawMode === "string" && validModes.includes(rawMode as MainUploadMode);
     const isFormatValid =
       typeof rawFormat === "string" && validFormats.includes(rawFormat as VideoFormatChoice);
+    const isRecover =
+      rawRecover === true || rawRecover === 1 || rawRecover === "1" || rawRecover === "true";
 
     const result: UploadSearch = {
       mode: isModeValid ? (rawMode as MainUploadMode) : null,
     };
     if (isFormatValid) {
       result.format = rawFormat as VideoFormatChoice;
+    }
+    if (isRecover) {
+      result.recover = true;
     }
     return result;
   },
@@ -279,6 +287,7 @@ function UploadStudioPage() {
         ) : activeMode === "premium" ? (
           <PremiumVideoUploadView
             initialFormat={initialFormat}
+            initialRecoverMode={Boolean(search.recover)}
             onBack={() => setMode(null)}
             onUploaded={refreshWallet}
           />
@@ -2601,10 +2610,12 @@ function FreeVideoUploadView({
 /* -------------------------------------------------------------------------- */
 function PremiumVideoUploadView({
   initialFormat,
+  initialRecoverMode = false,
   onBack,
   onUploaded,
 }: {
   initialFormat: VideoFormatChoice;
+  initialRecoverMode?: boolean;
   onBack: () => void;
   onUploaded?: () => void;
 }) {
@@ -2631,6 +2642,32 @@ function PremiumVideoUploadView({
   const [uploadSuccess, setUploadSuccess] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [promotionConsent, setPromotionConsent] = useState(false);
+
+  // Orphaned captured payment recovery state (zero new order / zero checkout / zero extra charge)
+  const [showRecoveryPanel, setShowRecoveryPanel] = useState(initialRecoverMode);
+  const [recoverOrderId, setRecoverOrderId] = useState("");
+  const [recoverPaymentId, setRecoverPaymentId] = useState("");
+  const [recoverVideoId, setRecoverVideoId] = useState("");
+  const [recoverVideoUrl, setRecoverVideoUrl] = useState("");
+  const [recoverTitle, setRecoverTitle] = useState("");
+  const [recoverDescription, setRecoverDescription] = useState("");
+  const [recovering, setRecovering] = useState(false);
+  const [recoverUploadingAsset, setRecoverUploadingAsset] = useState(false);
+  const [recoverError, setRecoverError] = useState<string | null>(null);
+  const [recoverResult, setRecoverResult] = useState<{
+    videoId: string;
+    paymentId: string;
+    orderId: string;
+    message?: string;
+    duplicate?: boolean;
+  } | null>(null);
+  const recoverFileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (initialRecoverMode) {
+      setShowRecoveryPanel(true);
+    }
+  }, [initialRecoverMode]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const thumbnailInputRef = useRef<HTMLInputElement>(null);
@@ -3079,6 +3116,285 @@ function PremiumVideoUploadView({
         <span className="rounded-full border border-pink-500/30 bg-pink-500/10 px-3 py-1 text-xs font-bold text-pink-600 dark:text-pink-400">
           Fee: ₹6 (Razorpay Verified)
         </span>
+      </div>
+
+      {/* Captured Payment Recovery Trigger & Panel */}
+      <div className="rounded-2xl border border-amber-500/35 bg-amber-500/5 p-4 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5">
+            <ShieldCheck className="h-5 w-5 shrink-0 text-amber-400 mt-0.5" />
+            <div>
+              <h2 className="text-sm font-bold text-foreground">
+                Recover Captured ₹6 Sponsor Payment (No Extra Charge)
+              </h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Already paid ₹6 on Razorpay before publishing completed? Reconcile the original
+                captured payment and publish the linked Sponsor video without creating a new order.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setShowRecoveryPanel((v) => !v);
+              setRecoverError(null);
+            }}
+            className="shrink-0 rounded-xl border border-amber-500/40 bg-amber-500/15 px-4 py-2 text-xs font-bold text-amber-300 hover:bg-amber-500/25 transition"
+          >
+            {showRecoveryPanel ? "Hide Recovery Form" : "Recover Payment"}
+          </button>
+        </div>
+
+        {showRecoveryPanel && (
+          <div className="border-t border-amber-500/20 pt-4 space-y-4">
+            {recoverResult ? (
+              <div className="rounded-xl border border-emerald-500/40 bg-emerald-500/10 p-4 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-400 mt-0.5" />
+                  <div className="space-y-1 text-xs">
+                    <p className="font-bold text-emerald-300">
+                      {recoverResult.message ||
+                        "Captured ₹6 Sponsor payment reconciled and video published."}
+                    </p>
+                    <p className="text-muted-foreground">
+                      Video ID: <strong className="text-foreground">{recoverResult.videoId}</strong>{" "}
+                      · Payment ID:{" "}
+                      <strong className="text-foreground">{recoverResult.paymentId}</strong> · Order
+                      ID: <strong className="text-foreground">{recoverResult.orderId}</strong>
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    to="/watch/$videoId"
+                    params={{ videoId: recoverResult.videoId }}
+                    className="rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-500 transition"
+                  >
+                    Watch Recovered Video
+                  </Link>
+                  <Link
+                    to="/premium-videos"
+                    search={{ refresh: Date.now() }}
+                    className="rounded-xl border border-border bg-secondary px-4 py-2 text-xs font-bold text-foreground hover:bg-secondary/80 transition"
+                  >
+                    View Sponsor Videos
+                  </Link>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide text-foreground mb-1">
+                      Original Order ID <span className="text-brand">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={recoverOrderId}
+                      onChange={(e) => setRecoverOrderId(e.target.value)}
+                      placeholder="order_..."
+                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide text-foreground mb-1">
+                      Captured Payment ID <span className="text-brand">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={recoverPaymentId}
+                      onChange={(e) => setRecoverPaymentId(e.target.value)}
+                      placeholder="pay_..."
+                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide text-foreground mb-1">
+                      Linked Video ID <span className="text-brand">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={recoverVideoId}
+                      onChange={(e) => setRecoverVideoId(e.target.value)}
+                      placeholder="vid-..."
+                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide text-foreground mb-1">
+                      Video Title <span className="text-brand">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={recoverTitle}
+                      onChange={(e) => setRecoverTitle(e.target.value)}
+                      placeholder="Sponsor video title"
+                      className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wide text-foreground mb-1">
+                      Uploaded Video Asset Path <span className="text-brand">*</span>
+                    </label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={recoverVideoUrl}
+                        onChange={(e) => setRecoverVideoUrl(e.target.value)}
+                        placeholder="/uploads/videos/your-video.mp4"
+                        className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                      />
+                      <input
+                        ref={recoverFileInputRef}
+                        type="file"
+                        accept="video/mp4,video/webm,video/ogg,video/quicktime,.mp4,.webm,.ogg,.mov,.m4v,.mkv"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          const validation = validateVideoFileForUpload(file);
+                          if (!validation.valid) {
+                            toast.error(validation.error || "Invalid video file.");
+                            return;
+                          }
+                          setRecoverUploadingAsset(true);
+                          setRecoverError(null);
+                          try {
+                            const up = await api.uploads.uploadVideo(file);
+                            if (up?.videoUrl) {
+                              setRecoverVideoUrl(up.videoUrl);
+                              if (!recoverTitle.trim()) {
+                                setRecoverTitle(file.name.replace(/\.[^/.]+$/, ""));
+                              }
+                              toast.success("Video asset uploaded and linked.");
+                            }
+                          } catch (err: any) {
+                            setRecoverError(err?.message || "Failed to upload video asset.");
+                          } finally {
+                            setRecoverUploadingAsset(false);
+                            e.target.value = "";
+                          }
+                        }}
+                      />
+                      <button
+                        type="button"
+                        disabled={recoverUploadingAsset || recovering}
+                        onClick={() => recoverFileInputRef.current?.click()}
+                        className="shrink-0 rounded-xl border border-border bg-secondary px-3 py-2 text-[11px] font-bold text-foreground hover:bg-secondary/80 transition disabled:opacity-50"
+                      >
+                        {recoverUploadingAsset ? "Uploading..." : "Upload File"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold uppercase tracking-wide text-foreground mb-1">
+                    Description (Optional)
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={recoverDescription}
+                    onChange={(e) => setRecoverDescription(e.target.value)}
+                    placeholder="Optional description (or leaves existing saved metadata)"
+                    className="w-full rounded-xl border border-border bg-secondary/40 px-3 py-2 text-xs text-foreground focus:border-amber-400 focus:outline-none"
+                  />
+                </div>
+
+                {recoverError && (
+                  <div
+                    role="alert"
+                    className="flex items-start gap-2 rounded-xl border border-red-500/35 bg-red-500/10 p-3 text-xs text-red-200"
+                  >
+                    <AlertCircle className="h-4 w-4 shrink-0 text-red-400 mt-0.5" />
+                    <span>{recoverError}</span>
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <span className="text-[11px] text-muted-foreground">
+                    Signed-in account:{" "}
+                    <strong className="text-foreground">{userId || "Not signed in"}</strong> ·
+                    Format/Category/Visibility above apply if creating a new video row.
+                  </span>
+                  <button
+                    type="button"
+                    disabled={recovering || recoverUploadingAsset || !userId}
+                    onClick={async () => {
+                      if (!userId) {
+                        toast.error("Please sign in first.");
+                        return;
+                      }
+                      setRecoverError(null);
+                      setRecovering(true);
+                      try {
+                        let resolvedThumb: string | undefined = undefined;
+                        if (customThumbnailFile || capturedThumbnail) {
+                          resolvedThumb =
+                            (await uploadThumbnailDataUrl(
+                              customThumbnailFile || capturedThumbnail,
+                              `recover-${recoverVideoId.trim() || Date.now()}`,
+                            )) || undefined;
+                        }
+                        const res = await recoverCapturedPremiumPayment({
+                          orderId: recoverOrderId,
+                          paymentId: recoverPaymentId,
+                          videoId: recoverVideoId,
+                          userId,
+                          title: recoverTitle,
+                          videoUrl: recoverVideoUrl,
+                          description: recoverDescription,
+                          ...(resolvedThumb ? { thumbnailUrl: resolvedThumb } : {}),
+                          contentType: format,
+                          category,
+                          visibility,
+                          creatorName,
+                        });
+                        if (!res?.recovered) {
+                          const msg = res?.error || "Recovery failed on server.";
+                          setRecoverError(msg);
+                          toast.error(msg);
+                          return;
+                        }
+                        setRecoverResult({
+                          videoId: res.videoId || recoverVideoId.trim(),
+                          paymentId: res.paymentId || recoverPaymentId.trim(),
+                          orderId: res.orderId || recoverOrderId.trim(),
+                          message: res.message,
+                          duplicate: res.duplicate,
+                        });
+                        toast.success(res.message || "Captured payment recovered safely!");
+                        onUploaded?.();
+                      } catch (err: any) {
+                        const msg = err?.message || "Failed to recover captured payment.";
+                        setRecoverError(msg);
+                        toast.error(msg);
+                      } finally {
+                        setRecovering(false);
+                      }
+                    }}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-amber-500 px-5 py-2.5 text-xs font-black text-slate-950 hover:bg-amber-400 transition disabled:opacity-50"
+                  >
+                    {recovering ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Reconciling Gateway &amp; Publishing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        <span>Verify &amp; Publish Recovered Video (₹0 Extra)</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-6">

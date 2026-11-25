@@ -1178,6 +1178,49 @@ export const api = {
       });
     },
 
+    recoverCaptured: async (data: {
+      orderId: string;
+      paymentId: string;
+      videoId: string;
+      userId: string;
+      title: string;
+      description?: string;
+      videoUrl: string;
+      thumbnailUrl?: string;
+      contentType?: "short" | "long";
+      category?: string;
+      visibility?: "public" | "unlisted" | "private";
+      duration?: string;
+      creatorName?: string;
+    }) => {
+      return apiFetch<{
+        recovered: boolean;
+        verified: boolean;
+        duplicate?: boolean;
+        videoPublished?: boolean;
+        alreadyPublished?: boolean;
+        paymentId: string;
+        orderId: string;
+        videoId: string;
+        amount: number;
+        currency: string;
+        purpose?: string;
+        txNumber?: number;
+        isSpecialTransaction?: boolean;
+        specialTag?: string;
+        distribution?: any;
+        assetPath?: string;
+        video?: any;
+        missingAsset?: string;
+        message?: string;
+        error?: string;
+      }>("/payments/recover-captured.php", {
+        method: "POST",
+        body: JSON.stringify(data),
+        timeoutMs: 25000,
+      });
+    },
+
     getTransactions: async () => {
       return apiFetch<{
         status: string;
