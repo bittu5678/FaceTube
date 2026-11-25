@@ -277,7 +277,7 @@ try {
         INSERT INTO payment_orders (
             order_id, user_id, user_name, video_id, purpose, plan_id,
             content_type, amount, currency, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "INR", "created", NOW())
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, \'INR\', \'created\', NOW())
         ON DUPLICATE KEY UPDATE updated_at = NOW()
     ');
     $inserted = $stmtPo->execute([

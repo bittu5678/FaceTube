@@ -999,7 +999,7 @@ try {
         }
 
         if (!$orderAlreadyPaid) {
-            $stmtPoUpdate = $pdo->prepare('UPDATE payment_orders SET status = "paid", payment_id = ?, updated_at = NOW() WHERE order_id = ?');
+            $stmtPoUpdate = $pdo->prepare('UPDATE payment_orders SET status = \'paid\', payment_id = ?, updated_at = NOW() WHERE order_id = ?');
             $stmtPoUpdate->execute([$paymentId, $orderId]);
         }
 
@@ -1072,7 +1072,7 @@ try {
         'detectedCountryCode' => $detectedCountryCode,
     ]);
 
-    $stmtUpdatePo = $pdo->prepare('UPDATE payment_orders SET status = "paid", payment_id = ?, updated_at = NOW() WHERE order_id = ?');
+    $stmtUpdatePo = $pdo->prepare('UPDATE payment_orders SET status = \'paid\', payment_id = ?, updated_at = NOW() WHERE order_id = ?');
     $stmtUpdatePo->execute([$paymentId, $orderId]);
 
     $pdo->commit();

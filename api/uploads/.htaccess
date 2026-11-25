@@ -19,7 +19,7 @@
 # 2. Security hardening: Block PHP script execution by default for all script files
 # Uses negative lookahead so verified API controllers never match this deny rule,
 # eliminating Apache 2.4 authorization merging conflicts (e.g. AuthMerging And).
-<FilesMatch "(?i)^(?!(video|image|kyc)\.php$).*\.(php|phtml|php3|php4|php5|php7|phps)$">
+<FilesMatch "(?i)^(?!(video|image|kyc|my-assets)\.php$).*\.(php|phtml|php3|php4|php5|php7|phps)$">
     <IfModule mod_authz_core.c>
         Require all denied
     </IfModule>
@@ -30,7 +30,7 @@
 </FilesMatch>
 
 # 3. Explicitly allow legitimate API upload controller endpoints
-<FilesMatch "^(video|image|kyc)\.php$">
+<FilesMatch "^(video|image|kyc|my-assets)\.php$">
     <IfModule mod_authz_core.c>
         Require all granted
     </IfModule>

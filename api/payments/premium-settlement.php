@@ -580,7 +580,7 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
         $stmtEligibleVideos = $pdo->prepare('
             SELECT id AS video_id, user_id, ' . $adEarningsExpr . '
             FROM uploaded_videos
-            WHERE (video_type = "premium" OR payment_status = "paid")
+            WHERE (video_type = \'premium\' OR payment_status = \'paid\')
               AND UPPER(user_id) != UPPER(?)' . $blockedFilter . '
             ORDER BY created_at ASC, id ASC
         ');
@@ -727,7 +727,7 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                         gst_amount, pg_fee, referral_status, created_at
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?,
-                        ?, "premium_upload", 0, ?, ?,
+                        ?, \'premium_upload\', 0, ?, ?,
                         ?, ?, ?, ?, ?,
                         ?, ?, ?, NOW()
                     )
@@ -746,7 +746,7 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                         admin_allocation, global_pool_allocation, gst_amount, pg_fee, referral_status, created_at
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?,
-                        ?, "premium_upload", 0, ?, ?,
+                        ?, \'premium_upload\', 0, ?, ?,
                         ?, ?, ?, ?, ?, NOW()
                     )
                 ');
@@ -763,7 +763,7 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                         admin_allocation, global_pool_allocation, created_at
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?,
-                        ?, "premium_upload", 0, ?, ?,
+                        ?, \'premium_upload\', 0, ?, ?,
                         ?, ?, NOW()
                     )
                 ');
@@ -787,7 +787,7 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                     income_type, amount, status, special_tag, description, created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?,
-                    "referral_income", 1.0000, "settled", ?, ?, NOW()
+                    \'referral_income\', 1.0000, \'settled\', ?, ?, NOW()
                 )
             ');
             $stmtLedger->execute([
@@ -818,8 +818,8 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                     id, transaction_id, user_id, source_user_id, source_user_name, video_id,
                     income_type, amount, status, special_tag, description, created_at
                 ) VALUES (
-                    ?, ?, "UNASSIGNED_REFERRAL", ?, ?, ?,
-                    "referral_income", 1.0000, "pending", "REFERRAL_UNASSIGNED_PENDING", ?, NOW()
+                    ?, ?, \'UNASSIGNED_REFERRAL\', ?, ?, ?,
+                    \'referral_income\', 1.0000, \'pending\', \'REFERRAL_UNASSIGNED_PENDING\', ?, NOW()
                 )
             ');
             $stmtPendingRefLedger->execute([
@@ -841,7 +841,7 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                     income_type, amount, status, special_tag, description, created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?,
-                    "admin_allocation", ?, "settled", ?, ?, NOW()
+                    \'admin_allocation\', ?, \'settled\', ?, ?, NOW()
                 )
             ');
             $stmtAdmLedger->execute([
@@ -874,7 +874,7 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                     income_type, amount, status, special_tag, description, created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?,
-                    "global_income", ?, "settled", ?, ?, NOW()
+                    \'global_income\', ?, \'settled\', ?, ?, NOW()
                 )
             ');
             $stmtCreditCreator = $pdo->prepare('
@@ -926,8 +926,8 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                     id, transaction_id, user_id, source_user_id, source_user_name, video_id,
                     income_type, amount, status, special_tag, description, created_at
                 ) VALUES (
-                    ?, ?, "GLOBAL_POOL_RESERVE", ?, ?, ?,
-                    "global_income", ?, "pending", "GLOBAL_POOL_PENDING_RESERVE", ?, NOW()
+                    ?, ?, \'GLOBAL_POOL_RESERVE\', ?, ?, ?,
+                    \'global_income\', ?, \'pending\', \'GLOBAL_POOL_PENDING_RESERVE\', ?, NOW()
                 )
             ');
             $stmtGlbResLedger->execute([
@@ -950,7 +950,7 @@ if (!function_exists('ftSettlePremiumVideoMysqlPhp')) {
                     reserve_amount, reserve_paise, reserve_reason, status, notes, created_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, "pending", ?, NOW(), NOW()
+                    ?, ?, ?, \'pending\', ?, NOW(), NOW()
                 )
             ');
             $stmtReserve->execute([
