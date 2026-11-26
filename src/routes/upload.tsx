@@ -101,7 +101,11 @@ import {
   shouldClearPendingPremiumPaymentOnFailure,
   type PendingPremiumPaymentProof,
 } from "@/lib/razorpay-service";
-import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
+import {
+  calculateUploadOptionsTotalEarnings,
+  getUserWallet,
+  type UserWallet,
+} from "@/lib/ledger-service";
 
 export type MainUploadMode = "free" | "premium" | "ad_promotion" | "image" | "bulk" | null;
 export type VideoFormatChoice = "short" | "long";
@@ -168,12 +172,41 @@ function UploadStudioPage() {
       setWallet(null);
       return;
     }
-    getUserWallet(userId).then(setWallet).catch(console.error);
+    const requestedUserId = userId.trim().toUpperCase();
+    setWallet((prev) =>
+      prev && prev.userId.trim().toUpperCase() === requestedUserId ? prev : null,
+    );
+    getUserWallet(userId)
+      .then((w) => {
+        const respUid = w.userId ? w.userId.trim().toUpperCase() : "";
+        if (!respUid || respUid === requestedUserId) {
+          setWallet(w);
+        }
+      })
+      .catch(console.error);
   }, [userId]);
 
   useEffect(() => {
     refreshWallet();
-  }, [refreshWallet]);
+  }, [refreshWallet, activeMode]);
+
+  useEffect(() => {
+    if (!userId || typeof window === "undefined") return;
+    const handleFocus = () => refreshWallet();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") refreshWallet();
+    };
+    const handleWalletUpdated = () => refreshWallet();
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("facetube:wallet-updated", handleWalletUpdated);
+    return () => {
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("facetube:wallet-updated", handleWalletUpdated);
+    };
+  }, [userId, refreshWallet]);
 
   useEffect(() => {
     if (activeMode === "premium" || activeMode === "ad_promotion" || activeMode === "bulk") {
@@ -320,11 +353,11 @@ function FourOptionsSelectionView({
   wallet?: UserWallet | null;
   userId?: string;
 }) {
-  const adEarnings = calculateTotalAdEarnings(wallet);
+  const adEarnings = calculateUploadOptionsTotalEarnings(wallet);
 
   return (
     <div className="space-y-8">
-      {/* Studio Header Banner with Combined Total Ad Earnings (AdSense + AdMob) */}
+      {/* Studio Header Banner with Combined Total Ad Earnings (All 6 Credited Income Sources) */}
       <div className="relative overflow-hidden rounded-3xl border border-border bg-gradient-to-br from-secondary/80 via-card to-background p-6 sm:p-10 shadow-card">
         <div
           aria-hidden
@@ -351,7 +384,7 @@ function FourOptionsSelectionView({
             </p>
           </div>
 
-          {/* Combined Total Ad Earnings (AdSense + AdMob) Metric Card */}
+          {/* Combined Total Ad Earnings (All 6 Credited Income Sources) Metric Card */}
           <div className="shrink-0 rounded-2xl border border-emerald-500/30 bg-gradient-to-b from-emerald-500/15 via-card to-card p-5 shadow-sm text-left md:text-right min-w-[230px]">
             <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 flex items-center md:justify-end gap-1.5">
               <DollarSign className="h-3.5 w-3.5" />
@@ -361,9 +394,7 @@ function FourOptionsSelectionView({
               ₹{adEarnings.totalAdEarnings.toFixed(2)}
             </div>
             <p className="text-[10px] text-muted-foreground mt-0.5">
-              {userId
-                ? `AdSense ₹${adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹${adEarnings.admobIncome.toFixed(2)}`
-                : "Sign in to view AdSense + AdMob earnings"}
+              {userId ? "All 6 credited income streams" : "Sign in to view credited earnings"}
             </p>
           </div>
         </div>

@@ -13,7 +13,11 @@ import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import type { MainUploadMode } from "@/routes/upload";
 import { useAuth } from "@/lib/auth-context";
-import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
+import {
+  calculateUploadOptionsTotalEarnings,
+  getUserWallet,
+  type UserWallet,
+} from "@/lib/ledger-service";
 import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 interface UploadOptionItem {
@@ -87,28 +91,58 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
 
   const [wallet, setWallet] = useState<UserWallet | null>(null);
   const [isLoadingWallet, setIsLoadingWallet] = useState(false);
-  const adEarnings = calculateTotalAdEarnings(wallet);
+  const adEarnings = calculateUploadOptionsTotalEarnings(wallet);
 
   useEffect(() => {
     if (!isOpen) return;
     if (!userId) {
       setWallet(null);
+      setIsLoadingWallet(false);
       return;
     }
+
     let isMounted = true;
-    setIsLoadingWallet(true);
-    getUserWallet(userId)
-      .then((w) => {
-        if (isMounted) setWallet(w);
-      })
-      .catch((err) => {
-        console.error("Failed to fetch wallet in UploadOptionsModal:", err);
-      })
-      .finally(() => {
-        if (isMounted) setIsLoadingWallet(false);
-      });
+    const requestedUserId = userId.trim().toUpperCase();
+    // Clear previous user's wallet immediately when switching authenticated accounts
+    setWallet((prev) =>
+      prev && prev.userId.trim().toUpperCase() === requestedUserId ? prev : null,
+    );
+
+    const fetchWallet = (showSpinner: boolean) => {
+      if (showSpinner) setIsLoadingWallet(true);
+      getUserWallet(userId)
+        .then((w) => {
+          if (!isMounted) return;
+          const respUid = w.userId ? w.userId.trim().toUpperCase() : "";
+          if (!respUid || respUid === requestedUserId) {
+            setWallet(w);
+          }
+        })
+        .catch((err) => {
+          console.error("Failed to fetch wallet in UploadOptionsModal:", err);
+        })
+        .finally(() => {
+          if (isMounted && showSpinner) setIsLoadingWallet(false);
+        });
+    };
+
+    fetchWallet(true);
+
+    const handleFocus = () => fetchWallet(false);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") fetchWallet(false);
+    };
+    const handleWalletUpdated = () => fetchWallet(false);
+
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("facetube:wallet-updated", handleWalletUpdated);
+
     return () => {
       isMounted = false;
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("facetube:wallet-updated", handleWalletUpdated);
     };
   }, [isOpen, userId]);
 
@@ -196,7 +230,7 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
           </div>
         </div>
 
-        {/* Combined Total Ad Earnings (AdSense + AdMob) Display Card */}
+        {/* Combined Total Ad Earnings (All 6 Credited Income Sources) Display Card */}
         <div className="mb-4 flex items-center justify-between rounded-2xl border border-emerald-500/30 bg-gradient-to-r from-emerald-500/10 via-card to-card p-3.5 shadow-sm">
           <div className="flex items-center gap-3 min-w-0">
             <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
@@ -207,9 +241,7 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
                 Total Ad Earnings
               </span>
               <p className="text-xs text-muted-foreground truncate">
-                {userId
-                  ? `AdSense: ₹${adEarnings.adsenseIncome.toFixed(2)} · AdMob: ₹${adEarnings.admobIncome.toFixed(2)}`
-                  : "Sign in to view AdSense & AdMob earnings"}
+                {userId ? "All 6 credited income streams" : "Sign in to view credited earnings"}
               </p>
             </div>
           </div>

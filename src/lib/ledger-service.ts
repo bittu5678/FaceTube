@@ -91,6 +91,95 @@ export function calculateTotalAdEarnings(
   };
 }
 
+export interface UploadOptionsEarningsBreakdown {
+  referralIncome: number;
+  globalIncome: number;
+  adsenseIncome: number;
+  admobIncome: number;
+  affiliateIncome: number;
+  adPromotionIncome: number;
+  totalAdEarnings: number;
+}
+
+/**
+ * Calculates combined "Total Ad Earnings" for the Upload Options screen across
+ * all six credited creator income streams:
+ * 1. Referral Income (Direct Referral)
+ * 2. Global Income
+ * 3. AdSense Income
+ * 4. AdMob Income
+ * 5. Affiliate Marketing Income
+ * 6. Ad Promotion Income (Ad Boost / 7-level Ads Promotion commissions)
+ *
+ * Double-counting prevention:
+ * - Prefers separated `directReferralIncome` / `direct_referral_income` over legacy `referralIncome`
+ *   so Ads Promotion (TX_ADS_L*) commissions are never counted in both Referral and Ad Promotion.
+ * - Resolves `adPromotionIncome` from one canonical alias chain rather than summing duplicate alias keys.
+ * - Excludes `balance`, `totalEarned`, `totalWithdrawn`, pending reserves, and uncredited/negative noise.
+ */
+export function calculateUploadOptionsTotalEarnings(
+  wallet?: {
+    directReferralIncome?: unknown;
+    direct_referral_income?: unknown;
+    referralIncome?: unknown;
+    referral_income?: unknown;
+    globalIncome?: unknown;
+    global_income?: unknown;
+    adsenseIncome?: unknown;
+    adsense_income?: unknown;
+    admobIncome?: unknown;
+    admob_income?: unknown;
+    affiliateIncome?: unknown;
+    affiliate_income?: unknown;
+    adsPromotionIncome?: unknown;
+    adPromotionIncome?: unknown;
+    ad_promotion_income?: unknown;
+    adBoostIncome?: unknown;
+    ad_boost_income?: unknown;
+  } | null,
+): UploadOptionsEarningsBreakdown {
+  const nonNegativeMoney = (value: unknown) => Math.max(0, toFiniteMoney(value));
+
+  const referralIncome = nonNegativeMoney(
+    wallet?.directReferralIncome ??
+      wallet?.direct_referral_income ??
+      wallet?.referralIncome ??
+      wallet?.referral_income,
+  );
+  const globalIncome = nonNegativeMoney(wallet?.globalIncome ?? wallet?.global_income);
+  const adsenseIncome = nonNegativeMoney(wallet?.adsenseIncome ?? wallet?.adsense_income);
+  const admobIncome = nonNegativeMoney(wallet?.admobIncome ?? wallet?.admob_income);
+  const affiliateIncome = nonNegativeMoney(wallet?.affiliateIncome ?? wallet?.affiliate_income);
+  const adPromotionIncome = nonNegativeMoney(
+    wallet?.adsPromotionIncome ??
+      wallet?.adPromotionIncome ??
+      wallet?.ad_promotion_income ??
+      wallet?.adBoostIncome ??
+      wallet?.ad_boost_income,
+  );
+
+  const totalAdEarnings =
+    Math.round(
+      (referralIncome +
+        globalIncome +
+        adsenseIncome +
+        admobIncome +
+        affiliateIncome +
+        adPromotionIncome) *
+        100,
+    ) / 100;
+
+  return {
+    referralIncome,
+    globalIncome,
+    adsenseIncome,
+    admobIncome,
+    affiliateIncome,
+    adPromotionIncome,
+    totalAdEarnings,
+  };
+}
+
 /**
  * Identifies multi-level Ads Promotion commission ledger entries across
  * both canonical ('ad_boost_income') and legacy ('referral_income' with TX_ADS_L* / ADS_REF_L*) schemas.
@@ -299,13 +388,18 @@ export async function getUserWallet(userId: string): Promise<UserWallet> {
   const wallets = getStoredWallets();
   if (wallets[norm]) {
     const cached = wallets[norm]!;
+    const directRef = toFiniteMoney(cached.directReferralIncome ?? cached.referralIncome);
+    const adBoost = toFiniteMoney(cached.adsPromotionIncome ?? cached.adBoostIncome);
     return {
       ...cached,
-      directReferralIncome: toFiniteMoney(cached.directReferralIncome ?? cached.referralIncome),
-      adBoostIncome: toFiniteMoney(cached.adBoostIncome),
-      adsPromotionIncome: toFiniteMoney(cached.adsPromotionIncome ?? cached.adBoostIncome),
+      referralIncome: directRef,
+      directReferralIncome: directRef,
+      adBoostIncome: adBoost,
+      adsPromotionIncome: adBoost,
+      globalIncome: toFiniteMoney(cached.globalIncome),
       adsenseIncome: toFiniteMoney(cached.adsenseIncome),
       admobIncome: toFiniteMoney(cached.admobIncome),
+      affiliateIncome: toFiniteMoney(cached.affiliateIncome),
       isStale: true,
     };
   }

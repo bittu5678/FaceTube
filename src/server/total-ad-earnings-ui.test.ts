@@ -221,14 +221,14 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
     assert.ok(!summaryCards.includes("₹3,150.00"), "Must remove static ₹3,150.00 placeholder");
     assert.ok(!summaryCards.includes("Last paid Sep 18"), "Must remove static Last paid Sep 18");
 
-    // UploadOptionsModal & upload.tsx: use calculateTotalAdEarnings, not AdSense-only "Total Ads Earning"
-    assert.ok(uploadModal.includes("calculateTotalAdEarnings"));
+    // UploadOptionsModal & upload.tsx: use calculateUploadOptionsTotalEarnings (all 6 credited sources), not AdSense-only "Total Ads Earning"
+    assert.ok(uploadModal.includes("calculateUploadOptionsTotalEarnings"));
     assert.ok(uploadModal.includes("resolveAuthenticatedUserId"));
     assert.ok(uploadModal.includes("Total Ad Earnings"));
     assert.ok(!uploadModal.includes("Total Ads Earning"));
     assert.ok(!uploadModal.includes("wallet?.adsenseIncome ?? 0"));
 
-    assert.ok(uploadRoute.includes("calculateTotalAdEarnings"));
+    assert.ok(uploadRoute.includes("calculateUploadOptionsTotalEarnings"));
     assert.ok(uploadRoute.includes("Total Ad Earnings"));
     assert.ok(!uploadRoute.includes("Total Ads Earning"));
     assert.ok(!uploadRoute.includes("wallet?.adsenseIncome ?? 0"));

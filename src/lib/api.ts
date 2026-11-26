@@ -867,7 +867,10 @@ export const api = {
   wallet: {
     getBalance: async (userId?: string) => {
       const q = userId ? `?userId=${encodeURIComponent(userId)}` : "";
-      return apiFetch<{ success: boolean; wallet: any }>(`/wallet/balance.php${q}`);
+      return apiFetch<{ success: boolean; wallet: any }>(
+        `/wallet/balance.php${q}`,
+        typeof window !== "undefined" ? { cache: "no-store" } : undefined,
+      );
     },
 
     getTransactions: async (
