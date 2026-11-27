@@ -1,5 +1,14 @@
+import { Link } from "@tanstack/react-router";
 import { Sparkles } from "lucide-react";
 import { Logo } from "./Logo";
+
+const footerLinks = [
+  { label: "About", to: "/about" as const },
+  { label: "Terms", to: "/terms" as const },
+  { label: "Privacy", to: "/privacy" as const },
+  { label: "Contact", to: "/contact" as const },
+  { label: "Help", to: "/help" as const },
+];
 
 export function Footer() {
   const handleReplaySplash = () => {
@@ -11,11 +20,11 @@ export function Footer() {
       <div className="grid gap-6 sm:flex sm:items-center sm:justify-between">
         <Logo size={28} />
         <ul className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground">
-          {["About", "Terms", "Privacy", "Contact"].map((l) => (
-            <li key={l}>
-              <a href="#" className="transition-colors hover:text-brand">
-                {l}
-              </a>
+          {footerLinks.map((item) => (
+            <li key={item.to}>
+              <Link to={item.to} className="transition-colors hover:text-brand">
+                {item.label}
+              </Link>
             </li>
           ))}
           <li>

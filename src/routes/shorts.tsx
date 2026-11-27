@@ -199,6 +199,9 @@ function ShortsPage() {
   const cardRef = useRef<HTMLDivElement | null>(null);
   const shortVideoRef = useRef<HTMLVideoElement | null>(null);
   const [shortProgressPercent, setShortProgressPercent] = useState(0);
+  const [shortVideoDims, setShortVideoDims] = useState<{ width: number; height: number } | null>(
+    null,
+  );
   const lastTouchPos = useRef<{ x: number; y: number } | null>(null);
   const pinchStartDist = useRef<number | null>(null);
   const pinchStartScale = useRef<number>(1);
@@ -216,6 +219,7 @@ function ShortsPage() {
   useEffect(() => {
     resetZoom();
     setShortProgressPercent(0);
+    setShortVideoDims(null);
   }, [currentIndex, activeShort?.id, resetZoom]);
 
   useEffect(() => {
@@ -581,6 +585,16 @@ function ShortsPage() {
             >
               {/* Background Video / Thumbnail with Pinch Zoom & Pan */}
               <div className="absolute inset-0 z-0 overflow-hidden">
+                {activeShort.videoUrl &&
+                  activeShort.thumb &&
+                  (!shortVideoDims || shortVideoDims.width / shortVideoDims.height > 0.72) && (
+                    <img
+                      src={activeShort.thumb}
+                      alt=""
+                      aria-hidden="true"
+                      className="absolute inset-0 h-full w-full object-cover scale-110 blur-2xl opacity-50 pointer-events-none"
+                    />
+                  )}
                 <div
                   style={{
                     transform: `translate3d(${pan.x}px, ${pan.y}px, 0px) scale(${scale})`,
@@ -602,6 +616,13 @@ function ShortsPage() {
                       muted={isMuted}
                       loop
                       playsInline
+                      onLoadedMetadata={(e) => {
+                        const vw = e.currentTarget.videoWidth;
+                        const vh = e.currentTarget.videoHeight;
+                        if (vw > 0 && vh > 0) {
+                          setShortVideoDims({ width: vw, height: vh });
+                        }
+                      }}
                       onTimeUpdate={(e) => {
                         const d = e.currentTarget.duration;
                         if (d > 0 && !Number.isNaN(d)) {
@@ -621,7 +642,7 @@ function ShortsPage() {
                   )}
                 </div>
                 <div
-                  className={`absolute inset-0 bg-gradient-to-t ${activeShort.aspectColor} via-black/30 to-black/70 pointer-events-none`}
+                  className={`absolute inset-0 bg-gradient-to-t ${activeShort.aspectColor} via-transparent to-black/45 pointer-events-none`}
                 />
               </div>
 

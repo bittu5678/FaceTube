@@ -55,13 +55,17 @@ try {
         $updatedAt = $wallet['updated_at'] ?? date('c');
     }
 
-    // Separate Direct Referral income vs Ads Promotion / Ad Boost income from settled income_ledger
-    // so both are reported cleanly without double-counting when wallet_balances.referral_income contains both.
+    // Reconcile Direct Referral, Ads Promotion / Ad Boost, and finalized AdMob income from settled income_ledger
+    // so settled totals are reported cleanly without double-counting pending or duplicate records.
     $directReferralIncome = $referralIncome;
     try {
         $stmtSep = $pdo->prepare("
             SELECT
-                COUNT(*) AS ref_row_count,
+                COALESCE(SUM(CASE
+                    WHEN COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+                      OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                      OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                    THEN 1 ELSE 0 END), 0) AS ref_row_count,
                 COALESCE(SUM(CASE
                     WHEN COALESCE(income_type, '') IN ('referral_income', 'direct_commission')
                      AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_REF|_PENDING|_%' ESCAPE '|'
@@ -72,12 +76,18 @@ try {
                     WHEN COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
                       OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
                       OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
-                    THEN amount ELSE 0 END), 0) AS ledger_ad_boost
+                    THEN amount ELSE 0 END), 0) AS ledger_ad_boost,
+                COALESCE(SUM(CASE
+                    WHEN COALESCE(income_type, '') = 'admob_income'
+                    THEN 1 ELSE 0 END), 0) AS admob_row_count,
+                COALESCE(SUM(CASE
+                    WHEN COALESCE(income_type, '') = 'admob_income'
+                    THEN amount ELSE 0 END), 0) AS ledger_admob_income
             FROM income_ledger
             WHERE UPPER(user_id) = UPPER(?)
               AND status = 'settled'
               AND (
-                  COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+                  COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads', 'admob_income')
                   OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
                   OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
               )
@@ -88,6 +98,9 @@ try {
             $directReferralIncome = round(floatval($sepRow['ledger_direct_referral'] ?? 0), 2);
             $adBoostIncome = round(floatval($sepRow['ledger_ad_boost'] ?? 0), 2);
             $referralIncome = $directReferralIncome;
+        }
+        if ($sepRow && intval($sepRow['admob_row_count'] ?? 0) > 0) {
+            $admobIncome = round(floatval($sepRow['ledger_admob_income'] ?? 0), 2);
         }
     } catch (Exception $eSep) {
         // Preserve wallet_balances fallback if income_ledger cannot be queried

@@ -716,11 +716,18 @@ function AdsPromotionsPage() {
               {/* Video Player Preview */}
               {videoPreviewUrl && (
                 <div className="rounded-2xl border border-border overflow-hidden bg-black relative shadow-lg">
-                  <div className="aspect-video w-full bg-black">
+                  <div className="w-full max-h-80 flex items-center justify-center bg-black">
                     <video
                       src={videoPreviewUrl}
                       controls
-                      className="w-full h-full object-contain"
+                      onLoadedMetadata={(e) => {
+                        const vw = e.currentTarget.videoWidth;
+                        const vh = e.currentTarget.videoHeight;
+                        if (vw > 0 && vh > 0) {
+                          e.currentTarget.style.aspectRatio = `${vw} / ${vh}`;
+                        }
+                      }}
+                      className="max-h-80 max-w-full w-auto object-contain"
                       playsInline
                     />
                   </div>

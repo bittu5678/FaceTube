@@ -544,9 +544,8 @@ function WatchPage() {
                 expanded ? "" : "line-clamp-2"
               }`}
             >
-              {video.description} Chapters, resources and the full project source are linked below.
-              Thanks for watching — leave a comment with what you want covered next on{" "}
-              {video.channel}.
+              {video.description ||
+                `Uploaded by ${video.channel} on FaceTube. Leave a comment below to join the conversation.`}
             </p>
             <button
               type="button"

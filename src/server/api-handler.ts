@@ -14739,7 +14739,7 @@ async function dispatchApiRequest(
             const refInc = Number(w.referral_income || 0);
             const glbInc = Number(w.global_income || 0);
             const adsInc = Number(w.adsense_income || 0);
-            const admInc = Number(w.admob_income || 0);
+            let admInc = Number(w.admob_income || 0);
             const affInc = Number(w.affiliate_income || 0);
             const totEarn = Number(w.total_earned || bal);
             const totWdr = Number(w.total_withdrawn || 0);
@@ -14749,7 +14749,11 @@ async function dispatchApiRequest(
             try {
               const [sepRows]: any = await pool.query(
                 `SELECT
-                   COUNT(*) AS ref_row_count,
+                   COALESCE(SUM(CASE
+                     WHEN COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+                       OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
+                       OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
+                     THEN 1 ELSE 0 END), 0) AS ref_row_count,
                    COALESCE(SUM(CASE
                      WHEN COALESCE(income_type, '') IN ('referral_income', 'direct_commission')
                       AND UPPER(COALESCE(transaction_id, '')) NOT LIKE 'TX|_REF|_PENDING|_%' ESCAPE '|'
@@ -14760,12 +14764,18 @@ async function dispatchApiRequest(
                      WHEN COALESCE(income_type, '') IN ('ad_boost_income', 'marketing_ads')
                        OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
                        OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
-                     THEN amount ELSE 0 END), 0) AS ledger_ad_boost
+                     THEN amount ELSE 0 END), 0) AS ledger_ad_boost,
+                   COALESCE(SUM(CASE
+                     WHEN COALESCE(income_type, '') = 'admob_income'
+                     THEN 1 ELSE 0 END), 0) AS admob_row_count,
+                   COALESCE(SUM(CASE
+                     WHEN COALESCE(income_type, '') = 'admob_income'
+                     THEN amount ELSE 0 END), 0) AS ledger_admob_income
                  FROM income_ledger
                  WHERE UPPER(user_id) = UPPER(?)
                    AND status = 'settled'
                    AND (
-                     COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads')
+                     COALESCE(income_type, '') IN ('referral_income', 'direct_commission', 'ad_boost_income', 'marketing_ads', 'admob_income')
                      OR UPPER(COALESCE(transaction_id, '')) LIKE 'TX|_ADS|_L%' ESCAPE '|'
                      OR UPPER(COALESCE(special_tag, '')) LIKE 'ADS|_REF|_L%' ESCAPE '|'
                    )`,
@@ -14775,6 +14785,9 @@ async function dispatchApiRequest(
               if (sep && Number(sep.ref_row_count || 0) > 0) {
                 directRefInc = Math.round((Number(sep.ledger_direct_referral) || 0) * 100) / 100;
                 adBoostInc = Math.round((Number(sep.ledger_ad_boost) || 0) * 100) / 100;
+              }
+              if (sep && Number(sep.admob_row_count || 0) > 0) {
+                admInc = Math.round((Number(sep.ledger_admob_income) || 0) * 100) / 100;
               }
             } catch (_sepErr) {
               // Preserve wallet_balances fallback if income_ledger query fails
@@ -14837,7 +14850,14 @@ async function dispatchApiRequest(
         );
       }
 
-      const w = store.wallets?.[userId] || {
+      const storeWalletEntry =
+        store.wallets?.[userId] ||
+        store.wallets?.[userId.toUpperCase()] ||
+        Object.entries(store.wallets || {}).find(
+          ([k]) => k.toUpperCase() === userId.toUpperCase(),
+        )?.[1];
+
+      const w = storeWalletEntry || {
         balance: 0,
         total_earned: 0,
         total_withdrawn: 0,
@@ -14852,10 +14872,13 @@ async function dispatchApiRequest(
 
       let storeDirectRef = Number(w.referral_income || 0);
       let storeAdBoost = Number((w as any).ad_boost_income || 0);
+      let storeAdmob = Number(w.admob_income || 0);
       const seenBalTxKeys = new Set<string>();
       let hasStoreRefLedgerRows = false;
+      let hasStoreAdmobLedgerRows = false;
       let ledgerDirectSum = 0;
       let ledgerAdBoostSum = 0;
+      let ledgerAdmobSum = 0;
 
       for (const tx of store.walletTransactions || []) {
         const txUser = String(tx["user_id"] || tx["userId"] || "")
@@ -14902,12 +14925,18 @@ async function dispatchApiRequest(
         } else if (isDirectTx) {
           hasStoreRefLedgerRows = true;
           ledgerDirectSum += amt;
+        } else if (tType === "admob_income") {
+          hasStoreAdmobLedgerRows = true;
+          ledgerAdmobSum += amt;
         }
       }
 
       if (hasStoreRefLedgerRows) {
         storeDirectRef = Math.round(ledgerDirectSum * 100) / 100;
         storeAdBoost = Math.round(ledgerAdBoostSum * 100) / 100;
+      }
+      if (hasStoreAdmobLedgerRows) {
+        storeAdmob = Math.round(ledgerAdmobSum * 100) / 100;
       }
 
       return jsonResponse({
@@ -14929,8 +14958,8 @@ async function dispatchApiRequest(
           global_income: w.global_income,
           adsenseIncome: w.adsense_income,
           adsense_income: w.adsense_income,
-          admobIncome: w.admob_income || 0,
-          admob_income: w.admob_income || 0,
+          admobIncome: storeAdmob,
+          admob_income: storeAdmob,
           affiliateIncome: w.affiliate_income,
           affiliate_income: w.affiliate_income,
           totalEarnings: w.total_earned,
@@ -19800,16 +19829,27 @@ async function dispatchApiRequest(
     }
 
     // 2. Fallback to local store (non-production only)
-    const userTxs = (store.walletTransactions || []).filter(
-      (t: any) =>
-        (t.user_id || t.userId)?.toUpperCase() === requestedUserId.toUpperCase() &&
-        t.income_type !== "withdrawal" &&
-        t.type !== "withdrawal" &&
-        (t.status === undefined ||
-          t.status === null ||
-          String(t.status).trim() === "" ||
-          String(t.status).trim().toLowerCase() === "settled"),
-    );
+    const seenHistoryTxKeys = new Set<string>();
+    const userTxs = (store.walletTransactions || []).filter((t: any) => {
+      if ((t.user_id || t.userId)?.toUpperCase() !== requestedUserId.toUpperCase()) return false;
+      if (t.income_type === "withdrawal" || t.type === "withdrawal") return false;
+      if (!(
+        t.status === undefined ||
+        t.status === null ||
+        String(t.status).trim() === "" ||
+        String(t.status).trim().toLowerCase() === "settled"
+      )) {
+        return false;
+      }
+      const dedupKey = String(t.transaction_id || t.transactionId || t.id || "")
+        .trim()
+        .toUpperCase();
+      if (dedupKey) {
+        if (seenHistoryTxKeys.has(dedupKey)) return false;
+        seenHistoryTxKeys.add(dedupKey);
+      }
+      return true;
+    });
 
     const history: any[] = [];
     const summary = {
@@ -24443,8 +24483,9 @@ async function dispatchApiRequest(
 
     const ledgerUuid = `led_admob_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-    if (!store.wallets[upperId]) {
-      store.wallets[upperId] = {
+    const walletKey = canonicalUserId.toUpperCase();
+    if (!store.wallets[walletKey]) {
+      store.wallets[walletKey] = {
         balance: 0,
         total_earned: 0,
         total_withdrawn: 0,
@@ -24456,7 +24497,7 @@ async function dispatchApiRequest(
         updated_at: new Date().toISOString(),
       };
     }
-    const existingWallet = store.wallets[upperId]!;
+    const existingWallet = store.wallets[walletKey]!;
     existingWallet.balance = Number((existingWallet.balance + amount).toFixed(2));
     existingWallet.total_earned = Number((existingWallet.total_earned + amount).toFixed(2));
     existingWallet.admob_income = Number(((existingWallet.admob_income || 0) + amount).toFixed(2));

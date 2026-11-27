@@ -13,11 +13,7 @@ import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import type { MainUploadMode } from "@/routes/upload";
 import { useAuth } from "@/lib/auth-context";
-import {
-  calculateUploadOptionsTotalEarnings,
-  getUserWallet,
-  type UserWallet,
-} from "@/lib/ledger-service";
+import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
 import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 interface UploadOptionItem {
@@ -91,7 +87,7 @@ export function UploadOptionsModal({ isOpen, onClose }: UploadOptionsModalProps)
 
   const [wallet, setWallet] = useState<UserWallet | null>(null);
   const [isLoadingWallet, setIsLoadingWallet] = useState(false);
-  const adEarnings = calculateUploadOptionsTotalEarnings(wallet);
+  const adEarnings = calculateTotalAdEarnings(wallet);
 
   useEffect(() => {
     if (!isOpen) return;

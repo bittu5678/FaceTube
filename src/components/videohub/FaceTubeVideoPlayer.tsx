@@ -138,7 +138,7 @@ export function FaceTubeVideoPlayer({
   const normalizedRotation = ((rotation % 360) + 360) % 360;
   const isRotated = normalizedRotation !== 0;
 
-  // Reset states when source URL changes
+  // Reset playback state when source URL changes (without wiping metadata on unrelated prop renders)
   useEffect(() => {
     setIsPlaying(false);
     setIsLoading(Boolean(cleanSrc));
@@ -150,32 +150,42 @@ export function FaceTubeVideoPlayer({
     setZoom(1);
     setPan({ x: 0, y: 0 });
     setIsDragging(false);
-    setVideoSize({ width: 0, height: 0 });
 
-    if (videoRef.current && cleanSrc) {
-      videoRef.current.load();
-      if (autoPlay) {
-        const playPromise = videoRef.current.play();
-        if (playPromise !== undefined) {
-          playPromise
-            .then(() => setIsPlaying(true))
-            .catch(() => {
-              // Autoplay with sound blocked by browser policy; try muted autoplay
-              if (videoRef.current) {
-                videoRef.current.muted = true;
-                setIsMuted(true);
-                videoRef.current
-                  .play()
-                  .then(() => setIsPlaying(true))
-                  .catch(() => {
-                    setIsPlaying(false);
-                  });
-              } else {
+    const videoEl = videoRef.current;
+    if (videoEl && cleanSrc && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
+      setVideoSize({ width: videoEl.videoWidth, height: videoEl.videoHeight });
+      setIsLoading(false);
+    } else {
+      setVideoSize({ width: 0, height: 0 });
+    }
+
+    if (videoEl && cleanSrc) {
+      videoEl.load();
+    }
+  }, [cleanSrc]);
+
+  useEffect(() => {
+    const videoEl = videoRef.current;
+    if (!videoEl || !cleanSrc || !autoPlay) return;
+    const playPromise = videoEl.play();
+    if (playPromise !== undefined) {
+      playPromise
+        .then(() => setIsPlaying(true))
+        .catch(() => {
+          // Autoplay with sound blocked by browser policy; try muted autoplay
+          if (videoRef.current) {
+            videoRef.current.muted = true;
+            setIsMuted(true);
+            videoRef.current
+              .play()
+              .then(() => setIsPlaying(true))
+              .catch(() => {
                 setIsPlaying(false);
-              }
-            });
-        }
-      }
+              });
+          } else {
+            setIsPlaying(false);
+          }
+        });
     }
   }, [cleanSrc, autoPlay]);
 
@@ -193,8 +203,9 @@ export function FaceTubeVideoPlayer({
 
     updateSize();
 
+    let observer: ResizeObserver | null = null;
     if (typeof ResizeObserver !== "undefined") {
-      const observer = new ResizeObserver((entries) => {
+      observer = new ResizeObserver((entries) => {
         const entry = entries[0];
         if (entry) {
           const { width, height } = entry.contentRect;
@@ -204,11 +215,17 @@ export function FaceTubeVideoPlayer({
         }
       });
       observer.observe(el);
-      return () => observer.disconnect();
     }
 
     window.addEventListener("resize", updateSize);
-    return () => window.removeEventListener("resize", updateSize);
+    window.addEventListener("orientationchange", updateSize);
+    document.addEventListener("fullscreenchange", updateSize);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateSize);
+      window.removeEventListener("orientationchange", updateSize);
+      document.removeEventListener("fullscreenchange", updateSize);
+    };
   }, [cleanSrc, hasError]);
 
   // Fullscreen change listener
@@ -705,6 +722,7 @@ export function FaceTubeVideoPlayer({
 
   const mimeType = getMimeType(cleanSrc);
   const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const shouldUseFittedBox = Boolean(fittedBox && (isFullscreen || isRotated || zoom > 1));
 
   return (
     <div
@@ -716,7 +734,7 @@ export function FaceTubeVideoPlayer({
         intrinsicContainerStyle ? "mx-auto rounded-2xl" : containerAspectClass
       } overflow-hidden bg-black shadow-lift select-none`}
     >
-      {/* Centered Video Stage: handles click-to-play, drag-to-pan when zoomed, and touch pinch/pan */}
+      {/* Centered Video Stage: stretches cleanly to container bounds (avoids height:auto % collapse) */}
       <div
         onPointerDown={handleStagePointerDown}
         onPointerMove={handleStagePointerMove}
@@ -726,7 +744,7 @@ export function FaceTubeVideoPlayer({
         onTouchMove={handleStageTouchMove}
         onTouchEnd={handleStageTouchEnd}
         onClick={handleStageClick}
-        className={`relative flex h-full w-full items-center justify-center overflow-hidden ${
+        className={`absolute inset-0 flex items-center justify-center overflow-hidden ${
           canPan ? (isDragging ? "cursor-grabbing" : "cursor-grab") : "cursor-pointer"
         }`}
         style={{ touchAction: zoom > 1 ? "none" : "pan-y" }}
@@ -816,11 +834,11 @@ export function FaceTubeVideoPlayer({
             }
             setErrorMessage(msg);
           }}
-          className={`object-contain bg-black ${fittedBox ? "" : "h-full w-full"} ${
+          className={`object-contain bg-black ${shouldUseFittedBox ? "" : "h-full w-full"} ${
             isDragging ? "transition-none" : "transition-transform duration-200 ease-out"
           }`}
           style={{
-            ...(fittedBox
+            ...(shouldUseFittedBox && fittedBox
               ? {
                   width: `${fittedBox.baseWidth}px`,
                   height: `${fittedBox.baseHeight}px`,

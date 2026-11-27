@@ -13,6 +13,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { Footer } from "@/components/videohub/Footer";
 
 export const Route = createFileRoute("/help")({
   head: () => ({
@@ -191,7 +192,13 @@ function HelpPage() {
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Link
+              to="/contact"
+              className="rounded-full border border-border bg-card px-4 py-2 text-xs font-bold text-foreground hover:bg-secondary transition"
+            >
+              Contact Support
+            </Link>
             <Link
               to="/upload"
               className="rounded-full bg-brand px-4 py-2 text-xs font-bold text-white shadow-lift hover:bg-brand-dark transition"
@@ -200,6 +207,8 @@ function HelpPage() {
             </Link>
           </div>
         </div>
+
+        <Footer />
       </div>
     </VideoHubLayout>
   );

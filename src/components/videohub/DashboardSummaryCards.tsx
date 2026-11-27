@@ -154,12 +154,12 @@ const DASHBOARD_SUMMARY_DATA: SummaryCardItem[] = [
     color: "text-blue-400 bg-blue-500/10",
     link: "/admob-income",
   },
-  // 11c. Total Ad Earnings (AdSense + AdMob)
+  // 11c. Total Ad Earnings (All 6 Credited Income Streams)
   {
     id: "total-ad-earnings",
     title: "Total Ad Earnings",
     value: "₹0.00",
-    subtitle: "AdSense + AdMob combined",
+    subtitle: "All 6 credited income streams",
     icon: BarChart3,
     color: "text-emerald-400 bg-emerald-500/10",
     link: "/income",

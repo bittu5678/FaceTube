@@ -55,43 +55,7 @@ export interface UserWallet {
   isStale?: boolean | undefined;
 }
 
-export interface AdEarningsBreakdown {
-  adsenseIncome: number;
-  admobIncome: number;
-  totalAdEarnings: number;
-}
-
-function toFiniteMoney(value: unknown): number {
-  if (value === null || value === undefined || value === "") return 0;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return 0;
-  return Math.round(parsed * 100) / 100;
-}
-
-/**
- * Calculates combined advertising revenue strictly from AdSense Income + AdMob Income.
- * Excludes referral, global pool, affiliate, sponsor fees, withdrawals, and totalEarned.
- */
-export function calculateTotalAdEarnings(
-  wallet?: {
-    adsenseIncome?: unknown;
-    adsense_income?: unknown;
-    admobIncome?: unknown;
-    admob_income?: unknown;
-  } | null,
-): AdEarningsBreakdown {
-  const adsenseIncome = toFiniteMoney(wallet?.adsenseIncome ?? wallet?.adsense_income);
-  const admobIncome = toFiniteMoney(wallet?.admobIncome ?? wallet?.admob_income);
-  const totalAdEarnings = Math.round((adsenseIncome + admobIncome) * 100) / 100;
-
-  return {
-    adsenseIncome,
-    admobIncome,
-    totalAdEarnings,
-  };
-}
-
-export interface UploadOptionsEarningsBreakdown {
+export interface TotalAdEarningsBreakdown {
   referralIncome: number;
   globalIncome: number;
   adsenseIncome: number;
@@ -101,9 +65,62 @@ export interface UploadOptionsEarningsBreakdown {
   totalAdEarnings: number;
 }
 
+export type AdEarningsBreakdown = TotalAdEarningsBreakdown;
+export type UploadOptionsEarningsBreakdown = TotalAdEarningsBreakdown;
+
+export type TotalAdEarningsWalletInput = {
+  directReferralIncome?: unknown;
+  direct_referral_income?: unknown;
+  referralIncome?: unknown;
+  referral_income?: unknown;
+  globalIncome?: unknown;
+  global_income?: unknown;
+  adsenseIncome?: unknown;
+  adsense_income?: unknown;
+  admobIncome?: unknown;
+  admob_income?: unknown;
+  affiliateIncome?: unknown;
+  affiliate_income?: unknown;
+  adsPromotionIncome?: unknown;
+  adPromotionIncome?: unknown;
+  ad_promotion_income?: unknown;
+  adBoostIncome?: unknown;
+  ad_boost_income?: unknown;
+} | null;
+
+export type TotalAdEarningsTransactionInput = {
+  id?: unknown;
+  transactionId?: unknown;
+  transaction_id?: unknown;
+  incomeType?: unknown;
+  income_type?: unknown;
+  type?: unknown;
+  purpose?: unknown;
+  specialTag?: unknown;
+  special_tag?: unknown;
+  status?: unknown;
+  amount?: unknown;
+  description?: unknown;
+};
+
+function toFiniteMoney(value: unknown): number {
+  if (value === null || value === undefined || value === "") return 0;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.round(parsed * 100) / 100;
+}
+
+function nonNegativeMoney(value: unknown): number {
+  return Math.max(0, toFiniteMoney(value));
+}
+
+function roundMoney2(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
 /**
- * Calculates combined "Total Ad Earnings" for the Upload Options screen across
- * all six credited creator income streams:
+ * Canonical calculation helper for combined "Total Ad Earnings" across all six
+ * settled creator income streams:
  * 1. Referral Income (Direct Referral)
  * 2. Global Income
  * 3. AdSense Income
@@ -111,46 +128,29 @@ export interface UploadOptionsEarningsBreakdown {
  * 5. Affiliate Marketing Income
  * 6. Ad Promotion Income (Ad Boost / 7-level Ads Promotion commissions)
  *
- * Double-counting prevention:
+ * Safeguards:
  * - Prefers separated `directReferralIncome` / `direct_referral_income` over legacy `referralIncome`
- *   so Ads Promotion (TX_ADS_L*) commissions are never counted in both Referral and Ad Promotion.
+ *   so Ads Promotion (TX_ADS_L*) commissions are never double-counted in both Referral and Ad Promotion.
  * - Resolves `adPromotionIncome` from one canonical alias chain rather than summing duplicate alias keys.
  * - Excludes `balance`, `totalEarned`, `totalWithdrawn`, pending reserves, and uncredited/negative noise.
+ * - When optional ledger `transactions` are supplied, deduplicates by transaction ID, filters to
+ *   settled-only credits, and reconciles per stream without ever summing wallet + ledger twice.
  */
-export function calculateUploadOptionsTotalEarnings(
-  wallet?: {
-    directReferralIncome?: unknown;
-    direct_referral_income?: unknown;
-    referralIncome?: unknown;
-    referral_income?: unknown;
-    globalIncome?: unknown;
-    global_income?: unknown;
-    adsenseIncome?: unknown;
-    adsense_income?: unknown;
-    admobIncome?: unknown;
-    admob_income?: unknown;
-    affiliateIncome?: unknown;
-    affiliate_income?: unknown;
-    adsPromotionIncome?: unknown;
-    adPromotionIncome?: unknown;
-    ad_promotion_income?: unknown;
-    adBoostIncome?: unknown;
-    ad_boost_income?: unknown;
-  } | null,
-): UploadOptionsEarningsBreakdown {
-  const nonNegativeMoney = (value: unknown) => Math.max(0, toFiniteMoney(value));
-
-  const referralIncome = nonNegativeMoney(
+export function calculateTotalAdEarnings(
+  wallet?: TotalAdEarningsWalletInput,
+  transactions?: readonly TotalAdEarningsTransactionInput[] | null,
+): TotalAdEarningsBreakdown {
+  let referralIncome = nonNegativeMoney(
     wallet?.directReferralIncome ??
       wallet?.direct_referral_income ??
       wallet?.referralIncome ??
       wallet?.referral_income,
   );
-  const globalIncome = nonNegativeMoney(wallet?.globalIncome ?? wallet?.global_income);
-  const adsenseIncome = nonNegativeMoney(wallet?.adsenseIncome ?? wallet?.adsense_income);
-  const admobIncome = nonNegativeMoney(wallet?.admobIncome ?? wallet?.admob_income);
-  const affiliateIncome = nonNegativeMoney(wallet?.affiliateIncome ?? wallet?.affiliate_income);
-  const adPromotionIncome = nonNegativeMoney(
+  let globalIncome = nonNegativeMoney(wallet?.globalIncome ?? wallet?.global_income);
+  let adsenseIncome = nonNegativeMoney(wallet?.adsenseIncome ?? wallet?.adsense_income);
+  let admobIncome = nonNegativeMoney(wallet?.admobIncome ?? wallet?.admob_income);
+  let affiliateIncome = nonNegativeMoney(wallet?.affiliateIncome ?? wallet?.affiliate_income);
+  let adPromotionIncome = nonNegativeMoney(
     wallet?.adsPromotionIncome ??
       wallet?.adPromotionIncome ??
       wallet?.ad_promotion_income ??
@@ -158,16 +158,110 @@ export function calculateUploadOptionsTotalEarnings(
       wallet?.ad_boost_income,
   );
 
-  const totalAdEarnings =
-    Math.round(
-      (referralIncome +
-        globalIncome +
-        adsenseIncome +
-        admobIncome +
-        affiliateIncome +
-        adPromotionIncome) *
-        100,
-    ) / 100;
+  if (Array.isArray(transactions) && transactions.length > 0) {
+    const seenTxKeys = new Set<string>();
+    const ledgerTotals = {
+      referralIncome: 0,
+      globalIncome: 0,
+      adsenseIncome: 0,
+      admobIncome: 0,
+      affiliateIncome: 0,
+      adPromotionIncome: 0,
+    };
+    const hasSettledLedger = {
+      referralIncome: false,
+      globalIncome: false,
+      adsenseIncome: false,
+      admobIncome: false,
+      affiliateIncome: false,
+      adPromotionIncome: false,
+    };
+
+    for (const tx of transactions) {
+      if (!tx) continue;
+      const status = String(tx.status ?? "settled")
+        .trim()
+        .toLowerCase();
+      if (status !== "" && status !== "settled") continue;
+
+      const dedupKey = String(tx.transactionId ?? tx.transaction_id ?? tx.id ?? "")
+        .trim()
+        .toUpperCase();
+      if (dedupKey) {
+        if (seenTxKeys.has(dedupKey)) continue;
+        seenTxKeys.add(dedupKey);
+      }
+
+      const incomeType = String(tx.incomeType ?? tx.income_type ?? tx.type ?? tx.purpose ?? "")
+        .trim()
+        .toLowerCase();
+      const txIdUpper = String(tx.transactionId ?? tx.transaction_id ?? "")
+        .trim()
+        .toUpperCase();
+      const tagUpper = String(tx.specialTag ?? tx.special_tag ?? "")
+        .trim()
+        .toUpperCase();
+
+      if (txIdUpper.startsWith("TX_REF_PENDING_")) continue;
+
+      const amt = nonNegativeMoney(tx.amount);
+      if (amt <= 0) continue;
+
+      const isAdsTx =
+        incomeType === "ad_boost_income" ||
+        incomeType === "marketing_ads" ||
+        txIdUpper.startsWith("TX_ADS_L") ||
+        tagUpper.startsWith("ADS_REF_L");
+
+      if (isAdsTx) {
+        hasSettledLedger.adPromotionIncome = true;
+        ledgerTotals.adPromotionIncome += amt;
+      } else if (incomeType === "referral_income" || incomeType === "direct_commission") {
+        hasSettledLedger.referralIncome = true;
+        ledgerTotals.referralIncome += amt;
+      } else if (incomeType === "global_income") {
+        hasSettledLedger.globalIncome = true;
+        ledgerTotals.globalIncome += amt;
+      } else if (incomeType === "adsense_income") {
+        hasSettledLedger.adsenseIncome = true;
+        ledgerTotals.adsenseIncome += amt;
+      } else if (incomeType === "admob_income") {
+        hasSettledLedger.admobIncome = true;
+        ledgerTotals.admobIncome += amt;
+      } else if (incomeType === "affiliate_income" || incomeType === "marketing_income") {
+        hasSettledLedger.affiliateIncome = true;
+        ledgerTotals.affiliateIncome += amt;
+      }
+    }
+
+    if (hasSettledLedger.referralIncome) {
+      referralIncome = roundMoney2(ledgerTotals.referralIncome);
+    }
+    if (hasSettledLedger.globalIncome) {
+      globalIncome = roundMoney2(ledgerTotals.globalIncome);
+    }
+    if (hasSettledLedger.adsenseIncome) {
+      adsenseIncome = roundMoney2(ledgerTotals.adsenseIncome);
+    }
+    if (hasSettledLedger.admobIncome) {
+      admobIncome = roundMoney2(ledgerTotals.admobIncome);
+    }
+    if (hasSettledLedger.affiliateIncome) {
+      affiliateIncome = roundMoney2(ledgerTotals.affiliateIncome);
+    }
+    if (hasSettledLedger.adPromotionIncome) {
+      adPromotionIncome = roundMoney2(ledgerTotals.adPromotionIncome);
+    }
+  }
+
+  const totalAdEarnings = roundMoney2(
+    referralIncome +
+      globalIncome +
+      adsenseIncome +
+      admobIncome +
+      affiliateIncome +
+      adPromotionIncome,
+  );
 
   return {
     referralIncome,
@@ -179,6 +273,8 @@ export function calculateUploadOptionsTotalEarnings(
     totalAdEarnings,
   };
 }
+
+export const calculateUploadOptionsTotalEarnings = calculateTotalAdEarnings;
 
 /**
  * Identifies multi-level Ads Promotion commission ledger entries across

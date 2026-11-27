@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { Play, Bookmark } from "lucide-react";
 import heroImg from "@/assets/hero.jpg";
 import { Logo } from "./Logo";
@@ -33,19 +34,29 @@ export function Hero() {
             fastest-growing channels on FaceTube.
           </p>
           <div className="mt-7 flex flex-wrap items-center gap-3">
-            <button className="inline-flex items-center gap-2 rounded-full bg-brand px-6 py-3 text-sm font-semibold text-brand-foreground shadow-lift transition hover:bg-brand-dark active:scale-95">
+            <Link
+              to="/explore"
+              className="inline-flex items-center gap-2 rounded-full bg-brand px-6 py-3 text-sm font-semibold text-brand-foreground shadow-lift transition hover:bg-brand-dark active:scale-95"
+            >
               <Play className="h-4 w-4 fill-current" />
               Watch Now
-            </button>
-            <button className="inline-flex items-center gap-2 rounded-full border border-white/25 bg-white/5 px-6 py-3 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/15">
+            </Link>
+            <Link
+              to="/watch-later"
+              className="inline-flex items-center gap-2 rounded-full border border-white/25 bg-white/5 px-6 py-3 text-sm font-semibold text-white backdrop-blur transition hover:bg-white/15"
+            >
               <Bookmark className="h-4 w-4" />
               Watch Later
-            </button>
-            <span className="text-xs text-white/55">48:12 · 2.4M views</span>
+            </Link>
+            <span className="text-xs text-white/55">Featured Creator Showcase</span>
           </div>
         </div>
 
-        <div className="group relative hidden overflow-hidden rounded-2xl border border-white/15 shadow-2xl lg:block">
+        <Link
+          to="/explore"
+          aria-label="Explore featured FaceTube videos"
+          className="group relative hidden overflow-hidden rounded-2xl border border-white/15 shadow-2xl lg:block"
+        >
           <img
             src={heroImg}
             alt="Featured video preview"
@@ -58,7 +69,7 @@ export function Hero() {
               <Play className="h-6 w-6 translate-x-[2px] fill-current text-white" />
             </span>
           </div>
-        </div>
+        </Link>
       </div>
     </section>
   );

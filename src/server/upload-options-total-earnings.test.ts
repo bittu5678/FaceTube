@@ -149,12 +149,13 @@ describe("FaceTube Studio — Upload Options Total Ad Earnings (All 6 Credited S
       "Must sum 500 + 300 + 100 + 150 + 50 + 200 = 1300 without double-counting",
     );
 
-    // Ensure non-Upload-Options AdSense + AdMob helper stays strictly AdSense + AdMob
-    const adsOnly = calculateTotalAdEarnings({
+    // Canonical calculateTotalAdEarnings and alias return identical 6-source totals
+    assert.strictEqual(calculateUploadOptionsTotalEarnings, calculateTotalAdEarnings);
+    const sameRes = calculateTotalAdEarnings({
       adsenseIncome: 100,
       admobIncome: 150,
     });
-    assert.equal(adsOnly.totalAdEarnings, 250);
+    assert.equal(sameRes.totalAdEarnings, 250);
   });
 
   it("5. Backend wallet/balance API & getUserWallet prevent duplicate counting, exclude pending/rejected/fees, and isolate authenticated users", async () => {
@@ -339,12 +340,8 @@ describe("FaceTube Studio — Upload Options Total Ad Earnings (All 6 Credited S
       ["upload.tsx", uploadRoute],
     ] as const) {
       assert.ok(
-        src.includes("calculateUploadOptionsTotalEarnings"),
-        `${name} must use calculateUploadOptionsTotalEarnings`,
-      );
-      assert.ok(
-        !src.includes("calculateTotalAdEarnings"),
-        `${name} must not use AdSense+AdMob-only calculateTotalAdEarnings`,
+        src.includes("calculateTotalAdEarnings"),
+        `${name} must use canonical calculateTotalAdEarnings`,
       );
       assert.ok(src.includes("Total Ad Earnings"), `${name} must preserve Total Ad Earnings label`);
       assert.ok(

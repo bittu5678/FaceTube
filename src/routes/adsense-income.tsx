@@ -50,18 +50,29 @@ function AdSenseIncomePage() {
             setWallet(wRes.wallet);
           }
           if (txRes && txRes.success && Array.isArray(txRes.transactions)) {
-            const filtered = txRes.transactions.filter(
-              (t: any) =>
-                t.income_type === "adsense_income" ||
-                t.incomeType === "adsense_income" ||
-                t.purpose === "adsense_income" ||
-                String(t.description || "")
-                  .toLowerCase()
-                  .includes("adsense") ||
-                String(t.description || "")
-                  .toLowerCase()
-                  .includes("video ad"),
-            );
+            const seenTxIds = new Set<string>();
+            const filtered = txRes.transactions.filter((t: any) => {
+              const status = String(t.status ?? "settled")
+                .trim()
+                .toLowerCase();
+              if (status !== "" && status !== "settled") return false;
+              const tType = String(t.income_type || t.incomeType || t.purpose || t.type || "")
+                .trim()
+                .toLowerCase();
+              const desc = String(t.description || "").toLowerCase();
+              const isAdsenseType =
+                tType === "adsense_income" ||
+                (tType === "" && (desc.includes("adsense") || desc.includes("video ad")));
+              if (!isAdsenseType) return false;
+              const dedupKey = String(t.transaction_id || t.transactionId || t.id || "")
+                .trim()
+                .toUpperCase();
+              if (dedupKey) {
+                if (seenTxIds.has(dedupKey)) return false;
+                seenTxIds.add(dedupKey);
+              }
+              return true;
+            });
             setAdsenseTransactions(filtered);
           }
         }
@@ -124,10 +135,7 @@ function AdSenseIncomePage() {
             <p className="text-2xl font-black text-emerald-400">
               ₹{adEarnings.totalAdEarnings.toFixed(2)}
             </p>
-            <p className="text-[11px] text-muted-foreground">
-              AdSense ₹{adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹
-              {adEarnings.admobIncome.toFixed(2)}
-            </p>
+            <p className="text-[11px] text-muted-foreground">All 6 credited income streams</p>
           </div>
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium">

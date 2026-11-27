@@ -579,12 +579,11 @@ function DashboardPage() {
                   )}
                 </div>
                 <p className="text-[11px] text-muted-foreground mt-0.5">
-                  Total Ad Earnings (AdSense + AdMob):{" "}
+                  Total Ad Earnings (All 6 Streams):{" "}
                   <strong className="text-foreground">
                     ₹{adEarnings.totalAdEarnings.toFixed(2)}
                   </strong>{" "}
-                  (AdSense ₹{adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹
-                  {adEarnings.admobIncome.toFixed(2)})
+                  (Referral + Global + AdSense + AdMob + Affiliate + Ad Promotion)
                 </p>
               </div>
 

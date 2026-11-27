@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   calculateTotalAdEarnings,
+  calculateUploadOptionsTotalEarnings,
   getUserWallet,
   WITHDRAWAL_RULES,
   WITHDRAWAL_CHARGES,
@@ -11,7 +12,7 @@ import {
 } from "../lib/ledger-service.ts";
 import { handleApiRequest, resetInMemoryStore } from "./api-handler.ts";
 
-describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMob) Calculation & UI", () => {
+describe("FaceTube — Canonical 6-Source Total Ad Earnings Consistency & UI Verification", () => {
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
@@ -23,95 +24,260 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
     globalThis.fetch = originalFetch;
   });
 
-  it("1. Calculates Total Ad Earnings = AdSense Income + AdMob Income cleanly", () => {
-    const res = calculateTotalAdEarnings({
+  it("1. Sums all six settled income sources individually and combined in camelCase and snake_case", () => {
+    assert.strictEqual(
+      calculateUploadOptionsTotalEarnings,
+      calculateTotalAdEarnings,
+      "Must expose one canonical calculation helper",
+    );
+
+    // Test each of the 6 categories individually
+    assert.equal(
+      calculateTotalAdEarnings({ directReferralIncome: 111.11 }).totalAdEarnings,
+      111.11,
+    );
+    assert.equal(calculateTotalAdEarnings({ globalIncome: 222.22 }).totalAdEarnings, 222.22);
+    assert.equal(calculateTotalAdEarnings({ adsenseIncome: 333.33 }).totalAdEarnings, 333.33);
+    assert.equal(calculateTotalAdEarnings({ admobIncome: 444.44 }).totalAdEarnings, 444.44);
+    assert.equal(calculateTotalAdEarnings({ affiliateIncome: 555.55 }).totalAdEarnings, 555.55);
+    assert.equal(calculateTotalAdEarnings({ adsPromotionIncome: 666.66 }).totalAdEarnings, 666.66);
+
+    const camel = calculateTotalAdEarnings({
+      directReferralIncome: 125.5,
+      globalIncome: 310.25,
       adsenseIncome: 249.25,
       admobIncome: 1250.75,
+      affiliateIncome: 89.45,
+      adsPromotionIncome: 204.8,
+    });
+    assert.deepEqual(camel, {
+      referralIncome: 125.5,
+      globalIncome: 310.25,
+      adsenseIncome: 249.25,
+      admobIncome: 1250.75,
+      affiliateIncome: 89.45,
+      adPromotionIncome: 204.8,
+      totalAdEarnings: 2230,
     });
 
-    assert.equal(res.adsenseIncome, 249.25);
-    assert.equal(res.admobIncome, 1250.75);
-    assert.equal(res.totalAdEarnings, 1500);
-
-    // Also supports snake_case backend payloads
-    const snakeRes = calculateTotalAdEarnings({
+    const snake = calculateTotalAdEarnings({
+      direct_referral_income: "10.10",
+      global_income: "20.20",
       adsense_income: "100.10",
       admob_income: "200.20",
+      affiliate_income: "30.30",
+      ad_boost_income: "40.40",
     });
-    assert.equal(snakeRes.adsenseIncome, 100.1);
-    assert.equal(snakeRes.admobIncome, 200.2);
-    assert.equal(snakeRes.totalAdEarnings, 300.3);
+    assert.deepEqual(snake, {
+      referralIncome: 10.1,
+      globalIncome: 20.2,
+      adsenseIncome: 100.1,
+      admobIncome: 200.2,
+      affiliateIncome: 30.3,
+      adPromotionIncome: 40.4,
+      totalAdEarnings: 401.3,
+    });
   });
 
-  it("2. Excludes Referral, Global Pool, Affiliate, Sponsor income, balance, and totalEarned", () => {
+  it("2. Excludes balance, totalEarned, totalWithdrawn, pendingWithdrawals, and prevents legacy/alias double-counting", () => {
     const walletPayload = {
-      userId: "FT_USER_EXCLUSION",
+      userId: "FT_USER_OVERLAP",
       balance: 9800,
-      totalEarned: 15000, // Includes referral/global/affiliate + ads
+      totalEarned: 15000,
       totalWithdrawn: 5200,
-      referralIncome: 5000,
-      globalIncome: 3000,
-      affiliateIncome: 4500,
+      pendingWithdrawals: 400,
+      // Legacy combined referralIncome (1500) = direct (1000) + adBoost (500)
+      referralIncome: 1500,
+      referral_income: 1500,
+      directReferralIncome: 1000,
+      direct_referral_income: 1000,
+      globalIncome: 300,
       adsenseIncome: 600.5,
       admobIncome: 399.5,
+      affiliateIncome: 200,
+      adsPromotionIncome: 500,
+      adPromotionIncome: 500,
+      ad_promotion_income: 500,
+      adBoostIncome: 500,
+      ad_boost_income: 500,
       updatedAt: new Date().toISOString(),
     };
 
     const res = calculateTotalAdEarnings(walletPayload);
-    assert.equal(res.adsenseIncome, 600.5);
-    assert.equal(res.admobIncome, 399.5);
-    assert.equal(
-      res.totalAdEarnings,
-      1000,
-      "Total Ad Earnings must strictly equal AdSense + AdMob (₹1,000), NOT totalEarned (₹15,000)",
-    );
+    assert.deepEqual(res, {
+      referralIncome: 1000,
+      globalIncome: 300,
+      adsenseIncome: 600.5,
+      admobIncome: 399.5,
+      affiliateIncome: 200,
+      adPromotionIncome: 500,
+      totalAdEarnings: 3000,
+    });
     assert.notEqual(res.totalAdEarnings, walletPayload.totalEarned);
+    assert.notEqual(res.totalAdEarnings, walletPayload.balance);
   });
 
-  it("3. Handles null, undefined, empty string, and non-finite admobIncome safely as 0", () => {
-    assert.deepEqual(calculateTotalAdEarnings({ adsenseIncome: 420.5, admobIncome: null }), {
-      adsenseIncome: 420.5,
-      admobIncome: 0,
-      totalAdEarnings: 420.5,
-    });
-    assert.deepEqual(calculateTotalAdEarnings({ adsenseIncome: 420.5, admobIncome: undefined }), {
-      adsenseIncome: 420.5,
-      admobIncome: 0,
-      totalAdEarnings: 420.5,
-    });
-    assert.deepEqual(calculateTotalAdEarnings({ adsenseIncome: 420.5, admobIncome: "" }), {
-      adsenseIncome: 420.5,
-      admobIncome: 0,
-      totalAdEarnings: 420.5,
-    });
-    assert.deepEqual(calculateTotalAdEarnings({ adsenseIncome: 420.5, admobIncome: Number.NaN }), {
-      adsenseIncome: 420.5,
-      admobIncome: 0,
-      totalAdEarnings: 420.5,
-    });
-  });
+  it("3. Handles zero, null, undefined, empty string, NaN, and negative values safely as 0", () => {
+    assert.deepEqual(
+      calculateTotalAdEarnings({
+        directReferralIncome: 0,
+        globalIncome: 0,
+        adsenseIncome: 0,
+        admobIncome: 0,
+        affiliateIncome: 0,
+        adsPromotionIncome: 0,
+      }),
+      {
+        referralIncome: 0,
+        globalIncome: 0,
+        adsenseIncome: 0,
+        admobIncome: 0,
+        affiliateIncome: 0,
+        adPromotionIncome: 0,
+        totalAdEarnings: 0,
+      },
+    );
 
-  it("4. Handles null, undefined, empty string, and missing wallet for adsenseIncome safely as 0", () => {
-    assert.deepEqual(calculateTotalAdEarnings({ adsenseIncome: null, admobIncome: 750.25 }), {
-      adsenseIncome: 0,
-      admobIncome: 750.25,
-      totalAdEarnings: 750.25,
-    });
-    assert.deepEqual(calculateTotalAdEarnings({ adsenseIncome: undefined, admobIncome: 750.25 }), {
-      adsenseIncome: 0,
-      admobIncome: 750.25,
-      totalAdEarnings: 750.25,
-    });
+    assert.deepEqual(
+      calculateTotalAdEarnings({
+        referralIncome: null,
+        globalIncome: undefined,
+        adsenseIncome: "",
+        admobIncome: Number.NaN,
+        affiliateIncome: -75,
+        adBoostIncome: 145.75,
+      }),
+      {
+        referralIncome: 0,
+        globalIncome: 0,
+        adsenseIncome: 0,
+        admobIncome: 0,
+        affiliateIncome: 0,
+        adPromotionIncome: 145.75,
+        totalAdEarnings: 145.75,
+      },
+    );
+
     assert.deepEqual(calculateTotalAdEarnings(null), {
+      referralIncome: 0,
+      globalIncome: 0,
       adsenseIncome: 0,
       admobIncome: 0,
+      affiliateIncome: 0,
+      adPromotionIncome: 0,
       totalAdEarnings: 0,
     });
     assert.deepEqual(calculateTotalAdEarnings(undefined), {
+      referralIncome: 0,
+      globalIncome: 0,
       adsenseIncome: 0,
       admobIncome: 0,
+      affiliateIncome: 0,
+      adPromotionIncome: 0,
       totalAdEarnings: 0,
     });
+  });
+
+  it("4. Excludes pending/rejected/fee ledger records, deduplicates duplicate transaction IDs, and prevents wallet + ledger double-counting", () => {
+    const overlappingWallet = {
+      balance: 2500,
+      totalEarned: 3000,
+      directReferralIncome: 100,
+      globalIncome: 200,
+      adsenseIncome: 300,
+      admobIncome: 400,
+      affiliateIncome: 150,
+      adBoostIncome: 250,
+    };
+
+    const ledgerRows = [
+      // Duplicate settled AdMob transactions (same transaction_id in different cases) -> count ONCE (400)
+      {
+        transactionId: "TX_ADMOB_2026_06",
+        incomeType: "admob_income",
+        amount: 400,
+        status: "settled",
+      },
+      {
+        transaction_id: "tx_admob_2026_06",
+        income_type: "admob_income",
+        amount: 400,
+        status: "settled",
+      },
+      // Pending & failed AdMob records -> MUST be excluded
+      {
+        transactionId: "TX_ADMOB_PENDING_1",
+        incomeType: "admob_income",
+        amount: 999,
+        status: "pending",
+      },
+      {
+        transactionId: "TX_ADMOB_FAILED_1",
+        incomeType: "admob_income",
+        amount: 500,
+        status: "failed",
+      },
+      // Overlapping settled AdSense row (already in wallet.adsenseIncome=300) -> MUST NOT become 600
+      {
+        transactionId: "TX_ADSENSE_1",
+        incomeType: "adsense_income",
+        amount: 300,
+        status: "settled",
+      },
+      // Pending direct referral + valid settled direct referral
+      {
+        transactionId: "TX_REF_PENDING_pay9",
+        incomeType: "referral_income",
+        amount: 50,
+        status: "pending",
+      },
+      {
+        transactionId: "TX_REF_pay1",
+        incomeType: "referral_income",
+        amount: 100,
+        status: "settled",
+      },
+      // Legacy marketing_income with TX_ADS_L1 belongs ONLY to Ad Promotion (250), NOT Affiliate
+      {
+        transactionId: "TX_ADS_L1_pay2",
+        incomeType: "marketing_income",
+        specialTag: "ADS_REF_L1",
+        amount: 250,
+        status: "settled",
+      },
+      // Genuine affiliate
+      { transactionId: "TX_AFF_1", incomeType: "affiliate_income", amount: 150, status: "settled" },
+      // Settled global + pending global reserve
+      { transactionId: "TX_GLOBAL_1", incomeType: "global_income", amount: 200, status: "settled" },
+      {
+        transactionId: "TX_GLOBAL_PENDING",
+        incomeType: "global_income",
+        amount: 800,
+        status: "pending",
+      },
+      // Withdrawals & sponsor fees must be ignored
+      { transactionId: "TX_WD_1", incomeType: "withdrawal", amount: 500, status: "settled" },
+      {
+        transactionId: "TX_FEE_1",
+        incomeType: "ads_promotion_fee",
+        amount: 499,
+        status: "settled",
+      },
+    ];
+
+    const reconciled = calculateTotalAdEarnings(overlappingWallet, ledgerRows);
+    assert.deepEqual(reconciled, {
+      referralIncome: 100,
+      globalIncome: 200,
+      adsenseIncome: 300,
+      admobIncome: 400,
+      affiliateIncome: 150,
+      adPromotionIncome: 250,
+      totalAdEarnings: 1400,
+    });
+    // Ensure individual AdSense & AdMob remain strictly isolated to their own channels
+    assert.equal(reconciled.adsenseIncome, 300);
+    assert.equal(reconciled.admobIncome, 400);
   });
 
   it("5. Uses actual authenticated user's wallet data from backend and avoids unauthenticated fallback fetches", async () => {
@@ -124,11 +290,9 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
     const emptyWallet = await getUserWallet("");
     assert.equal(fetchCalled, false, "Empty userId must not invoke wallet API");
     assert.equal(emptyWallet.userId, "");
-    assert.equal(emptyWallet.adsenseIncome, 0);
-    assert.equal(emptyWallet.admobIncome, 0);
     assert.equal(calculateTotalAdEarnings(emptyWallet).totalAdEarnings, 0);
 
-    // Log in as an existing creator via handleApiRequest and verify getUserWallet reads live AdSense + AdMob
+    // Log in as an existing creator via handleApiRequest and verify getUserWallet reads live wallet
     const loginReq = new Request("http://localhost:3000/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -143,7 +307,6 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
     const uid = loginBody.user.user_id;
     assert.ok(uid);
 
-    // Fetch live wallet through Node API handler bridged via globalThis.fetch
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       const normalizedUrl = url.replace("http://127.0.0.1:3000", "http://localhost:3000");
@@ -165,20 +328,30 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
     const backendBreakdown = calculateTotalAdEarnings(backendWallet);
     assert.equal(
       backendBreakdown.totalAdEarnings,
-      Math.round((backendBreakdown.adsenseIncome + backendBreakdown.admobIncome) * 100) / 100,
+      Math.round(
+        (backendBreakdown.referralIncome +
+          backendBreakdown.globalIncome +
+          backendBreakdown.adsenseIncome +
+          backendBreakdown.admobIncome +
+          backendBreakdown.affiliateIncome +
+          backendBreakdown.adPromotionIncome) *
+          100,
+      ) / 100,
     );
 
-    // Verify server wallet response with distinct AdSense, AdMob, Referral, and total_earned
+    // Verify server wallet response with all 6 distinct settled streams
     const serverPayloadWallet = {
       user_id: uid,
-      balance: 2100.5,
-      total_earned: 2600.5,
+      balance: 3100.5,
+      total_earned: 3600.5,
       total_withdrawn: 500,
-      referral_income: 700,
+      direct_referral_income: 500,
+      referral_income: 700, // legacy overlapping field must NOT double-count ad_boost_income=200
+      ad_boost_income: 200,
       global_income: 400,
       adsense_income: 550.25,
       admob_income: 950.25,
-      affiliate_income: 0,
+      affiliate_income: 100,
     };
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ success: true, wallet: serverPayloadWallet }), {
@@ -190,16 +363,23 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
     assert.equal(liveWallet.userId, uid);
     assert.equal(liveWallet.adsenseIncome, 550.25);
     assert.equal(liveWallet.admobIncome, 950.25);
-    assert.equal(liveWallet.referralIncome, 700);
-    assert.equal(liveWallet.totalEarned, 2600.5);
+    assert.equal(liveWallet.directReferralIncome, 500);
+    assert.equal(liveWallet.adsPromotionIncome, 200);
+    assert.equal(liveWallet.totalEarned, 3600.5);
 
     const breakdown = calculateTotalAdEarnings(liveWallet);
-    assert.equal(breakdown.adsenseIncome, 550.25);
-    assert.equal(breakdown.admobIncome, 950.25);
-    assert.equal(breakdown.totalAdEarnings, 1500.5);
+    assert.deepEqual(breakdown, {
+      referralIncome: 500,
+      globalIncome: 400,
+      adsenseIncome: 550.25,
+      admobIncome: 950.25,
+      affiliateIncome: 100,
+      adPromotionIncome: 200,
+      totalAdEarnings: 2700.5,
+    });
   });
 
-  it("6. Verifies Dashboard, Upload Modal/Studio, Income, Wallet, AdSense & AdMob UI use Total Ad Earnings cleanly without hardcoded placeholders", () => {
+  it("6. Verifies Dashboard, Income, Wallet, AdSense, AdMob, and Upload Options UI all reuse canonical calculateTotalAdEarnings cleanly", () => {
     const readSrc = (relPath: string) =>
       fs.readFileSync(path.resolve(process.cwd(), relPath), "utf-8");
 
@@ -212,29 +392,21 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
     const adsenseRoute = readSrc("src/routes/adsense-income.tsx");
     const admobRoute = readSrc("src/routes/admob-income.tsx");
 
-    // DashboardSummaryCards: has total-ad-earnings, adsense-income, admob-income; no static placeholders
+    // DashboardSummaryCards: has total-ad-earnings, adsense-income, admob-income; reflects 6 streams; no static placeholders
     assert.ok(summaryCards.includes('id: "adsense-income"'));
     assert.ok(summaryCards.includes('id: "admob-income"'));
     assert.ok(summaryCards.includes('id: "total-ad-earnings"'));
     assert.ok(summaryCards.includes('title: "Total Ad Earnings"'));
+    assert.ok(summaryCards.includes("All 6 credited income streams"));
+    assert.ok(!summaryCards.includes("AdSense + AdMob combined"));
     assert.ok(!summaryCards.includes("₹840 ad revenue"), "Must remove ₹840 ad revenue placeholder");
     assert.ok(!summaryCards.includes("₹3,150.00"), "Must remove static ₹3,150.00 placeholder");
     assert.ok(!summaryCards.includes("Last paid Sep 18"), "Must remove static Last paid Sep 18");
 
-    // UploadOptionsModal & upload.tsx: use calculateUploadOptionsTotalEarnings (all 6 credited sources), not AdSense-only "Total Ads Earning"
-    assert.ok(uploadModal.includes("calculateUploadOptionsTotalEarnings"));
-    assert.ok(uploadModal.includes("resolveAuthenticatedUserId"));
-    assert.ok(uploadModal.includes("Total Ad Earnings"));
-    assert.ok(!uploadModal.includes("Total Ads Earning"));
-    assert.ok(!uploadModal.includes("wallet?.adsenseIncome ?? 0"));
-
-    assert.ok(uploadRoute.includes("calculateUploadOptionsTotalEarnings"));
-    assert.ok(uploadRoute.includes("Total Ad Earnings"));
-    assert.ok(!uploadRoute.includes("Total Ads Earning"));
-    assert.ok(!uploadRoute.includes("wallet?.adsenseIncome ?? 0"));
-
-    // Dashboard, Income, Wallet, AdSense, AdMob: no hardcoded FT483921 fallback; all compute calculateTotalAdEarnings
+    // Every Total Ad Earnings UI location uses canonical calculateTotalAdEarnings and has no stale AdSense+AdMob-only copy
     for (const [name, content] of [
+      ["UploadOptionsModal.tsx", uploadModal],
+      ["upload.tsx", uploadRoute],
       ["dashboard.tsx", dashboardRoute],
       ["income.tsx", incomeRoute],
       ["wallet-balance.tsx", walletRoute],
@@ -251,21 +423,34 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
       );
       assert.ok(
         content.includes("calculateTotalAdEarnings"),
-        `${name} must use calculateTotalAdEarnings(wallet)`,
+        `${name} must reuse canonical calculateTotalAdEarnings`,
       );
       assert.ok(
         content.includes("Total Ad Earnings"),
         `${name} must render combined Total Ad Earnings`,
       );
+      assert.ok(
+        !content.includes("AdSense + AdMob combined"),
+        `${name} must not label Total Ad Earnings as AdSense + AdMob combined`,
+      );
+      assert.ok(
+        !content.includes("Total Ad Earnings (AdSense + AdMob)"),
+        `${name} must not label Total Ad Earnings as AdSense + AdMob only`,
+      );
+      assert.ok(
+        !content.includes("Total Ads Earning"),
+        `${name} must use exact Total Ad Earnings label`,
+      );
     }
 
-    // Dashboard maps admob stream & overrides
+    // Dashboard maps individual AdSense, AdMob, Referral, Global, Affiliate, and Total Ad Earnings
     assert.ok(dashboardRoute.includes('"adsense-income"'));
     assert.ok(dashboardRoute.includes('"admob-income"'));
     assert.ok(dashboardRoute.includes('"total-ad-earnings"'));
     assert.ok(dashboardRoute.includes("h.admob ?? h.admob_income"));
 
-    // Income page has zero hardcoded sample rupee values
+    // Income page has zero hardcoded sample rupee values and updates badge/description
+    assert.ok(incomeRoute.includes("All 6 Streams"));
     for (const sampleVal of ["₹2,450.00", "₹1,890.20", "₹940.80", "₹4,280.50", "₹3,150.00"]) {
       assert.ok(
         !incomeRoute.includes(sampleVal),
@@ -273,10 +458,18 @@ describe("FaceTube Requirement #9 — Step 9B: Total Ad Earnings (AdSense + AdMo
       );
     }
 
-    // Wallet Balance renders AdSense, AdMob, and Total Ad Earnings separately
+    // Wallet Balance passes non-stale ledger safely and keeps individual AdSense/AdMob separate
     assert.ok(walletRoute.includes("AdSense Income"));
     assert.ok(walletRoute.includes("AdMob Income"));
-    assert.ok(walletRoute.includes("Total Ad Earnings"));
+    assert.ok(walletRoute.includes("All 6 credited income streams"));
+
+    // AdSense & AdMob pages preserve individual channel revenue while showing unified 6-stream Total Ad Earnings
+    assert.ok(adsenseRoute.includes("const adsenseRevenue = adEarnings.adsenseIncome"));
+    assert.ok(adsenseRoute.includes("adsenseRevenue.toFixed(2)"));
+    assert.ok(adsenseRoute.includes("All 6 credited income streams"));
+    assert.ok(admobRoute.includes("const admobRevenue = adEarnings.admobIncome"));
+    assert.ok(admobRoute.includes("admobRevenue.toFixed(2)"));
+    assert.ok(admobRoute.includes("All 6 credited income streams"));
   });
 
   it("7. Preserves withdrawal rules and deduction rates unchanged", () => {

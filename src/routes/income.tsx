@@ -72,9 +72,9 @@ const incomeStreams = [
   },
   {
     title: "Total Ad Earnings",
-    desc: "Combined advertising income from AdSense Income + AdMob Income",
+    desc: "Combined settled earnings across Referral, Global, AdSense, AdMob, Affiliate, and Ad Promotion",
     balance: "₹0.00",
-    badge: "AdSense + AdMob",
+    badge: "All 6 Streams",
     icon: TrendingUp,
     color: "text-emerald-400 bg-emerald-500/10",
     link: "/adsense-income",
@@ -142,7 +142,7 @@ function IncomePage() {
     if (s.title === "Total Ad Earnings") {
       return {
         ...s,
-        desc: `AdSense ₹${adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹${adEarnings.admobIncome.toFixed(2)}`,
+        desc: "All 6 credited streams (Referral + Global + AdSense + AdMob + Affiliate + Ad Promotion)",
         balance: `₹${adEarnings.totalAdEarnings.toFixed(2)}`,
       };
     }

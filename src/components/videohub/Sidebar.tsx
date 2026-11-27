@@ -970,7 +970,23 @@ export function Sidebar({
             <Sparkles className="h-3.5 w-3.5 text-brand" />
             Replay Splash Screen
           </button>
-          <p>About · Terms · Privacy</p>
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <Link to="/about" className="hover:text-brand transition-colors">
+              About
+            </Link>
+            <span>·</span>
+            <Link to="/terms" className="hover:text-brand transition-colors">
+              Terms
+            </Link>
+            <span>·</span>
+            <Link to="/privacy" className="hover:text-brand transition-colors">
+              Privacy
+            </Link>
+            <span>·</span>
+            <Link to="/contact" className="hover:text-brand transition-colors">
+              Contact
+            </Link>
+          </div>
           <p className="mt-2">© 2026 FaceTube</p>
         </div>
       </aside>
@@ -1016,6 +1032,31 @@ export function Sidebar({
                 <Sparkles className="h-4 w-4 text-brand" />
                 Replay Splash Screen
               </button>
+              <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                <Link to="/about" onClick={onClose} className="hover:text-brand transition-colors">
+                  About
+                </Link>
+                <span>·</span>
+                <Link to="/terms" onClick={onClose} className="hover:text-brand transition-colors">
+                  Terms
+                </Link>
+                <span>·</span>
+                <Link
+                  to="/privacy"
+                  onClick={onClose}
+                  className="hover:text-brand transition-colors"
+                >
+                  Privacy
+                </Link>
+                <span>·</span>
+                <Link
+                  to="/contact"
+                  onClick={onClose}
+                  className="hover:text-brand transition-colors"
+                >
+                  Contact
+                </Link>
+              </div>
             </div>
           </div>
         </div>

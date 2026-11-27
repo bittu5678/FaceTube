@@ -67,15 +67,31 @@ function AdMobIncomePage() {
             setWallet(wRes.wallet);
           }
           if (txRes && txRes.success && Array.isArray(txRes.transactions)) {
-            const filtered = txRes.transactions.filter(
-              (t: any) =>
-                t.income_type === "admob_income" ||
-                t.incomeType === "admob_income" ||
-                t.purpose === "admob_income" ||
-                String(t.description || "")
-                  .toLowerCase()
-                  .includes("admob"),
-            );
+            const seenTxIds = new Set<string>();
+            const filtered = txRes.transactions.filter((t: any) => {
+              const status = String(t.status ?? "settled")
+                .trim()
+                .toLowerCase();
+              if (status !== "" && status !== "settled") return false;
+              const tType = String(t.income_type || t.incomeType || t.purpose || t.type || "")
+                .trim()
+                .toLowerCase();
+              const isAdmobType =
+                tType === "admob_income" ||
+                (tType === "" &&
+                  String(t.description || "")
+                    .toLowerCase()
+                    .includes("admob"));
+              if (!isAdmobType) return false;
+              const dedupKey = String(t.transaction_id || t.transactionId || t.id || "")
+                .trim()
+                .toUpperCase();
+              if (dedupKey) {
+                if (seenTxIds.has(dedupKey)) return false;
+                seenTxIds.add(dedupKey);
+              }
+              return true;
+            });
             setAdmobTransactions(filtered);
           }
         }
@@ -191,7 +207,7 @@ function AdMobIncomePage() {
             </p>
           </div>
 
-          {/* Card 2: Combined Total Ad Earnings (AdSense + AdMob) */}
+          {/* Card 2: Combined Total Ad Earnings (All 6 Credited Income Streams) */}
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-5 shadow-card">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold uppercase tracking-wider text-emerald-400">
@@ -204,10 +220,7 @@ function AdMobIncomePage() {
             <div className="text-2xl font-black text-emerald-400 font-mono">
               {isLoading ? "..." : `₹${adEarnings.totalAdEarnings.toFixed(2)}`}
             </div>
-            <p className="text-[11px] text-muted-foreground mt-1">
-              AdSense ₹{adEarnings.adsenseIncome.toFixed(2)} + AdMob ₹
-              {adEarnings.admobIncome.toFixed(2)}
-            </p>
+            <p className="text-[11px] text-muted-foreground mt-1">All 6 credited income streams</p>
           </div>
 
           {/* Card 3: Current Month Earnings */}

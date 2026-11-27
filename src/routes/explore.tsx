@@ -16,6 +16,7 @@ import {
   Tag,
 } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
+import { Footer } from "@/components/videohub/Footer";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { VideoCard } from "@/components/videohub/VideoCard";
 import { AdMobBanner } from "@/components/admob/AdMobBanner";
@@ -298,6 +299,7 @@ function ExplorePage() {
         </section>
 
         <AdMobBanner margin={64} />
+        <Footer />
       </div>
     </VideoHubLayout>
   );

@@ -101,11 +101,7 @@ import {
   shouldClearPendingPremiumPaymentOnFailure,
   type PendingPremiumPaymentProof,
 } from "@/lib/razorpay-service";
-import {
-  calculateUploadOptionsTotalEarnings,
-  getUserWallet,
-  type UserWallet,
-} from "@/lib/ledger-service";
+import { calculateTotalAdEarnings, getUserWallet, type UserWallet } from "@/lib/ledger-service";
 
 export type MainUploadMode = "free" | "premium" | "ad_promotion" | "image" | "bulk" | null;
 export type VideoFormatChoice = "short" | "long";
@@ -353,7 +349,7 @@ function FourOptionsSelectionView({
   wallet?: UserWallet | null;
   userId?: string;
 }) {
-  const adEarnings = calculateUploadOptionsTotalEarnings(wallet);
+  const adEarnings = calculateTotalAdEarnings(wallet);
 
   return (
     <div className="space-y-8">
@@ -2260,10 +2256,17 @@ function FreeVideoUploadView({
               controls
               playsInline
               preload="metadata"
+              onLoadedMetadata={(e) => {
+                const vw = e.currentTarget.videoWidth;
+                const vh = e.currentTarget.videoHeight;
+                if (vw > 0 && vh > 0) {
+                  e.currentTarget.style.aspectRatio = `${vw} / ${vh}`;
+                }
+              }}
               className={
                 publishedVideo.contentType === "short"
-                  ? "mx-auto aspect-[9/16] max-h-96 rounded-xl bg-black object-contain"
-                  : "aspect-video w-full rounded-xl bg-black object-contain"
+                  ? "mx-auto max-h-96 max-w-full rounded-xl bg-black object-contain"
+                  : "mx-auto max-h-80 w-full rounded-xl bg-black object-contain"
               }
               src={publishedVideo.videoUrl}
             />

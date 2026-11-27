@@ -104,7 +104,10 @@ function WalletBalancePage() {
   }, [loadWalletData]);
 
   const balance = wallet ? wallet.balance : 0;
-  const adEarnings = calculateTotalAdEarnings(wallet);
+  const adEarnings = calculateTotalAdEarnings(
+    wallet,
+    ledger.some((t) => !t.isStale) ? ledger : undefined,
+  );
   const remainingDailyLimit = Math.max(0, WITHDRAWAL_RULES.MAX_DAILY_LIMIT - alreadyWithdrawnToday);
   const currentNumAmount = Number(withdrawAmount) || 0;
 
@@ -415,7 +418,7 @@ function WalletBalancePage() {
             <p className="text-[11px] text-muted-foreground">Android app ad revenue</p>
           </div>
 
-          {/* 4. Total Ad Earnings (AdSense + AdMob) */}
+          {/* 4. Total Ad Earnings (All 6 Credited Income Streams) */}
           <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-1 shadow-card">
             <span className="text-xs text-emerald-400 font-semibold flex items-center gap-1">
               <BarChart3 className="h-3 w-3 text-emerald-400" />
@@ -424,7 +427,7 @@ function WalletBalancePage() {
             <p className="text-xl font-black text-emerald-400">
               ₹{adEarnings.totalAdEarnings.toFixed(2)}
             </p>
-            <p className="text-[11px] text-muted-foreground">AdSense + AdMob combined</p>
+            <p className="text-[11px] text-muted-foreground">All 6 credited income streams</p>
           </div>
 
           {/* 5. Global Income */}
@@ -511,10 +514,28 @@ function WalletBalancePage() {
                       {new Date(tx.createdAt).toLocaleDateString()}
                     </td>
                     <td className="px-4 py-3 text-right whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-bold text-emerald-400">
-                        <CheckCircle2 className="h-3 w-3" />
-                        Settled
-                      </span>
+                      {(() => {
+                        const statusVal = String(tx.status || "settled")
+                          .trim()
+                          .toLowerCase();
+                        const badgeClass =
+                          statusVal === "failed" || statusVal === "rejected"
+                            ? "border-red-500/30 bg-red-500/10 text-red-400"
+                            : statusVal === "pending" || statusVal === "processing"
+                              ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+                              : "border-emerald-500/30 bg-emerald-500/10 text-emerald-400";
+                        const label = statusVal
+                          ? statusVal.charAt(0).toUpperCase() + statusVal.slice(1)
+                          : "Settled";
+                        return (
+                          <span
+                            className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[10px] font-bold ${badgeClass}`}
+                          >
+                            <CheckCircle2 className="h-3 w-3" />
+                            {label}
+                          </span>
+                        );
+                      })()}
                     </td>
                   </tr>
                 ))}
