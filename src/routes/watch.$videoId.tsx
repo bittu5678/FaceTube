@@ -1,7 +1,6 @@
 import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
 import {
-  ArrowLeft,
   Play,
   ThumbsUp,
   ThumbsDown,
@@ -396,26 +395,10 @@ function WatchPage() {
               title={video.title}
               duration={video.duration}
               contentType={(video as any).contentType || (video as any).content_type}
+              category={video.category || "General"}
               autoPlay={true}
               onBack={handleBack}
             />
-          </div>
-
-          {/* Back Navigation & Category Bar below player */}
-          <div className="mt-3 flex items-center justify-between gap-3">
-            <button
-              type="button"
-              onClick={handleBack}
-              className="group inline-flex items-center gap-2 rounded-full border border-border/80 bg-secondary/70 hover:bg-secondary px-3.5 py-1.5 text-xs font-semibold text-foreground transition-all active:scale-95 shadow-xs cursor-pointer"
-              aria-label="Back to previous page"
-              title="Back to previous page"
-            >
-              <ArrowLeft className="h-4 w-4 transition-transform group-hover:-translate-x-0.5" />
-              <span>Back</span>
-            </button>
-            {video.category && (
-              <span className="text-xs font-medium text-muted-foreground">{video.category}</span>
-            )}
           </div>
 
           <h1 className="mt-2.5 text-xl font-extrabold leading-snug tracking-tight sm:text-2xl">

@@ -35,6 +35,7 @@ interface FaceTubeVideoPlayerProps {
   title?: string | undefined;
   duration?: string | undefined;
   contentType?: "short" | "long" | string | undefined;
+  category?: string | undefined;
   autoPlay?: boolean | undefined;
   onEnded?: (() => void) | undefined;
   onBack?: (() => void) | undefined;
@@ -66,6 +67,7 @@ export function FaceTubeVideoPlayer({
   title = "Video",
   duration: initialDurationStr,
   contentType,
+  category,
   autoPlay = true,
   onEnded,
   onBack,
@@ -176,9 +178,15 @@ export function FaceTubeVideoPlayer({
     setRotation(0);
     setZoom(1);
     setPan({ x: 0, y: 0 });
+    setPlaybackSpeed(1);
+    setShowToolsMenu(false);
+    setSwipePreview(null);
     setIsDragging(false);
 
     const videoEl = videoRef.current;
+    if (videoEl) {
+      videoEl.playbackRate = 1;
+    }
     if (videoEl && cleanSrc && videoEl.videoWidth > 0 && videoEl.videoHeight > 0) {
       setVideoSize({ width: videoEl.videoWidth, height: videoEl.videoHeight });
       setIsLoading(false);
@@ -858,94 +866,237 @@ export function FaceTubeVideoPlayer({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [togglePlay, toggleMute, toggleFullscreen, duration]);
 
+  const renderBackCategoryToolbarRow = (includePlayerControls: boolean) => {
+    if (!onBack && !category && !includePlayerControls) return null;
+    return (
+      <div className="mt-3 flex items-center justify-between gap-2 sm:gap-3 px-4 sm:px-0">
+        {onBack ? (
+          <button
+            type="button"
+            onClick={onBack}
+            className="group inline-flex shrink-0 items-center gap-1.5 sm:gap-2 rounded-full border border-border/80 bg-secondary/70 hover:bg-secondary px-2.5 sm:px-3.5 py-1.5 text-xs font-semibold text-foreground transition-all active:scale-95 shadow-xs cursor-pointer"
+            aria-label="Back to previous page"
+            title="Back to previous page"
+          >
+            <ArrowLeft className="h-3.5 w-3.5 sm:h-4 sm:w-4 transition-transform group-hover:-translate-x-0.5" />
+            <span>Back</span>
+          </button>
+        ) : (
+          <span className="shrink-0" aria-hidden="true" />
+        )}
+
+        {includePlayerControls && (
+          <div className="min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div
+              className="mx-auto flex w-max items-center gap-1 sm:gap-1.5"
+              role="toolbar"
+              aria-label="Video zoom, rotation, and playback speed controls"
+            >
+              {/* Zoom Controls */}
+              <div
+                className="flex shrink-0 items-center rounded-lg border border-border/80 bg-secondary/70 p-0.5 shadow-xs"
+                role="group"
+                aria-label="Video zoom controls"
+              >
+                <button
+                  type="button"
+                  onClick={handleZoomOut}
+                  disabled={zoom <= MIN_ZOOM}
+                  title="Zoom out"
+                  aria-label="Zoom out"
+                  className="grid h-7 w-7 place-items-center rounded text-foreground hover:bg-muted disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+                >
+                  <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetZoom}
+                  disabled={zoom <= MIN_ZOOM}
+                  title={zoom > MIN_ZOOM ? "Reset zoom to 100%" : "Zoom: 100%"}
+                  aria-label="Reset zoom"
+                  className={`px-1.5 h-7 text-[11px] font-mono font-bold rounded transition ${
+                    zoom > MIN_ZOOM
+                      ? "bg-brand text-brand-foreground hover:bg-brand-dark cursor-pointer"
+                      : "text-foreground/85 disabled:opacity-75 cursor-default"
+                  }`}
+                >
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button
+                  type="button"
+                  onClick={handleZoomIn}
+                  disabled={zoom >= MAX_ZOOM}
+                  title="Zoom in"
+                  aria-label="Zoom in"
+                  className="grid h-7 w-7 place-items-center rounded text-foreground hover:bg-muted disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+                >
+                  <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {/* Rotation Controls */}
+              <div
+                className="flex shrink-0 items-center rounded-lg border border-border/80 bg-secondary/70 p-0.5 shadow-xs"
+                role="group"
+                aria-label="Video rotation controls"
+              >
+                <button
+                  type="button"
+                  onClick={handleRotateLeft}
+                  title="Rotate left 90°"
+                  aria-label="Rotate left 90 degrees"
+                  className="grid h-7 w-7 place-items-center rounded text-foreground hover:bg-muted transition cursor-pointer"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetRotation}
+                  disabled={!isRotated}
+                  title={isRotated ? "Reset rotation to 0°" : "Rotation: 0°"}
+                  aria-label="Reset rotation"
+                  className={`px-1.5 h-7 text-[11px] font-mono font-bold rounded transition ${
+                    isRotated
+                      ? "bg-brand text-brand-foreground hover:bg-brand-dark cursor-pointer"
+                      : "text-foreground/85 disabled:opacity-75 cursor-default"
+                  }`}
+                >
+                  {normalizedRotation}°
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRotateRight}
+                  title="Rotate right 90°"
+                  aria-label="Rotate right 90 degrees"
+                  className="grid h-7 w-7 place-items-center rounded text-foreground hover:bg-muted transition cursor-pointer"
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {/* Playback Speed cycle */}
+              <button
+                type="button"
+                onClick={cyclePlaybackSpeed}
+                title="Playback speed"
+                aria-label={`Playback speed: ${playbackSpeed}x`}
+                className={`shrink-0 rounded-lg border px-2 h-8 text-[11px] sm:text-xs font-mono font-bold transition shadow-xs cursor-pointer ${
+                  playbackSpeed !== 1
+                    ? "border-brand bg-brand text-brand-foreground hover:bg-brand-dark"
+                    : "border-border/80 bg-secondary/70 text-foreground hover:bg-muted"
+                }`}
+              >
+                {playbackSpeed}x
+              </button>
+            </div>
+          </div>
+        )}
+
+        {category ? (
+          <span className="shrink-0 max-w-[92px] sm:max-w-[160px] truncate text-[11px] sm:text-xs font-medium text-muted-foreground text-right">
+            {category}
+          </span>
+        ) : (
+          <span className="shrink-0" aria-hidden="true" />
+        )}
+      </div>
+    );
+  };
+
   // Case 1: Empty / Missing video URL
   if (!cleanSrc) {
     return (
-      <div
-        className={`relative ${getPlayerContainerClass(aspectMode, false)} overflow-hidden bg-black border border-border shadow-lift flex flex-col items-center justify-center p-6 text-center select-none`}
-      >
-        {cleanPoster && (
-          <img
-            src={cleanPoster}
-            alt={title}
-            className="absolute inset-0 h-full w-full object-cover opacity-20 filter blur-xs"
-          />
-        )}
-        <div className="relative z-10 max-w-md space-y-4">
-          <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-brand/15 text-brand shadow-inner">
-            <Film className="h-7 w-7" />
-          </div>
-          <div>
-            <h3 className="text-lg font-bold text-white">Video Source Inactive</h3>
-            <p className="mt-1 text-xs text-zinc-400 leading-relaxed">
-              No video file or stream URL has been attached to this catalog record. You can watch
-              other videos or upload your own in Creator Studio.
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-            <Link
-              to="/"
-              className="rounded-full bg-brand px-5 py-2 text-xs font-bold text-white transition hover:bg-brand-dark shadow-sm"
-            >
-              Browse Available Videos
-            </Link>
-            <Link
-              to="/upload"
-              className="rounded-full border border-zinc-700 bg-zinc-800/80 px-4 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-700"
-            >
-              Upload Video
-            </Link>
+      <>
+        <div
+          className={`relative ${getPlayerContainerClass(aspectMode, false)} overflow-hidden bg-black border border-border shadow-lift flex flex-col items-center justify-center p-6 text-center select-none`}
+        >
+          {cleanPoster && (
+            <img
+              src={cleanPoster}
+              alt={title}
+              className="absolute inset-0 h-full w-full object-cover opacity-20 filter blur-xs"
+            />
+          )}
+          <div className="relative z-10 max-w-md space-y-4">
+            <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-brand/15 text-brand shadow-inner">
+              <Film className="h-7 w-7" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-white">Video Source Inactive</h3>
+              <p className="mt-1 text-xs text-zinc-400 leading-relaxed">
+                No video file or stream URL has been attached to this catalog record. You can watch
+                other videos or upload your own in Creator Studio.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+              <Link
+                to="/"
+                className="rounded-full bg-brand px-5 py-2 text-xs font-bold text-white transition hover:bg-brand-dark shadow-sm"
+              >
+                Browse Available Videos
+              </Link>
+              <Link
+                to="/upload"
+                className="rounded-full border border-zinc-700 bg-zinc-800/80 px-4 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-700"
+              >
+                Upload Video
+              </Link>
+            </div>
           </div>
         </div>
-      </div>
+        {renderBackCategoryToolbarRow(false)}
+      </>
     );
   }
 
   // Case 2: Playback Error Card
   if (hasError) {
     return (
-      <div
-        className={`relative ${getPlayerContainerClass(aspectMode, false)} overflow-hidden bg-zinc-950 border border-red-500/30 shadow-lift flex flex-col items-center justify-center p-6 text-center select-none`}
-      >
-        {cleanPoster && (
-          <img
-            src={cleanPoster}
-            alt={title}
-            className="absolute inset-0 h-full w-full object-cover opacity-15 filter blur-sm"
-          />
-        )}
-        <div className="relative z-10 max-w-lg space-y-4">
-          <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-red-500/15 text-red-400 border border-red-500/20">
-            <AlertTriangle className="h-7 w-7" />
-          </div>
-          <div>
-            <h3 className="text-lg font-bold text-white">Playback Error</h3>
-            <p className="mt-1 text-xs text-zinc-300 leading-relaxed">
-              {errorMessage ||
-                "The media file could not be played. The source URL may be offline or in an unsupported format."}
-            </p>
-            <p className="mt-2 text-[11px] font-mono text-zinc-400 truncate max-w-md mx-auto bg-black/60 px-3 py-1 rounded-md border border-zinc-800">
-              Source: {cleanSrc}
-            </p>
-          </div>
-          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-            <button
-              type="button"
-              onClick={retryPlayback}
-              className="inline-flex items-center gap-2 rounded-full bg-brand px-5 py-2 text-xs font-bold text-white transition hover:bg-brand-dark shadow-sm cursor-pointer"
-            >
-              <RotateCcw className="h-4 w-4" />
-              Retry Playback
-            </button>
-            <Link
-              to="/"
-              className="rounded-full border border-zinc-700 bg-zinc-800/80 px-4 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-700"
-            >
-              Browse Other Videos
-            </Link>
+      <>
+        <div
+          className={`relative ${getPlayerContainerClass(aspectMode, false)} overflow-hidden bg-zinc-950 border border-red-500/30 shadow-lift flex flex-col items-center justify-center p-6 text-center select-none`}
+        >
+          {cleanPoster && (
+            <img
+              src={cleanPoster}
+              alt={title}
+              className="absolute inset-0 h-full w-full object-cover opacity-15 filter blur-sm"
+            />
+          )}
+          <div className="relative z-10 max-w-lg space-y-4">
+            <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-red-500/15 text-red-400 border border-red-500/20">
+              <AlertTriangle className="h-7 w-7" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-white">Playback Error</h3>
+              <p className="mt-1 text-xs text-zinc-300 leading-relaxed">
+                {errorMessage ||
+                  "The media file could not be played. The source URL may be offline or in an unsupported format."}
+              </p>
+              <p className="mt-2 text-[11px] font-mono text-zinc-400 truncate max-w-md mx-auto bg-black/60 px-3 py-1 rounded-md border border-zinc-800">
+                Source: {cleanSrc}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={retryPlayback}
+                className="inline-flex items-center gap-2 rounded-full bg-brand px-5 py-2 text-xs font-bold text-white transition hover:bg-brand-dark shadow-sm cursor-pointer"
+              >
+                <RotateCcw className="h-4 w-4" />
+                Retry Playback
+              </button>
+              <Link
+                to="/"
+                className="rounded-full border border-zinc-700 bg-zinc-800/80 px-4 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-zinc-700"
+              >
+                Browse Other Videos
+              </Link>
+            </div>
           </div>
         </div>
-      </div>
+        {renderBackCategoryToolbarRow(false)}
+      </>
     );
   }
 
@@ -993,618 +1144,534 @@ export function FaceTubeVideoPlayer({
   );
 
   return (
-    <div
-      ref={containerRef}
-      onMouseMove={handleMouseMove}
-      onMouseLeave={() => isPlaying && !showToolsMenu && setShowControls(false)}
-      style={intrinsicContainerStyle ?? undefined}
-      className={`group relative ${
-        intrinsicContainerStyle ? "mx-auto rounded-none sm:rounded-2xl" : containerAspectClass
-      } overflow-hidden bg-black shadow-lift select-none`}
-    >
-      {/* Centered Video Stage: stretches cleanly to container bounds (avoids height:auto % collapse) */}
+    <>
       <div
-        onPointerDown={handleStagePointerDown}
-        onPointerMove={handleStagePointerMove}
-        onPointerUp={endPointerDrag}
-        onPointerCancel={endPointerDrag}
-        onTouchStart={handleStageTouchStart}
-        onTouchMove={handleStageTouchMove}
-        onTouchEnd={handleStageTouchEnd}
-        onClick={handleStageClick}
-        className={`absolute inset-0 flex items-center justify-center overflow-hidden ${
-          canPan ? (isDragging ? "cursor-grabbing" : "cursor-grab") : "cursor-pointer"
-        }`}
-        style={{ touchAction: zoom > 1 ? "none" : "pan-y" }}
+        ref={containerRef}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={() => isPlaying && !showToolsMenu && setShowControls(false)}
+        style={intrinsicContainerStyle ?? undefined}
+        className={`group relative ${
+          intrinsicContainerStyle ? "mx-auto rounded-none sm:rounded-2xl" : containerAspectClass
+        } overflow-hidden bg-black shadow-lift select-none`}
       >
-        {/* Real HTML5 Video element */}
-        <video
-          ref={videoRef}
-          playsInline
-          poster={cleanPoster}
-          preload="metadata"
-          onLoadStart={() => {
-            setIsLoading(true);
-            setHasError(false);
-          }}
-          onLoadedMetadata={(e) => {
-            const d = e.currentTarget.duration;
-            if (!isNaN(d) && d > 0) {
-              setDuration(d);
-            }
-            const vw = e.currentTarget.videoWidth;
-            const vh = e.currentTarget.videoHeight;
-            if (vw > 0 && vh > 0) {
-              setVideoSize({ width: vw, height: vh });
-            }
-            setIsLoading(false);
-          }}
-          onResize={(e) => {
-            const vw = e.currentTarget.videoWidth;
-            const vh = e.currentTarget.videoHeight;
-            if (vw > 0 && vh > 0) {
-              setVideoSize({ width: vw, height: vh });
-            }
-          }}
-          onCanPlay={(e) => {
-            const vw = e.currentTarget.videoWidth;
-            const vh = e.currentTarget.videoHeight;
-            if (vw > 0 && vh > 0 && (videoSize.width !== vw || videoSize.height !== vh)) {
-              setVideoSize({ width: vw, height: vh });
-            }
-            setIsLoading(false);
-            setIsBuffering(false);
-          }}
-          onWaiting={() => setIsBuffering(true)}
-          onPlaying={(e) => {
-            const vw = e.currentTarget.videoWidth;
-            const vh = e.currentTarget.videoHeight;
-            if (vw > 0 && vh > 0 && (videoSize.width !== vw || videoSize.height !== vh)) {
-              setVideoSize({ width: vw, height: vh });
-            }
-            setIsBuffering(false);
-            setIsLoading(false);
-            setIsPlaying(true);
-          }}
-          onPause={() => setIsPlaying(false)}
-          onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-          onEnded={() => {
-            setIsPlaying(false);
-            onEnded?.();
-          }}
-          onError={(_e) => {
-            const demoFallbacks: Record<string, string> = {
-              vid_sample_coding: "https://vjs.zencdn.net/v/oceans.mp4",
-              vid_sample_nature:
-                "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
-              vid_sample_animation:
-                "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/friday.mp4",
-            };
-            const matchedKey = Object.keys(demoFallbacks).find((k) => cleanSrc.includes(k));
-            if (matchedKey && videoRef.current) {
-              const fallbackUrl = demoFallbacks[matchedKey]!;
-              if (videoRef.current.src !== fallbackUrl) {
-                videoRef.current.src = fallbackUrl;
-                videoRef.current.load();
-                videoRef.current.play().catch(() => {});
-                return;
-              }
-            }
-            setIsLoading(false);
-            setIsBuffering(false);
-            setHasError(true);
-            const err = videoRef.current?.error;
-            let msg = "The video file failed to load.";
-            if (err?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
-              msg = "The format or source codec of this video is not supported by your browser.";
-            } else if (err?.code === MediaError.MEDIA_ERR_NETWORK) {
-              msg = "A network error occurred while fetching the video stream.";
-            }
-            setErrorMessage(msg);
-          }}
-          className={`object-contain bg-black ${shouldUseFittedBox ? "" : "h-full w-full"} ${
-            isDragging ? "transition-none" : "transition-transform duration-200 ease-out"
-          }`}
-          style={{
-            ...(shouldUseFittedBox && fittedBox
-              ? {
-                  width: `${fittedBox.baseWidth}px`,
-                  height: `${fittedBox.baseHeight}px`,
-                  maxWidth: "none",
-                  maxHeight: "none",
-                  flexShrink: 0,
-                }
-              : {}),
-            transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom}) rotate(${rotation}deg)`,
-            transformOrigin: "center center",
-          }}
-          src={cleanSrc}
-        >
-          <source src={cleanSrc} type={mimeType} />
-          Your browser does not support the video tag.
-        </video>
-      </div>
-
-      {/* Buffering or initial loading spinner */}
-      {(isLoading || isBuffering) && (
-        <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/30 backdrop-blur-xs z-20">
-          <div className="flex flex-col items-center gap-2">
-            <Loader2 className="h-10 w-10 animate-spin text-brand" />
-            <span className="text-[11px] font-semibold text-white/90">
-              {isLoading ? "Loading video stream…" : "Buffering…"}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Horizontal Swipe-to-Seek live badge */}
-      {swipePreview && (
-        <div className="pointer-events-none absolute inset-0 grid place-items-center z-25">
-          <div className="rounded-full bg-black/75 px-4 py-1.5 text-xs font-bold text-white backdrop-blur-md shadow-lg border border-white/15 tabular-nums">
-            {formatTime(swipePreview.targetTime)}{" "}
-            <span className="text-brand-light ml-1">
-              (
-              {swipePreview.deltaSeconds >= 0
-                ? `+${swipePreview.deltaSeconds}s`
-                : `${swipePreview.deltaSeconds}s`}
-              )
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Center Transport Cluster: -10s / Play-Pause / +10s (Screenshot 3 style) */}
-      {!isLoading && !isBuffering && (
+        {/* Centered Video Stage: stretches cleanly to container bounds (avoids height:auto % collapse) */}
         <div
-          className={`pointer-events-none absolute inset-0 flex items-center justify-center bg-black/25 z-10 transition-opacity duration-200 ${
-            controlsVisible ? "opacity-100" : "opacity-0"
+          onPointerDown={handleStagePointerDown}
+          onPointerMove={handleStagePointerMove}
+          onPointerUp={endPointerDrag}
+          onPointerCancel={endPointerDrag}
+          onTouchStart={handleStageTouchStart}
+          onTouchMove={handleStageTouchMove}
+          onTouchEnd={handleStageTouchEnd}
+          onClick={handleStageClick}
+          className={`absolute inset-0 flex items-center justify-center overflow-hidden ${
+            canPan ? (isDragging ? "cursor-grabbing" : "cursor-grab") : "cursor-pointer"
           }`}
+          style={{ touchAction: zoom > 1 ? "none" : "pan-y" }}
         >
+          {/* Real HTML5 Video element */}
+          <video
+            ref={videoRef}
+            playsInline
+            poster={cleanPoster}
+            preload="metadata"
+            onLoadStart={() => {
+              setIsLoading(true);
+              setHasError(false);
+            }}
+            onLoadedMetadata={(e) => {
+              const d = e.currentTarget.duration;
+              if (!isNaN(d) && d > 0) {
+                setDuration(d);
+              }
+              const vw = e.currentTarget.videoWidth;
+              const vh = e.currentTarget.videoHeight;
+              if (vw > 0 && vh > 0) {
+                setVideoSize({ width: vw, height: vh });
+              }
+              setIsLoading(false);
+            }}
+            onResize={(e) => {
+              const vw = e.currentTarget.videoWidth;
+              const vh = e.currentTarget.videoHeight;
+              if (vw > 0 && vh > 0) {
+                setVideoSize({ width: vw, height: vh });
+              }
+            }}
+            onCanPlay={(e) => {
+              const vw = e.currentTarget.videoWidth;
+              const vh = e.currentTarget.videoHeight;
+              if (vw > 0 && vh > 0 && (videoSize.width !== vw || videoSize.height !== vh)) {
+                setVideoSize({ width: vw, height: vh });
+              }
+              setIsLoading(false);
+              setIsBuffering(false);
+            }}
+            onWaiting={() => setIsBuffering(true)}
+            onPlaying={(e) => {
+              const vw = e.currentTarget.videoWidth;
+              const vh = e.currentTarget.videoHeight;
+              if (vw > 0 && vh > 0 && (videoSize.width !== vw || videoSize.height !== vh)) {
+                setVideoSize({ width: vw, height: vh });
+              }
+              setIsBuffering(false);
+              setIsLoading(false);
+              setIsPlaying(true);
+            }}
+            onPause={() => setIsPlaying(false)}
+            onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+            onEnded={() => {
+              setIsPlaying(false);
+              onEnded?.();
+            }}
+            onError={(_e) => {
+              const demoFallbacks: Record<string, string> = {
+                vid_sample_coding: "https://vjs.zencdn.net/v/oceans.mp4",
+                vid_sample_nature:
+                  "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
+                vid_sample_animation:
+                  "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/friday.mp4",
+              };
+              const matchedKey = Object.keys(demoFallbacks).find((k) => cleanSrc.includes(k));
+              if (matchedKey && videoRef.current) {
+                const fallbackUrl = demoFallbacks[matchedKey]!;
+                if (videoRef.current.src !== fallbackUrl) {
+                  videoRef.current.src = fallbackUrl;
+                  videoRef.current.load();
+                  videoRef.current.play().catch(() => {});
+                  return;
+                }
+              }
+              setIsLoading(false);
+              setIsBuffering(false);
+              setHasError(true);
+              const err = videoRef.current?.error;
+              let msg = "The video file failed to load.";
+              if (err?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED) {
+                msg = "The format or source codec of this video is not supported by your browser.";
+              } else if (err?.code === MediaError.MEDIA_ERR_NETWORK) {
+                msg = "A network error occurred while fetching the video stream.";
+              }
+              setErrorMessage(msg);
+            }}
+            className={`object-contain bg-black ${shouldUseFittedBox ? "" : "h-full w-full"} ${
+              isDragging ? "transition-none" : "transition-transform duration-200 ease-out"
+            }`}
+            style={{
+              ...(shouldUseFittedBox && fittedBox
+                ? {
+                    width: `${fittedBox.baseWidth}px`,
+                    height: `${fittedBox.baseHeight}px`,
+                    maxWidth: "none",
+                    maxHeight: "none",
+                    flexShrink: 0,
+                  }
+                : {}),
+              transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom}) rotate(${rotation}deg)`,
+              transformOrigin: "center center",
+            }}
+            src={cleanSrc}
+          >
+            <source src={cleanSrc} type={mimeType} />
+            Your browser does not support the video tag.
+          </video>
+        </div>
+
+        {/* Buffering or initial loading spinner */}
+        {(isLoading || isBuffering) && (
+          <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/30 backdrop-blur-xs z-20">
+            <div className="flex flex-col items-center gap-2">
+              <Loader2 className="h-10 w-10 animate-spin text-brand" />
+              <span className="text-[11px] font-semibold text-white/90">
+                {isLoading ? "Loading video stream…" : "Buffering…"}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Horizontal Swipe-to-Seek live badge */}
+        {swipePreview && (
+          <div className="pointer-events-none absolute inset-0 grid place-items-center z-25">
+            <div className="rounded-full bg-black/75 px-4 py-1.5 text-xs font-bold text-white backdrop-blur-md shadow-lg border border-white/15 tabular-nums">
+              {formatTime(swipePreview.targetTime)}{" "}
+              <span className="text-brand-light ml-1">
+                (
+                {swipePreview.deltaSeconds >= 0
+                  ? `+${swipePreview.deltaSeconds}s`
+                  : `${swipePreview.deltaSeconds}s`}
+                )
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Center Transport Cluster: -10s / Play-Pause / +10s (Screenshot 3 style) */}
+        {!isLoading && !isBuffering && (
           <div
-            onClick={(e) => e.stopPropagation()}
-            className={`flex items-center justify-center gap-5 sm:gap-8 ${
-              controlsVisible ? "pointer-events-auto" : "pointer-events-none"
+            className={`pointer-events-none absolute inset-0 flex items-center justify-center bg-black/25 z-10 transition-opacity duration-200 ${
+              controlsVisible ? "opacity-100" : "opacity-0"
             }`}
           >
-            {/* Skip Back 10s */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                skipBy(-10);
-              }}
-              aria-label="Skip back 10 seconds"
-              title="Rewind 10s"
-              className="relative grid h-11 w-11 sm:h-12 sm:w-12 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/75 active:scale-95 cursor-pointer"
+            <div
+              onClick={(e) => e.stopPropagation()}
+              className={`flex items-center justify-center gap-5 sm:gap-8 ${
+                controlsVisible ? "pointer-events-auto" : "pointer-events-none"
+              }`}
             >
-              <RotateCcw className="h-5 w-5 sm:h-6 sm:w-6" />
-              <span className="absolute text-[9px] font-extrabold leading-none tracking-tighter translate-y-[0.5px]">
-                10
-              </span>
-            </button>
-
-            {/* Primary Play / Pause */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                togglePlay();
-              }}
-              aria-label={isPlaying ? "Pause video" : "Play video"}
-              className="grid h-14 w-14 sm:h-16 sm:w-16 place-items-center rounded-full bg-black/55 text-white backdrop-blur-md shadow-lift ring-1 ring-white/20 transition hover:bg-brand hover:ring-brand active:scale-95 cursor-pointer"
-            >
-              {isPlaying ? (
-                <Pause className="h-6 w-6 sm:h-7 sm:w-7 fill-current" />
-              ) : (
-                <Play className="h-6 w-6 sm:h-7 sm:w-7 translate-x-[1.5px] fill-current" />
-              )}
-            </button>
-
-            {/* Skip Forward 10s */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                skipBy(10);
-              }}
-              aria-label="Skip forward 10 seconds"
-              title="Forward 10s"
-              className="relative grid h-11 w-11 sm:h-12 sm:w-12 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/75 active:scale-95 cursor-pointer"
-            >
-              <RotateCw className="h-5 w-5 sm:h-6 sm:w-6" />
-              <span className="absolute text-[9px] font-extrabold leading-none tracking-tighter translate-y-[0.5px]">
-                10
-              </span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Top Overlay Header: Back, Title, FaceTube Branding & Mobile Settings/Mute */}
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className={`absolute inset-x-0 top-0 bg-gradient-to-b from-black/75 via-black/25 to-transparent px-2.5 py-2 sm:p-4 z-20 transition-opacity duration-200 ${
-          controlsVisible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
-        }`}
-      >
-        <div className="flex items-center justify-between text-white gap-2 sm:gap-3">
-          <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
-            {onBack && (
+              {/* Skip Back 10s */}
               <button
                 type="button"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onBack();
+                  skipBy(-10);
                 }}
-                className="grid h-10 w-10 sm:h-9 sm:w-9 shrink-0 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
-                aria-label="Back to previous page"
-                title="Back to previous page"
+                aria-label="Skip back 10 seconds"
+                title="Rewind 10s"
+                className="relative grid h-11 w-11 sm:h-12 sm:w-12 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/75 active:scale-95 cursor-pointer"
               >
-                <ArrowLeft className="h-4 w-4 sm:h-4 sm:w-4" />
+                <RotateCcw className="h-5 w-5 sm:h-6 sm:w-6" />
+                <span className="absolute text-[9px] font-extrabold leading-none tracking-tighter translate-y-[0.5px]">
+                  10
+                </span>
               </button>
-            )}
-            <p className="text-xs sm:text-sm font-bold truncate max-w-[160px] xs:max-w-xs sm:max-w-md drop-shadow">
-              {title}
-            </p>
-            <span className="hidden sm:inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold bg-white/20 backdrop-blur-md px-2.5 py-0.5 rounded-full">
-              <Sparkles className="h-3 w-3 text-brand" />
-              FaceTube Player
-            </span>
-          </div>
 
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            <span className="inline-flex sm:hidden shrink-0 items-center gap-1 text-[10px] font-semibold bg-black/45 backdrop-blur-md px-2 py-0.5 rounded-full">
-              <Sparkles className="h-2.5 w-2.5 text-brand" />
-              FaceTube
-            </span>
-
-            {/* Settings / Transform Tools Menu Trigger */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowToolsMenu((prev) => !prev);
-                showControlsTemporarily();
-              }}
-              aria-label="Player settings and transform tools"
-              aria-expanded={showToolsMenu}
-              title="Zoom, Rotation & Speed"
-              className="relative grid h-10 w-10 sm:h-9 sm:w-9 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
-            >
-              <Settings className="h-4 w-4" />
-              {hasActiveTransform && (
-                <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-brand ring-1 ring-white" />
-              )}
-            </button>
-
-            {/* Top-right Mute toggle (Screenshot 3 mobile placement) */}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleMute();
-              }}
-              aria-label={isMuted ? "Unmute" : "Mute"}
-              className="grid sm:hidden h-10 w-10 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
-            >
-              {isMuted || volume === 0 ? (
-                <VolumeX className="h-4 w-4 text-red-400" />
-              ) : (
-                <Volume2 className="h-4 w-4" />
-              )}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Compact Player Settings & Transform Drawer (Zoom / Rotation / Playback Speed) */}
-      {showToolsMenu && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="absolute bottom-12 right-2.5 sm:bottom-16 sm:right-4 z-30 w-[min(268px,calc(100%-20px))] max-h-[calc(100%-3.5rem)] overflow-y-auto rounded-xl border border-white/15 bg-zinc-950/92 p-2.5 text-white shadow-2xl backdrop-blur-md"
-          role="dialog"
-          aria-label="Player transform and playback settings"
-        >
-          <div className="mb-2 flex items-center justify-between border-b border-white/10 pb-1.5">
-            <span className="text-[11px] font-bold tracking-wide text-zinc-200">
-              Player Controls
-            </span>
-            <button
-              type="button"
-              onClick={() => setShowToolsMenu(false)}
-              aria-label="Close player settings"
-              className="grid h-6 w-6 place-items-center rounded-full hover:bg-white/15 transition cursor-pointer"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-
-          <div className="space-y-2 text-xs">
-            {/* Zoom Row */}
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-medium text-zinc-300">Zoom</span>
-              <div
-                className="flex items-center rounded-lg bg-white/10 p-0.5"
-                role="group"
-                aria-label="Mobile video zoom controls"
-              >
-                <button
-                  type="button"
-                  onClick={handleZoomOut}
-                  disabled={zoom <= MIN_ZOOM}
-                  aria-label="Zoom out"
-                  className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
-                >
-                  <ZoomOut className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleResetZoom}
-                  disabled={zoom <= MIN_ZOOM}
-                  aria-label="Reset zoom"
-                  className={`px-2 h-8 text-[11px] font-mono font-bold rounded transition ${
-                    zoom > MIN_ZOOM
-                      ? "text-white bg-brand/85 hover:bg-brand cursor-pointer"
-                      : "text-zinc-300 disabled:opacity-75 cursor-default"
-                  }`}
-                >
-                  {Math.round(zoom * 100)}%
-                </button>
-                <button
-                  type="button"
-                  onClick={handleZoomIn}
-                  disabled={zoom >= MAX_ZOOM}
-                  aria-label="Zoom in"
-                  className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
-                >
-                  <ZoomIn className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Rotation Row */}
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-medium text-zinc-300">Rotate</span>
-              <div
-                className="flex items-center rounded-lg bg-white/10 p-0.5"
-                role="group"
-                aria-label="Mobile video rotation controls"
-              >
-                <button
-                  type="button"
-                  onClick={handleRotateLeft}
-                  aria-label="Rotate left 90 degrees"
-                  className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
-                >
-                  <RotateCcw className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleResetRotation}
-                  disabled={!isRotated}
-                  aria-label="Reset rotation"
-                  className={`px-2 h-8 text-[11px] font-mono font-bold rounded transition ${
-                    isRotated
-                      ? "text-white bg-brand/85 hover:bg-brand cursor-pointer"
-                      : "text-zinc-300 disabled:opacity-75 cursor-default"
-                  }`}
-                >
-                  {normalizedRotation}°
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRotateRight}
-                  aria-label="Rotate right 90 degrees"
-                  className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
-                >
-                  <RotateCw className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Playback Speed Row */}
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-[11px] font-medium text-zinc-300">Speed</span>
+              {/* Primary Play / Pause */}
               <button
                 type="button"
-                onClick={cyclePlaybackSpeed}
-                aria-label={`Playback speed: ${playbackSpeed}x`}
-                className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-mono font-bold hover:bg-white/25 transition cursor-pointer"
-              >
-                {playbackSpeed}x
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Bottom Controls Bar */}
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-2.5 sm:px-4 pb-1.5 sm:pb-3 pt-6 sm:pt-8 z-20 transition-opacity duration-200 ${
-          controlsVisible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
-        }`}
-      >
-        {/* Mobile (<640px) Single-Line Scrubber Row matching Screenshot 3 */}
-        <div className="flex sm:hidden items-center gap-2 text-white">
-          <span className="text-[11px] tabular-nums font-mono text-white/95 shrink-0">
-            {formatTime(currentTime)}
-          </span>
-          {renderTimelineScrubber(true)}
-          <span className="text-[11px] tabular-nums font-mono text-white/85 shrink-0">
-            {formattedDuration}
-          </span>
-          <button
-            type="button"
-            onClick={toggleFullscreen}
-            aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-            className="grid h-10 w-10 -mr-1.5 shrink-0 place-items-center rounded-full hover:bg-white/20 active:scale-90 transition cursor-pointer"
-          >
-            {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
-          </button>
-        </div>
-
-        {/* Tablet & Desktop (>=640px) Stacked Scrubber + Full Controls Bar */}
-        <div className="hidden sm:block">
-          {renderTimelineScrubber(false)}
-
-          <div className="mt-1.5 flex items-center justify-between gap-x-2 text-white">
-            <div className="flex items-center gap-2 min-w-0">
-              {/* Play/Pause toggle */}
-              <button
-                type="button"
-                onClick={togglePlay}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  togglePlay();
+                }}
                 aria-label={isPlaying ? "Pause video" : "Play video"}
-                className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+                className="grid h-14 w-14 sm:h-16 sm:w-16 place-items-center rounded-full bg-[#00D6C9] text-zinc-950 shadow-lift ring-1 ring-white/25 transition hover:bg-[#00B8AD] active:bg-[#00B8AD] hover:scale-105 active:scale-95 cursor-pointer"
               >
                 {isPlaying ? (
-                  <Pause className="h-4 w-4 fill-current" />
+                  <Pause className="h-6 w-6 sm:h-7 sm:w-7 fill-current" />
                 ) : (
-                  <Play className="h-4 w-4 fill-current translate-x-[1px]" />
+                  <Play className="h-6 w-6 sm:h-7 sm:w-7 translate-x-[1.5px] fill-current" />
                 )}
               </button>
 
-              {/* Volume Control */}
-              <div className="flex items-center gap-1.5 group/vol">
+              {/* Skip Forward 10s */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  skipBy(10);
+                }}
+                aria-label="Skip forward 10 seconds"
+                title="Forward 10s"
+                className="relative grid h-11 w-11 sm:h-12 sm:w-12 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/75 active:scale-95 cursor-pointer"
+              >
+                <RotateCw className="h-5 w-5 sm:h-6 sm:w-6" />
+                <span className="absolute text-[9px] font-extrabold leading-none tracking-tighter translate-y-[0.5px]">
+                  10
+                </span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Top Overlay Header: Back, Title, FaceTube Branding & Mobile Settings/Mute */}
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className={`absolute inset-x-0 top-0 bg-gradient-to-b from-black/75 via-black/25 to-transparent px-2.5 py-2 sm:p-4 z-20 transition-opacity duration-200 ${
+            controlsVisible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+          }`}
+        >
+          <div className="flex items-center justify-between text-white gap-2 sm:gap-3">
+            <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
+              {onBack && (
                 <button
                   type="button"
-                  onClick={toggleMute}
-                  aria-label={isMuted ? "Unmute" : "Mute"}
-                  className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onBack();
+                  }}
+                  className="grid h-10 w-10 sm:h-9 sm:w-9 shrink-0 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
+                  aria-label="Back to previous page"
+                  title="Back to previous page"
                 >
-                  {isMuted || volume === 0 ? (
-                    <VolumeX className="h-4 w-4 text-red-400" />
-                  ) : (
-                    <Volume2 className="h-4 w-4" />
-                  )}
+                  <ArrowLeft className="h-4 w-4 sm:h-4 sm:w-4" />
                 </button>
-                <input
-                  type="range"
-                  min={0}
-                  max={1}
-                  step={0.05}
-                  value={isMuted ? 0 : volume}
-                  onChange={handleVolumeChange}
-                  aria-label="Volume slider"
-                  className="w-16 md:w-20 h-1 accent-brand rounded-lg cursor-pointer transition-all"
-                />
-              </div>
-
-              {/* Time Display */}
-              <div className="text-xs tabular-nums text-zinc-200 font-mono shrink-0">
-                <span>{formatTime(currentTime)}</span>
-                <span className="mx-1 text-zinc-500">/</span>
-                <span>{formattedDuration}</span>
-              </div>
+              )}
+              <p className="text-xs sm:text-sm font-bold truncate max-w-[160px] xs:max-w-xs sm:max-w-md drop-shadow">
+                {title}
+              </p>
+              <span className="hidden sm:inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold bg-white/20 backdrop-blur-md px-2.5 py-0.5 rounded-full">
+                <Sparkles className="h-3 w-3 text-brand" />
+                FaceTube Player
+              </span>
             </div>
 
-            <div className="ml-auto flex items-center gap-1.5 shrink-0">
-              {/* Zoom Controls */}
-              <div
-                className="flex items-center rounded-md bg-white/10 p-0.5"
-                role="group"
-                aria-label="Video zoom controls"
-              >
-                <button
-                  type="button"
-                  onClick={handleZoomOut}
-                  disabled={zoom <= MIN_ZOOM}
-                  title="Zoom out"
-                  aria-label="Zoom out"
-                  className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
-                >
-                  <ZoomOut className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={handleResetZoom}
-                  disabled={zoom <= MIN_ZOOM}
-                  title={zoom > MIN_ZOOM ? "Reset zoom to 100%" : "Zoom: 100%"}
-                  aria-label="Reset zoom"
-                  className={`px-1.5 h-7 text-[11px] font-mono font-bold rounded transition ${
-                    zoom > MIN_ZOOM
-                      ? "text-white bg-brand/80 hover:bg-brand cursor-pointer"
-                      : "text-zinc-300 disabled:opacity-75 cursor-default"
-                  }`}
-                >
-                  {Math.round(zoom * 100)}%
-                </button>
-                <button
-                  type="button"
-                  onClick={handleZoomIn}
-                  disabled={zoom >= MAX_ZOOM}
-                  title="Zoom in"
-                  aria-label="Zoom in"
-                  className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
-                >
-                  <ZoomIn className="h-3.5 w-3.5" />
-                </button>
-              </div>
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+              <span className="inline-flex sm:hidden shrink-0 items-center gap-1 text-[10px] font-semibold bg-black/45 backdrop-blur-md px-2 py-0.5 rounded-full">
+                <Sparkles className="h-2.5 w-2.5 text-brand" />
+                FaceTube
+              </span>
 
-              {/* Rotation Controls */}
-              <div
-                className="flex items-center rounded-md bg-white/10 p-0.5"
-                role="group"
-                aria-label="Video rotation controls"
-              >
+              {/* Settings / Transform Tools Menu Trigger (used in Fullscreen mode when external row is hidden) */}
+              {isFullscreen && (
                 <button
                   type="button"
-                  onClick={handleRotateLeft}
-                  title="Rotate left 90°"
-                  aria-label="Rotate left 90 degrees"
-                  className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShowToolsMenu((prev) => !prev);
+                    showControlsTemporarily();
+                  }}
+                  aria-label="Player settings and transform tools"
+                  aria-expanded={showToolsMenu}
+                  title="Zoom, Rotation & Speed"
+                  className="relative grid h-10 w-10 sm:h-9 sm:w-9 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
                 >
-                  <RotateCcw className="h-3.5 w-3.5" />
+                  <Settings className="h-4 w-4" />
+                  {hasActiveTransform && (
+                    <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-brand ring-1 ring-white" />
+                  )}
                 </button>
-                <button
-                  type="button"
-                  onClick={handleResetRotation}
-                  disabled={!isRotated}
-                  title={isRotated ? "Reset rotation to 0°" : "Rotation: 0°"}
-                  aria-label="Reset rotation"
-                  className={`px-1.5 h-7 text-[11px] font-mono font-bold rounded transition ${
-                    isRotated
-                      ? "text-white bg-brand/80 hover:bg-brand cursor-pointer"
-                      : "text-zinc-300 disabled:opacity-75 cursor-default"
-                  }`}
-                >
-                  {normalizedRotation}°
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRotateRight}
-                  title="Rotate right 90°"
-                  aria-label="Rotate right 90 degrees"
-                  className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
-                >
-                  <RotateCw className="h-3.5 w-3.5" />
-                </button>
-              </div>
+              )}
 
-              {/* Playback Speed cycle */}
+              {/* Top-right Mute toggle (Screenshot 3 mobile placement) */}
               <button
                 type="button"
-                onClick={cyclePlaybackSpeed}
-                title="Playback speed"
-                aria-label={`Playback speed: ${playbackSpeed}x`}
-                className="rounded-md bg-white/10 px-2 h-8 text-xs font-mono font-bold hover:bg-white/20 transition cursor-pointer"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleMute();
+                }}
+                aria-label={isMuted ? "Unmute" : "Mute"}
+                className="grid sm:hidden h-10 w-10 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
               >
-                {playbackSpeed}x
-              </button>
-
-              {/* Fullscreen toggle */}
-              <button
-                type="button"
-                onClick={toggleFullscreen}
-                aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-                className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
-              >
-                {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
+                {isMuted || volume === 0 ? (
+                  <VolumeX className="h-4 w-4 text-red-400" />
+                ) : (
+                  <Volume2 className="h-4 w-4" />
+                )}
               </button>
             </div>
           </div>
         </div>
+
+        {/* Compact Player Settings & Transform Drawer (Fullscreen fallback only) */}
+        {isFullscreen && showToolsMenu && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="absolute bottom-12 right-2.5 sm:bottom-16 sm:right-4 z-30 w-[min(268px,calc(100%-20px))] max-h-[calc(100%-3.5rem)] overflow-y-auto rounded-xl border border-white/15 bg-zinc-950/92 p-2.5 text-white shadow-2xl backdrop-blur-md"
+            role="dialog"
+            aria-label="Player transform and playback settings"
+          >
+            <div className="mb-2 flex items-center justify-between border-b border-white/10 pb-1.5">
+              <span className="text-[11px] font-bold tracking-wide text-zinc-200">
+                Player Controls
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowToolsMenu(false)}
+                aria-label="Close player settings"
+                className="grid h-6 w-6 place-items-center rounded-full hover:bg-white/15 transition cursor-pointer"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            <div className="space-y-2 text-xs">
+              {/* Zoom Row */}
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-zinc-300">Zoom</span>
+                <div
+                  className="flex items-center rounded-lg bg-white/10 p-0.5"
+                  role="group"
+                  aria-label="Mobile video zoom controls"
+                >
+                  <button
+                    type="button"
+                    onClick={handleZoomOut}
+                    disabled={zoom <= MIN_ZOOM}
+                    aria-label="Zoom out"
+                    className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+                  >
+                    <ZoomOut className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetZoom}
+                    disabled={zoom <= MIN_ZOOM}
+                    aria-label="Reset zoom"
+                    className={`px-2 h-8 text-[11px] font-mono font-bold rounded transition ${
+                      zoom > MIN_ZOOM
+                        ? "text-white bg-brand/85 hover:bg-brand cursor-pointer"
+                        : "text-zinc-300 disabled:opacity-75 cursor-default"
+                    }`}
+                  >
+                    {Math.round(zoom * 100)}%
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleZoomIn}
+                    disabled={zoom >= MAX_ZOOM}
+                    aria-label="Zoom in"
+                    className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+                  >
+                    <ZoomIn className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Rotation Row */}
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-zinc-300">Rotate</span>
+                <div
+                  className="flex items-center rounded-lg bg-white/10 p-0.5"
+                  role="group"
+                  aria-label="Mobile video rotation controls"
+                >
+                  <button
+                    type="button"
+                    onClick={handleRotateLeft}
+                    aria-label="Rotate left 90 degrees"
+                    className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetRotation}
+                    disabled={!isRotated}
+                    aria-label="Reset rotation"
+                    className={`px-2 h-8 text-[11px] font-mono font-bold rounded transition ${
+                      isRotated
+                        ? "text-white bg-brand/85 hover:bg-brand cursor-pointer"
+                        : "text-zinc-300 disabled:opacity-75 cursor-default"
+                    }`}
+                  >
+                    {normalizedRotation}°
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleRotateRight}
+                    aria-label="Rotate right 90 degrees"
+                    className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
+                  >
+                    <RotateCw className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Playback Speed Row */}
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-medium text-zinc-300">Speed</span>
+                <button
+                  type="button"
+                  onClick={cyclePlaybackSpeed}
+                  aria-label={`Playback speed: ${playbackSpeed}x`}
+                  className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-mono font-bold hover:bg-white/25 transition cursor-pointer"
+                >
+                  {playbackSpeed}x
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Bottom Controls Bar */}
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-2.5 sm:px-4 pb-1.5 sm:pb-3 pt-6 sm:pt-8 z-20 transition-opacity duration-200 ${
+            controlsVisible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+          }`}
+        >
+          {/* Mobile (<640px) Single-Line Scrubber Row matching Screenshot 3 */}
+          <div className="flex sm:hidden items-center gap-2 text-white">
+            <span className="text-[11px] tabular-nums font-mono text-white/95 shrink-0">
+              {formatTime(currentTime)}
+            </span>
+            {renderTimelineScrubber(true)}
+            <span className="text-[11px] tabular-nums font-mono text-white/85 shrink-0">
+              {formattedDuration}
+            </span>
+            <button
+              type="button"
+              onClick={toggleFullscreen}
+              aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+              className="grid h-10 w-10 -mr-1.5 shrink-0 place-items-center rounded-full hover:bg-white/20 active:scale-90 transition cursor-pointer"
+            >
+              {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
+            </button>
+          </div>
+
+          {/* Tablet & Desktop (>=640px) Stacked Scrubber + Full Controls Bar */}
+          <div className="hidden sm:block">
+            {renderTimelineScrubber(false)}
+
+            <div className="mt-1.5 flex items-center justify-between gap-x-2 text-white">
+              <div className="flex items-center gap-2 min-w-0">
+                {/* Play/Pause toggle */}
+                <button
+                  type="button"
+                  onClick={togglePlay}
+                  aria-label={isPlaying ? "Pause video" : "Play video"}
+                  className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+                >
+                  {isPlaying ? (
+                    <Pause className="h-4 w-4 fill-current" />
+                  ) : (
+                    <Play className="h-4 w-4 fill-current translate-x-[1px]" />
+                  )}
+                </button>
+
+                {/* Volume Control */}
+                <div className="flex items-center gap-1.5 group/vol">
+                  <button
+                    type="button"
+                    onClick={toggleMute}
+                    aria-label={isMuted ? "Unmute" : "Mute"}
+                    className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+                  >
+                    {isMuted || volume === 0 ? (
+                      <VolumeX className="h-4 w-4 text-red-400" />
+                    ) : (
+                      <Volume2 className="h-4 w-4" />
+                    )}
+                  </button>
+                  <input
+                    type="range"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={isMuted ? 0 : volume}
+                    onChange={handleVolumeChange}
+                    aria-label="Volume slider"
+                    className="w-16 md:w-20 h-1 accent-brand rounded-lg cursor-pointer transition-all"
+                  />
+                </div>
+
+                {/* Time Display */}
+                <div className="text-xs tabular-nums text-zinc-200 font-mono shrink-0">
+                  <span>{formatTime(currentTime)}</span>
+                  <span className="mx-1 text-zinc-500">/</span>
+                  <span>{formattedDuration}</span>
+                </div>
+              </div>
+
+              <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                {/* Fullscreen toggle */}
+                <button
+                  type="button"
+                  onClick={toggleFullscreen}
+                  aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                  className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+                >
+                  {isFullscreen ? (
+                    <Minimize className="h-4 w-4" />
+                  ) : (
+                    <Maximize className="h-4 w-4" />
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
+      {!isFullscreen && renderBackCategoryToolbarRow(true)}
+    </>
   );
 }

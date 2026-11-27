@@ -385,10 +385,89 @@ describe("Video Player Aspect Ratio & Real-Time Upload Progress Regression Suite
       assert.ok(playerSrc.includes("Skip back 10 seconds"));
       assert.ok(playerSrc.includes("Skip forward 10 seconds"));
       assert.ok(playerSrc.includes("Player settings and transform tools"));
+      assert.ok(playerSrc.includes("renderBackCategoryToolbarRow"));
+      assert.ok(playerSrc.includes("Video zoom, rotation, and playback speed controls"));
+      assert.ok(
+        playerSrc.includes(
+          "min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden",
+        ),
+      );
       assert.ok(playerSrc.includes("webkitfullscreenchange"));
       assert.ok(playerSrc.includes("webkitEnterFullscreen"));
       assert.ok(playerSrc.includes("computeSwipeSeekTime"));
       assert.ok(watchSrc.includes("-mx-4 w-[calc(100%+2rem)] sm:mx-0 sm:w-full"));
+      assert.ok(watchSrc.includes('category={video.category || "General"}'));
+      assert.ok(
+        !watchSrc.includes("Back Navigation & Category Bar below player"),
+        "Watch page must not render a duplicate Back/Category row separate from player toolbar",
+      );
+    });
+
+    it("6. Global watch layout applies consistently across video types (portrait, landscape, square, ultrawide), categories, and entry routes", async () => {
+      const [playerSrc, watchSrc, cardSrc, freeSrc, premiumSrc, adsSrc, watchLaterSrc, likedSrc] =
+        await Promise.all([
+          fs.readFile(
+            path.resolve(process.cwd(), "src/components/videohub/FaceTubeVideoPlayer.tsx"),
+            "utf8",
+          ),
+          fs.readFile(path.resolve(process.cwd(), "src/routes/watch.$videoId.tsx"), "utf8"),
+          fs.readFile(path.resolve(process.cwd(), "src/components/videohub/VideoCard.tsx"), "utf8"),
+          fs.readFile(path.resolve(process.cwd(), "src/routes/free-videos.tsx"), "utf8"),
+          fs.readFile(path.resolve(process.cwd(), "src/routes/premium-videos.tsx"), "utf8"),
+          fs.readFile(path.resolve(process.cwd(), "src/routes/advertisement-videos.tsx"), "utf8"),
+          fs.readFile(path.resolve(process.cwd(), "src/routes/watch-later.tsx"), "utf8"),
+          fs.readFile(path.resolve(process.cwd(), "src/routes/liked-videos.tsx"), "utf8"),
+        ]);
+
+      // All watch entry points route to shared /watch/$videoId component
+      for (const entrySrc of [cardSrc, freeSrc, premiumSrc, adsSrc, watchLaterSrc, likedSrc]) {
+        assert.ok(entrySrc.includes('"/watch/$videoId"'));
+      }
+
+      // watch.$videoId.tsx renders shared FaceTubeVideoPlayer with key={video.id}, category fallback, and onBack for every video
+      assert.ok(watchSrc.includes("<FaceTubeVideoPlayer"));
+      assert.ok(watchSrc.includes("key={video.id}"));
+      assert.ok(watchSrc.includes('category={video.category || "General"}'));
+      assert.ok(watchSrc.includes("onBack={handleBack}"));
+
+      // Shared FaceTubeVideoPlayer resets speed/tools cleanly across video switches and renders single unified row outside fullscreen
+      assert.ok(playerSrc.includes("setPlaybackSpeed(1)"));
+      assert.ok(playerSrc.includes("{!isFullscreen && renderBackCategoryToolbarRow(true)}"));
+      assert.ok(playerSrc.includes("{isFullscreen && ("));
+
+      // Main Play button uses Electric Cyan/Turquoise (#00D6C9) with darker hover/pressed (#00B8AD) & dark icon, while preserving red scrubber
+      const shortsSrc = await fs.readFile(
+        path.resolve(process.cwd(), "src/routes/shorts.tsx"),
+        "utf8",
+      );
+      assert.ok(playerSrc.includes("bg-[#00D6C9] text-zinc-950"));
+      assert.ok(playerSrc.includes("hover:bg-[#00B8AD] active:bg-[#00B8AD]"));
+      assert.ok(playerSrc.includes("h-full bg-brand transition-all duration-75"));
+      assert.ok(shortsSrc.includes("bg-[#00D6C9] text-zinc-950"));
+
+      // Verify both "short" (9:16 portrait) and "standard" (16:9 landscape, 1:1 square, 21:9 ultrawide) compute valid non-clipping dimensions at all 6 viewports
+      const samples = [
+        { mode: "short" as const, w: 720, h: 1280, label: "Portrait Short" },
+        { mode: "standard" as const, w: 1920, h: 1080, label: "Landscape HD" },
+        { mode: "standard" as const, w: 1080, h: 1080, label: "Square" },
+        { mode: "standard" as const, w: 2560, h: 1080, label: "Ultrawide" },
+      ];
+      for (const vp of [
+        [360, 800],
+        [390, 844],
+        [768, 1024],
+        [1024, 768],
+        [1366, 768],
+        [1920, 1080],
+      ] as const) {
+        for (const s of samples) {
+          const box = computeResponsivePlayerDimensions(vp[0], vp[1], s.w, s.h, 0, false, s.mode);
+          assert.ok(box, `${s.label} @ ${vp[0]}x${vp[1]}`);
+          assert.ok(box.containerWidth <= vp[0] + 0.01);
+          assert.ok(box.containerHeight <= vp[1] * 0.8 + 0.01);
+          assert.ok(Math.abs(box.videoWidth / box.videoHeight - s.w / s.h) < 0.001);
+        }
+      }
     });
   });
 

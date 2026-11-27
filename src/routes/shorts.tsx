@@ -711,8 +711,8 @@ function ShortsPage() {
                 onClick={handleMiddleTap}
               >
                 {!isPlaying && (
-                  <div className="grid h-16 w-16 place-items-center rounded-full bg-black/70 text-white shadow-2xl backdrop-blur-md animate-in fade-in zoom-in pointer-events-none">
-                    <Play className="h-8 w-8 translate-x-0.5 fill-white" />
+                  <div className="grid h-16 w-16 place-items-center rounded-full bg-[#00D6C9] text-zinc-950 shadow-2xl ring-1 ring-white/25 transition hover:bg-[#00B8AD] active:bg-[#00B8AD] animate-in fade-in zoom-in pointer-events-none">
+                    <Play className="h-8 w-8 translate-x-0.5 fill-current" />
                   </div>
                 )}
               </div>
