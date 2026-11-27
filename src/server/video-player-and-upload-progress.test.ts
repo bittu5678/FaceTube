@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  clampSeekTime,
   computeFittedVideoBox,
+  computeResponsivePlayerDimensions,
+  computeSwipeSeekTime,
   getPlayerContainerClass,
   getPlayerIntrinsicContainerStyle,
   getShortsStageCardClass,
@@ -279,6 +282,113 @@ describe("Video Player Aspect Ratio & Real-Time Upload Progress Regression Suite
       // Fullscreen disables intrinsic constraint so viewport-filling class applies
       assert.equal(getPlayerIntrinsicContainerStyle(1920, 1080, 0, true), null);
       assert.equal(getPlayerContainerClass("standard", true), "h-full w-full rounded-none");
+    });
+
+    it("5. Responsive Watch player matrix passes at 360px, 390px, 768px, 1024px, 1366px, and 1920px for landscape, portrait, square, rotation, and fullscreen", async () => {
+      const viewports = [
+        { width: 360, height: 800, label: "Small mobile (360px)" },
+        { width: 390, height: 844, label: "Large mobile (390px)" },
+        { width: 768, height: 1024, label: "Tablet portrait (768px)" },
+        { width: 1024, height: 768, label: "Tablet landscape / small laptop (1024px)" },
+        { width: 1366, height: 768, label: "Laptop (1366px)" },
+        { width: 1920, height: 1080, label: "Desktop monitor (1920px)" },
+      ];
+
+      for (const vp of viewports) {
+        // Landscape 16:9 (1920x1080)
+        const landscape = computeResponsivePlayerDimensions(
+          vp.width,
+          vp.height,
+          1920,
+          1080,
+          0,
+          false,
+        );
+        assert.ok(landscape, `${vp.label} landscape should compute`);
+        assert.ok(landscape.containerWidth <= vp.width + 0.01);
+        assert.ok(landscape.containerHeight <= vp.height * 0.8 + 0.01);
+        assert.ok(Math.abs(landscape.videoWidth / landscape.videoHeight - 16 / 9) < 0.001);
+        assert.equal(Math.round(landscape.videoWidth), Math.round(landscape.containerWidth));
+        assert.equal(Math.round(landscape.videoHeight), Math.round(landscape.containerHeight));
+        assert.equal(landscape.isEdgeToEdgeMobile, vp.width < 640);
+
+        // Portrait 9:16 (1080x1920)
+        const portrait = computeResponsivePlayerDimensions(
+          vp.width,
+          vp.height,
+          1080,
+          1920,
+          0,
+          false,
+        );
+        assert.ok(portrait, `${vp.label} portrait should compute`);
+        assert.ok(portrait.containerWidth <= vp.width + 0.01);
+        assert.ok(portrait.containerHeight <= vp.height * 0.8 + 0.01);
+        assert.ok(Math.abs(portrait.videoWidth / portrait.videoHeight - 9 / 16) < 0.001);
+        assert.equal(Math.round(portrait.videoWidth), Math.round(portrait.containerWidth));
+        assert.equal(Math.round(portrait.videoHeight), Math.round(portrait.containerHeight));
+
+        // Square 1:1 (1080x1080)
+        const square = computeResponsivePlayerDimensions(vp.width, vp.height, 1080, 1080, 0, false);
+        assert.ok(square, `${vp.label} square should compute`);
+        assert.ok(square.containerHeight <= vp.height * 0.8 + 0.01);
+        assert.ok(Math.abs(square.videoWidth / square.videoHeight - 1) < 0.001);
+
+        // Quarter-turn rotated 90deg landscape becomes portrait cleanly without clipping
+        const rotated90 = computeResponsivePlayerDimensions(
+          vp.width,
+          vp.height,
+          1920,
+          1080,
+          90,
+          false,
+        );
+        assert.ok(rotated90);
+        assert.ok(rotated90.videoWidth <= rotated90.containerWidth + 0.01);
+        assert.ok(rotated90.videoHeight <= rotated90.containerHeight + 0.01);
+
+        // Fullscreen fills viewport bounds cleanly while preserving video aspect ratio
+        const fsLandscape = computeResponsivePlayerDimensions(
+          vp.width,
+          vp.height,
+          1920,
+          1080,
+          0,
+          true,
+        );
+        assert.ok(fsLandscape);
+        assert.equal(fsLandscape.containerWidth, vp.width);
+        assert.equal(fsLandscape.containerHeight, vp.height);
+        assert.ok(fsLandscape.videoWidth <= vp.width + 0.01);
+        assert.ok(fsLandscape.videoHeight <= vp.height + 0.01);
+      }
+
+      // Swipe-to-seek & skip clamping math
+      assert.equal(clampSeekTime(-5, 120), 0);
+      assert.equal(clampSeekTime(150, 120), 120);
+      assert.equal(clampSeekTime(Number.NaN, 120), 0);
+      assert.equal(computeSwipeSeekTime(20, 180, 360, 120), 50);
+      assert.equal(computeSwipeSeekTime(10, -300, 360, 120), 0);
+      assert.equal(computeSwipeSeekTime(110, 300, 360, 120), 120);
+
+      // Verify responsive HUD, edge-to-edge mobile framing, ±10s skip, settings drawer & WebKit fullscreen in source
+      const playerSrc = await fs.readFile(
+        path.resolve(process.cwd(), "src/components/videohub/FaceTubeVideoPlayer.tsx"),
+        "utf8",
+      );
+      const watchSrc = await fs.readFile(
+        path.resolve(process.cwd(), "src/routes/watch.$videoId.tsx"),
+        "utf8",
+      );
+
+      assert.ok(playerSrc.includes("rounded-none sm:rounded-2xl"));
+      assert.ok(playerSrc.includes("Skip back 10 seconds"));
+      assert.ok(playerSrc.includes("Skip forward 10 seconds"));
+      assert.ok(playerSrc.includes("Player settings and transform tools"));
+      assert.ok(playerSrc.includes("webkitfullscreenchange"));
+      assert.ok(playerSrc.includes("webkitEnterFullscreen"));
+      assert.ok(playerSrc.includes("computeSwipeSeekTime"));
+      assert.ok(watchSrc.includes("-mx-4 w-[calc(100%+2rem)] sm:mx-0 sm:w-full"));
     });
   });
 

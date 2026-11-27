@@ -388,7 +388,7 @@ function WatchPage() {
 
       <main className="mx-auto grid max-w-[1600px] gap-8 px-4 pt-0 pb-24 sm:px-6 lg:grid-cols-[minmax(0,1fr)_400px] lg:pb-10">
         <div className="min-w-0">
-          <div className="w-full">
+          <div className="-mx-4 w-[calc(100%+2rem)] sm:mx-0 sm:w-full">
             <FaceTubeVideoPlayer
               key={video.id}
               src={video.videoUrl}

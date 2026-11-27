@@ -15,11 +15,15 @@ import {
   Loader2,
   Film,
   Sparkles,
+  Settings,
+  X,
 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
 import { resolveMediaUrl } from "@/lib/media-url";
 import {
+  clampSeekTime,
   computeFittedVideoBox,
+  computeSwipeSeekTime,
   getPlayerContainerClass,
   getPlayerIntrinsicContainerStyle,
   resolvePlayerAspectMode,
@@ -81,7 +85,13 @@ export function FaceTubeVideoPlayer({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [showControls, setShowControls] = useState(true);
+  const [showToolsMenu, setShowToolsMenu] = useState(false);
+  const [swipePreview, setSwipePreview] = useState<{
+    targetTime: number;
+    deltaSeconds: number;
+  } | null>(null);
   const controlsTimeoutRef = useRef<number | null>(null);
+  const lastTouchTimeRef = useRef<number>(0);
 
   // Rotation, Zoom & Pan state
   const [rotation, setRotation] = useState(0);
@@ -123,6 +133,23 @@ export function FaceTubeVideoPlayer({
     startZoom: 1,
     lastTouch: null,
     moved: false,
+  });
+  const touchSwipeRef = useRef<{
+    active: boolean;
+    startX: number;
+    startY: number;
+    startTime: number;
+    horizontalLocked: boolean;
+    verticalRejected: boolean;
+    previewTime: number | null;
+  }>({
+    active: false,
+    startX: 0,
+    startY: 0,
+    startTime: 0,
+    horizontalLocked: false,
+    verticalRejected: false,
+    previewTime: null,
   });
 
   const cleanSrc = resolveMediaUrl(src);
@@ -220,36 +247,86 @@ export function FaceTubeVideoPlayer({
     window.addEventListener("resize", updateSize);
     window.addEventListener("orientationchange", updateSize);
     document.addEventListener("fullscreenchange", updateSize);
+    document.addEventListener("webkitfullscreenchange", updateSize);
     return () => {
       observer?.disconnect();
       window.removeEventListener("resize", updateSize);
       window.removeEventListener("orientationchange", updateSize);
       document.removeEventListener("fullscreenchange", updateSize);
+      document.removeEventListener("webkitfullscreenchange", updateSize);
     };
   }, [cleanSrc, hasError]);
 
-  // Fullscreen change listener
+  // Fullscreen change listener (standard + WebKit mobile Safari support)
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(Boolean(document.fullscreenElement));
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      mozFullScreenElement?: Element | null;
+      msFullscreenElement?: Element | null;
     };
+    const videoEl = videoRef.current;
+
+    const handleFullscreenChange = () => {
+      const fsActive = Boolean(
+        document.fullscreenElement ||
+        doc.webkitFullscreenElement ||
+        doc.mozFullScreenElement ||
+        doc.msFullscreenElement,
+      );
+      setIsFullscreen(fsActive);
+    };
+
+    const handleWebkitBegin = () => setIsFullscreen(true);
+    const handleWebkitEnd = () => setIsFullscreen(false);
+
     document.addEventListener("fullscreenchange", handleFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", handleFullscreenChange);
+    document.addEventListener("mozfullscreenchange", handleFullscreenChange);
+    document.addEventListener("MSFullscreenChange", handleFullscreenChange);
+    videoEl?.addEventListener("webkitbeginfullscreen", handleWebkitBegin);
+    videoEl?.addEventListener("webkitendfullscreen", handleWebkitEnd);
+
     return () => {
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
+      document.removeEventListener("webkitfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("mozfullscreenchange", handleFullscreenChange);
+      document.removeEventListener("MSFullscreenChange", handleFullscreenChange);
+      videoEl?.removeEventListener("webkitbeginfullscreen", handleWebkitBegin);
+      videoEl?.removeEventListener("webkitendfullscreen", handleWebkitEnd);
     };
+  }, [cleanSrc, hasError]);
+
+  const clearControlsTimer = useCallback(() => {
+    if (controlsTimeoutRef.current !== null) {
+      window.clearTimeout(controlsTimeoutRef.current);
+      controlsTimeoutRef.current = null;
+    }
   }, []);
 
-  const showControlsTemporarily = useCallback(() => {
-    setShowControls(true);
-    if (controlsTimeoutRef.current) {
-      window.clearTimeout(controlsTimeoutRef.current);
+  const showControlsTemporarily = useCallback(
+    (forcePlaying?: boolean) => {
+      setShowControls(true);
+      clearControlsTimer();
+      const activePlaying = forcePlaying ?? isPlaying;
+      controlsTimeoutRef.current = window.setTimeout(() => {
+        if (activePlaying && !showToolsMenu) {
+          setShowControls(false);
+        }
+      }, 3000);
+    },
+    [clearControlsTimer, isPlaying, showToolsMenu],
+  );
+
+  // Cleanup auto-hide timer on unmount and reschedule when playing/tools state changes
+  useEffect(() => {
+    if (!isPlaying || showToolsMenu) {
+      clearControlsTimer();
+      setShowControls(true);
+    } else if (showControls) {
+      showControlsTemporarily(true);
     }
-    controlsTimeoutRef.current = window.setTimeout(() => {
-      if (isPlaying) {
-        setShowControls(false);
-      }
-    }, 3000);
-  }, [isPlaying]);
+    return () => clearControlsTimer();
+  }, [isPlaying, showControls, showToolsMenu, clearControlsTimer, showControlsTemporarily]);
 
   const handleMouseMove = () => {
     showControlsTemporarily();
@@ -430,10 +507,12 @@ export function FaceTubeVideoPlayer({
     }
   };
 
-  // Mobile touch support: 2-finger pinch-to-zoom & 1-finger pan when zoomed
+  // Mobile touch support: 2-finger pinch-to-zoom, 1-finger pan when zoomed, 1-finger horizontal swipe-to-seek at 1x
   const handleStageTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-    showControlsTemporarily();
+    lastTouchTimeRef.current = Date.now();
     if (e.touches.length === 2) {
+      touchSwipeRef.current.active = false;
+      setSwipePreview(null);
       const t1 = e.touches[0];
       const t2 = e.touches[1];
       if (t1 && t2) {
@@ -447,12 +526,30 @@ export function FaceTubeVideoPlayer({
         setIsDragging(true);
       }
     } else if (e.touches.length === 1 && canPan) {
+      touchSwipeRef.current.active = false;
+      setSwipePreview(null);
       const t = e.touches[0];
       if (t) {
         touchPinchRef.current.lastTouch = { x: t.clientX, y: t.clientY };
         touchPinchRef.current.startDist = null;
         touchPinchRef.current.moved = false;
         setIsDragging(true);
+      }
+    } else if (e.touches.length === 1 && !canPan) {
+      const t = e.touches[0];
+      if (t) {
+        touchPinchRef.current.startDist = null;
+        touchPinchRef.current.lastTouch = null;
+        touchPinchRef.current.moved = false;
+        touchSwipeRef.current = {
+          active: true,
+          startX: t.clientX,
+          startY: t.clientY,
+          startTime: videoRef.current?.currentTime ?? currentTime,
+          horizontalLocked: false,
+          verticalRejected: false,
+          previewTime: null,
+        };
       }
     }
   };
@@ -486,6 +583,40 @@ export function FaceTubeVideoPlayer({
         touchPinchRef.current.lastTouch = { x: t.clientX, y: t.clientY };
         setPan((prev) => clampPan(prev.x + dx, prev.y + dy, zoom, rotation));
       }
+    } else if (
+      e.touches.length === 1 &&
+      !canPan &&
+      touchSwipeRef.current.active &&
+      !touchSwipeRef.current.verticalRejected
+    ) {
+      const t = e.touches[0];
+      if (t && duration > 0) {
+        const dx = t.clientX - touchSwipeRef.current.startX;
+        const dy = t.clientY - touchSwipeRef.current.startY;
+        if (!touchSwipeRef.current.horizontalLocked) {
+          if (Math.abs(dy) > 14 && Math.abs(dy) > Math.abs(dx)) {
+            touchSwipeRef.current.verticalRejected = true;
+            return;
+          }
+          if (Math.abs(dx) > 18 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+            touchSwipeRef.current.horizontalLocked = true;
+            touchPinchRef.current.moved = true;
+          }
+        }
+        if (touchSwipeRef.current.horizontalLocked) {
+          const targetTime = computeSwipeSeekTime(
+            touchSwipeRef.current.startTime,
+            dx,
+            containerSize.width || containerRef.current?.clientWidth || 360,
+            duration,
+          );
+          touchSwipeRef.current.previewTime = targetTime;
+          setSwipePreview({
+            targetTime,
+            deltaSeconds: Math.round(targetTime - touchSwipeRef.current.startTime),
+          });
+        }
+      }
     }
   };
 
@@ -494,9 +625,23 @@ export function FaceTubeVideoPlayer({
       touchPinchRef.current.startDist = null;
     }
     if (e.touches.length === 0) {
-      if (touchPinchRef.current.moved) {
+      if (
+        touchSwipeRef.current.horizontalLocked &&
+        touchSwipeRef.current.previewTime !== null &&
+        videoRef.current
+      ) {
+        videoRef.current.currentTime = touchSwipeRef.current.previewTime;
+        setCurrentTime(touchSwipeRef.current.previewTime);
+        showControlsTemporarily();
+      }
+      if (touchPinchRef.current.moved || touchSwipeRef.current.horizontalLocked) {
         suppressNextClickRef.current = true;
       }
+      touchSwipeRef.current.active = false;
+      touchSwipeRef.current.horizontalLocked = false;
+      touchSwipeRef.current.verticalRejected = false;
+      touchSwipeRef.current.previewTime = null;
+      setSwipePreview(null);
       touchPinchRef.current.lastTouch = null;
       touchPinchRef.current.moved = false;
       setIsDragging(false);
@@ -508,22 +653,60 @@ export function FaceTubeVideoPlayer({
     if (videoRef.current.paused) {
       videoRef.current
         .play()
-        .then(() => setIsPlaying(true))
+        .then(() => {
+          setIsPlaying(true);
+          showControlsTemporarily(true);
+        })
         .catch((err) => {
           console.warn("Playback prevented:", err);
         });
     } else {
       videoRef.current.pause();
       setIsPlaying(false);
+      setShowControls(true);
     }
-  }, [cleanSrc]);
+  }, [cleanSrc, showControlsTemporarily]);
+
+  const skipBy = useCallback(
+    (deltaSeconds: number) => {
+      if (!videoRef.current) return;
+      const baseTime = videoRef.current.currentTime ?? currentTime;
+      const targetTime = clampSeekTime(
+        baseTime + deltaSeconds,
+        videoRef.current.duration || duration,
+      );
+      videoRef.current.currentTime = targetTime;
+      setCurrentTime(targetTime);
+      showControlsTemporarily();
+    },
+    [currentTime, duration, showControlsTemporarily],
+  );
 
   const handleStageClick = () => {
     if (suppressNextClickRef.current) {
       suppressNextClickRef.current = false;
       return;
     }
+    if (showToolsMenu) {
+      setShowToolsMenu(false);
+      return;
+    }
+    const isTouchTap = Date.now() - lastTouchTimeRef.current < 500;
+    if (isTouchTap) {
+      if (isPlaying) {
+        if (showControls) {
+          clearControlsTimer();
+          setShowControls(false);
+        } else {
+          showControlsTemporarily(true);
+        }
+      } else {
+        togglePlay();
+      }
+      return;
+    }
     togglePlay();
+    showControlsTemporarily();
   };
 
   const toggleMute = useCallback(() => {
@@ -535,7 +718,8 @@ export function FaceTubeVideoPlayer({
       }
       return nextMuted;
     });
-  }, []);
+    showControlsTemporarily();
+  }, [showControlsTemporarily]);
 
   const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVol = parseFloat(e.target.value);
@@ -546,24 +730,68 @@ export function FaceTubeVideoPlayer({
       videoRef.current.muted = shouldMute;
       setIsMuted(shouldMute);
     }
+    showControlsTemporarily();
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const targetTime = parseFloat(e.target.value);
+    const targetTime = clampSeekTime(parseFloat(e.target.value), duration);
     setCurrentTime(targetTime);
     if (videoRef.current) {
       videoRef.current.currentTime = targetTime;
     }
+    showControlsTemporarily();
   };
 
-  const toggleFullscreen = () => {
-    if (!containerRef.current) return;
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen?.().catch(console.error);
+  const toggleFullscreen = useCallback(() => {
+    const containerEl = containerRef.current as
+      | (HTMLDivElement & {
+          webkitRequestFullscreen?: () => Promise<void> | void;
+          mozRequestFullScreen?: () => Promise<void> | void;
+          msRequestFullscreen?: () => Promise<void> | void;
+        })
+      | null;
+    const videoEl = videoRef.current as
+      | (HTMLVideoElement & {
+          webkitEnterFullscreen?: () => void;
+          webkitExitFullscreen?: () => void;
+          webkitDisplayingFullscreen?: boolean;
+        })
+      | null;
+    const doc = document as Document & {
+      webkitFullscreenElement?: Element | null;
+      mozFullScreenElement?: Element | null;
+      msFullscreenElement?: Element | null;
+      webkitExitFullscreen?: () => Promise<void> | void;
+    };
+
+    if (!containerEl) return;
+    const activeFsElement =
+      document.fullscreenElement ||
+      doc.webkitFullscreenElement ||
+      doc.mozFullScreenElement ||
+      doc.msFullscreenElement;
+
+    if (!activeFsElement && !videoEl?.webkitDisplayingFullscreen) {
+      if (containerEl.requestFullscreen) {
+        containerEl.requestFullscreen().catch(() => {
+          videoEl?.webkitEnterFullscreen?.();
+        });
+      } else if (containerEl.webkitRequestFullscreen) {
+        containerEl.webkitRequestFullscreen();
+      } else if (videoEl?.webkitEnterFullscreen) {
+        videoEl.webkitEnterFullscreen();
+      }
     } else {
-      document.exitFullscreen?.().catch(console.error);
+      if (document.exitFullscreen) {
+        document.exitFullscreen().catch(console.error);
+      } else if (doc.webkitExitFullscreen) {
+        doc.webkitExitFullscreen();
+      } else if (videoEl?.webkitExitFullscreen) {
+        videoEl.webkitExitFullscreen();
+      }
     }
-  };
+    showControlsTemporarily();
+  }, [showControlsTemporarily]);
 
   const cyclePlaybackSpeed = () => {
     const speeds = [1, 1.25, 1.5, 2];
@@ -573,6 +801,7 @@ export function FaceTubeVideoPlayer({
     if (videoRef.current) {
       videoRef.current.playbackRate = nextSpeed;
     }
+    showControlsTemporarily();
   };
 
   const retryPlayback = () => {
@@ -627,7 +856,7 @@ export function FaceTubeVideoPlayer({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [togglePlay, toggleMute, duration]);
+  }, [togglePlay, toggleMute, toggleFullscreen, duration]);
 
   // Case 1: Empty / Missing video URL
   if (!cleanSrc) {
@@ -721,17 +950,56 @@ export function FaceTubeVideoPlayer({
   }
 
   const mimeType = getMimeType(cleanSrc);
-  const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const progressPercent =
+    duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
   const shouldUseFittedBox = Boolean(fittedBox && (isFullscreen || isRotated || zoom > 1));
+  const controlsVisible = !isPlaying || showControls || showToolsMenu;
+  const hasActiveTransform = zoom > MIN_ZOOM || isRotated || playbackSpeed !== 1;
+  const formattedDuration = duration > 0 ? formatTime(duration) : initialDurationStr || "0:00";
+
+  const renderTimelineScrubber = (compact = false) => (
+    <div
+      className={`relative group/timeline flex items-center cursor-pointer ${
+        compact ? "flex-1 h-7" : "w-full h-5"
+      }`}
+    >
+      <input
+        type="range"
+        min={0}
+        max={duration || 100}
+        step={0.1}
+        value={currentTime}
+        onChange={handleSeek}
+        aria-label="Seek video timeline"
+        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+      />
+      <div
+        className={`w-full rounded-full bg-white/30 overflow-hidden transition-all ${
+          compact ? "h-1 group-hover/timeline:h-1.5" : "h-1.5 group-hover/timeline:h-2"
+        }`}
+      >
+        <div
+          className="h-full bg-brand transition-all duration-75"
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+      <div
+        className={`absolute rounded-full bg-brand ring-2 ring-white shadow-md -translate-x-1/2 pointer-events-none transition-transform group-hover/timeline:scale-125 ${
+          compact ? "h-3 w-3" : "h-3.5 w-3.5"
+        }`}
+        style={{ left: `${progressPercent}%` }}
+      />
+    </div>
+  );
 
   return (
     <div
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      onMouseLeave={() => isPlaying && setShowControls(false)}
+      onMouseLeave={() => isPlaying && !showToolsMenu && setShowControls(false)}
       style={intrinsicContainerStyle ?? undefined}
       className={`group relative ${
-        intrinsicContainerStyle ? "mx-auto rounded-2xl" : containerAspectClass
+        intrinsicContainerStyle ? "mx-auto rounded-none sm:rounded-2xl" : containerAspectClass
       } overflow-hidden bg-black shadow-lift select-none`}
     >
       {/* Centered Video Stage: stretches cleanly to container bounds (avoids height:auto % collapse) */}
@@ -869,31 +1137,98 @@ export function FaceTubeVideoPlayer({
         </div>
       )}
 
-      {/* Center Big Play overlay button (when paused and not loading) */}
-      {!isPlaying && !isLoading && !isBuffering && (
-        <div className="pointer-events-none absolute inset-0 grid place-items-center bg-black/20 z-10 transition">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              togglePlay();
-            }}
-            aria-label="Play video"
-            className="pointer-events-auto grid h-20 w-20 place-items-center rounded-full bg-brand text-brand-foreground shadow-lift transition hover:scale-110 active:scale-95 cursor-pointer"
-          >
-            <Play className="h-9 w-9 translate-x-[2px] fill-current" />
-          </button>
+      {/* Horizontal Swipe-to-Seek live badge */}
+      {swipePreview && (
+        <div className="pointer-events-none absolute inset-0 grid place-items-center z-25">
+          <div className="rounded-full bg-black/75 px-4 py-1.5 text-xs font-bold text-white backdrop-blur-md shadow-lg border border-white/15 tabular-nums">
+            {formatTime(swipePreview.targetTime)}{" "}
+            <span className="text-brand-light ml-1">
+              (
+              {swipePreview.deltaSeconds >= 0
+                ? `+${swipePreview.deltaSeconds}s`
+                : `${swipePreview.deltaSeconds}s`}
+              )
+            </span>
+          </div>
         </div>
       )}
 
-      {/* Top Overlay Header: Title & Category Pill */}
+      {/* Center Transport Cluster: -10s / Play-Pause / +10s (Screenshot 3 style) */}
+      {!isLoading && !isBuffering && (
+        <div
+          className={`pointer-events-none absolute inset-0 flex items-center justify-center bg-black/25 z-10 transition-opacity duration-200 ${
+            controlsVisible ? "opacity-100" : "opacity-0"
+          }`}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className={`flex items-center justify-center gap-5 sm:gap-8 ${
+              controlsVisible ? "pointer-events-auto" : "pointer-events-none"
+            }`}
+          >
+            {/* Skip Back 10s */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                skipBy(-10);
+              }}
+              aria-label="Skip back 10 seconds"
+              title="Rewind 10s"
+              className="relative grid h-11 w-11 sm:h-12 sm:w-12 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/75 active:scale-95 cursor-pointer"
+            >
+              <RotateCcw className="h-5 w-5 sm:h-6 sm:w-6" />
+              <span className="absolute text-[9px] font-extrabold leading-none tracking-tighter translate-y-[0.5px]">
+                10
+              </span>
+            </button>
+
+            {/* Primary Play / Pause */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                togglePlay();
+              }}
+              aria-label={isPlaying ? "Pause video" : "Play video"}
+              className="grid h-14 w-14 sm:h-16 sm:w-16 place-items-center rounded-full bg-black/55 text-white backdrop-blur-md shadow-lift ring-1 ring-white/20 transition hover:bg-brand hover:ring-brand active:scale-95 cursor-pointer"
+            >
+              {isPlaying ? (
+                <Pause className="h-6 w-6 sm:h-7 sm:w-7 fill-current" />
+              ) : (
+                <Play className="h-6 w-6 sm:h-7 sm:w-7 translate-x-[1.5px] fill-current" />
+              )}
+            </button>
+
+            {/* Skip Forward 10s */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                skipBy(10);
+              }}
+              aria-label="Skip forward 10 seconds"
+              title="Forward 10s"
+              className="relative grid h-11 w-11 sm:h-12 sm:w-12 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/75 active:scale-95 cursor-pointer"
+            >
+              <RotateCw className="h-5 w-5 sm:h-6 sm:w-6" />
+              <span className="absolute text-[9px] font-extrabold leading-none tracking-tighter translate-y-[0.5px]">
+                10
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Top Overlay Header: Back, Title, FaceTube Branding & Mobile Settings/Mute */}
       <div
-        className={`absolute inset-x-0 top-0 bg-gradient-to-b from-black/80 via-black/30 to-transparent p-4 z-20 transition-opacity duration-300 ${
-          showControls ? "opacity-100" : "opacity-0 pointer-events-none"
+        onClick={(e) => e.stopPropagation()}
+        className={`absolute inset-x-0 top-0 bg-gradient-to-b from-black/75 via-black/25 to-transparent px-2.5 py-2 sm:p-4 z-20 transition-opacity duration-200 ${
+          controlsVisible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
         }`}
       >
-        <div className="flex items-center justify-between text-white gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
+        <div className="flex items-center justify-between text-white gap-2 sm:gap-3">
+          <div className="flex items-center gap-2 sm:gap-2.5 min-w-0 flex-1">
             {onBack && (
               <button
                 type="button"
@@ -901,208 +1236,372 @@ export function FaceTubeVideoPlayer({
                   e.stopPropagation();
                   onBack();
                 }}
-                className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-black/60 text-white backdrop-blur-md transition hover:bg-black/85 active:scale-90 cursor-pointer pointer-events-auto"
+                className="grid h-10 w-10 sm:h-9 sm:w-9 shrink-0 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
                 aria-label="Back to previous page"
                 title="Back to previous page"
               >
-                <ArrowLeft className="h-4 w-4" />
+                <ArrowLeft className="h-4 w-4 sm:h-4 sm:w-4" />
               </button>
             )}
-            <p className="text-sm font-bold truncate max-w-md drop-shadow">{title}</p>
+            <p className="text-xs sm:text-sm font-bold truncate max-w-[160px] xs:max-w-xs sm:max-w-md drop-shadow">
+              {title}
+            </p>
+            <span className="hidden sm:inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold bg-white/20 backdrop-blur-md px-2.5 py-0.5 rounded-full">
+              <Sparkles className="h-3 w-3 text-brand" />
+              FaceTube Player
+            </span>
           </div>
-          <span className="inline-flex shrink-0 items-center gap-1 text-[11px] font-semibold bg-white/20 backdrop-blur-md px-2.5 py-0.5 rounded-full">
-            <Sparkles className="h-3 w-3 text-brand" />
-            FaceTube Player
-          </span>
-        </div>
-      </div>
 
-      {/* Bottom Controls Bar */}
-      <div
-        className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/60 to-transparent px-3 sm:px-4 pb-3 pt-8 z-20 transition-opacity duration-300 ${
-          showControls ? "opacity-100" : "opacity-0 pointer-events-none"
-        }`}
-      >
-        {/* Seek timeline scrubber */}
-        <div className="relative group/timeline flex items-center h-4 cursor-pointer">
-          <input
-            type="range"
-            min={0}
-            max={duration || 100}
-            step={0.1}
-            value={currentTime}
-            onChange={handleSeek}
-            aria-label="Seek video timeline"
-            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-          />
-          {/* Timeline background track */}
-          <div className="w-full h-1.5 rounded-full bg-white/25 overflow-hidden transition-all group-hover/timeline:h-2">
-            <div
-              className="h-full bg-brand transition-all duration-75"
-              style={{ width: `${progressPercent}%` }}
-            />
-          </div>
-          {/* Thumb marker */}
-          <div
-            className="absolute h-3.5 w-3.5 rounded-full bg-brand ring-2 ring-white shadow-md -translate-x-1/2 pointer-events-none transition-transform group-hover/timeline:scale-125"
-            style={{ left: `${progressPercent}%` }}
-          />
-        </div>
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <span className="inline-flex sm:hidden shrink-0 items-center gap-1 text-[10px] font-semibold bg-black/45 backdrop-blur-md px-2 py-0.5 rounded-full">
+              <Sparkles className="h-2.5 w-2.5 text-brand" />
+              FaceTube
+            </span>
 
-        {/* Buttons Row */}
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1.5 text-white">
-          <div className="flex items-center gap-1.5 sm:gap-2.5">
-            {/* Play/Pause toggle */}
+            {/* Settings / Transform Tools Menu Trigger */}
             <button
               type="button"
-              onClick={togglePlay}
-              aria-label={isPlaying ? "Pause video" : "Play video"}
-              className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowToolsMenu((prev) => !prev);
+                showControlsTemporarily();
+              }}
+              aria-label="Player settings and transform tools"
+              aria-expanded={showToolsMenu}
+              title="Zoom, Rotation & Speed"
+              className="relative grid h-10 w-10 sm:h-9 sm:w-9 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
             >
-              {isPlaying ? (
-                <Pause className="h-4 w-4 fill-current" />
-              ) : (
-                <Play className="h-4 w-4 fill-current translate-x-[1px]" />
+              <Settings className="h-4 w-4" />
+              {hasActiveTransform && (
+                <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-brand ring-1 ring-white" />
               )}
             </button>
 
-            {/* Volume Control */}
-            <div className="flex items-center gap-1.5 group/vol">
-              <button
-                type="button"
-                onClick={toggleMute}
-                aria-label={isMuted ? "Unmute" : "Mute"}
-                className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
-              >
-                {isMuted || volume === 0 ? (
-                  <VolumeX className="h-4 w-4 text-red-400" />
-                ) : (
-                  <Volume2 className="h-4 w-4" />
-                )}
-              </button>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={isMuted ? 0 : volume}
-                onChange={handleVolumeChange}
-                aria-label="Volume slider"
-                className="w-16 h-1 accent-brand rounded-lg cursor-pointer transition-all hidden sm:inline-block"
-              />
-            </div>
+            {/* Top-right Mute toggle (Screenshot 3 mobile placement) */}
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleMute();
+              }}
+              aria-label={isMuted ? "Unmute" : "Mute"}
+              className="grid sm:hidden h-10 w-10 place-items-center rounded-full bg-black/50 text-white backdrop-blur-md transition hover:bg-black/80 active:scale-90 cursor-pointer"
+            >
+              {isMuted || volume === 0 ? (
+                <VolumeX className="h-4 w-4 text-red-400" />
+              ) : (
+                <Volume2 className="h-4 w-4" />
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
 
-            {/* Time Display */}
-            <div className="text-xs tabular-nums text-zinc-300 font-mono">
-              <span>{formatTime(currentTime)}</span>
-              <span className="mx-1 text-zinc-500">/</span>
-              <span>{duration > 0 ? formatTime(duration) : initialDurationStr || "0:00"}</span>
-            </div>
+      {/* Compact Player Settings & Transform Drawer (Zoom / Rotation / Playback Speed) */}
+      {showToolsMenu && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="absolute bottom-12 right-2.5 sm:bottom-16 sm:right-4 z-30 w-[min(268px,calc(100%-20px))] max-h-[calc(100%-3.5rem)] overflow-y-auto rounded-xl border border-white/15 bg-zinc-950/92 p-2.5 text-white shadow-2xl backdrop-blur-md"
+          role="dialog"
+          aria-label="Player transform and playback settings"
+        >
+          <div className="mb-2 flex items-center justify-between border-b border-white/10 pb-1.5">
+            <span className="text-[11px] font-bold tracking-wide text-zinc-200">
+              Player Controls
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowToolsMenu(false)}
+              aria-label="Close player settings"
+              className="grid h-6 w-6 place-items-center rounded-full hover:bg-white/15 transition cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
 
-          <div className="ml-auto flex flex-wrap items-center gap-1 sm:gap-1.5">
-            {/* Zoom Controls */}
-            <div
-              className="flex items-center rounded-md bg-white/10 p-0.5"
-              role="group"
-              aria-label="Video zoom controls"
-            >
-              <button
-                type="button"
-                onClick={handleZoomOut}
-                disabled={zoom <= MIN_ZOOM}
-                title="Zoom out"
-                aria-label="Zoom out"
-                className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+          <div className="space-y-2 text-xs">
+            {/* Zoom Row */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-zinc-300">Zoom</span>
+              <div
+                className="flex items-center rounded-lg bg-white/10 p-0.5"
+                role="group"
+                aria-label="Mobile video zoom controls"
               >
-                <ZoomOut className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={handleResetZoom}
-                disabled={zoom <= MIN_ZOOM}
-                title={zoom > MIN_ZOOM ? "Reset zoom to 100%" : "Zoom: 100%"}
-                aria-label="Reset zoom"
-                className={`px-1.5 h-7 text-[11px] font-mono font-bold rounded transition ${
-                  zoom > MIN_ZOOM
-                    ? "text-white bg-brand/80 hover:bg-brand cursor-pointer"
-                    : "text-zinc-300 disabled:opacity-75 cursor-default"
-                }`}
-              >
-                {Math.round(zoom * 100)}%
-              </button>
-              <button
-                type="button"
-                onClick={handleZoomIn}
-                disabled={zoom >= MAX_ZOOM}
-                title="Zoom in"
-                aria-label="Zoom in"
-                className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
-              >
-                <ZoomIn className="h-3.5 w-3.5" />
-              </button>
+                <button
+                  type="button"
+                  onClick={handleZoomOut}
+                  disabled={zoom <= MIN_ZOOM}
+                  aria-label="Zoom out"
+                  className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+                >
+                  <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetZoom}
+                  disabled={zoom <= MIN_ZOOM}
+                  aria-label="Reset zoom"
+                  className={`px-2 h-8 text-[11px] font-mono font-bold rounded transition ${
+                    zoom > MIN_ZOOM
+                      ? "text-white bg-brand/85 hover:bg-brand cursor-pointer"
+                      : "text-zinc-300 disabled:opacity-75 cursor-default"
+                  }`}
+                >
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button
+                  type="button"
+                  onClick={handleZoomIn}
+                  disabled={zoom >= MAX_ZOOM}
+                  aria-label="Zoom in"
+                  className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+                >
+                  <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
 
-            {/* Rotation Controls */}
-            <div
-              className="flex items-center rounded-md bg-white/10 p-0.5"
-              role="group"
-              aria-label="Video rotation controls"
-            >
-              <button
-                type="button"
-                onClick={handleRotateLeft}
-                title="Rotate left 90°"
-                aria-label="Rotate left 90 degrees"
-                className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
+            {/* Rotation Row */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-zinc-300">Rotate</span>
+              <div
+                className="flex items-center rounded-lg bg-white/10 p-0.5"
+                role="group"
+                aria-label="Mobile video rotation controls"
               >
-                <RotateCcw className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={handleResetRotation}
-                disabled={!isRotated}
-                title={isRotated ? "Reset rotation to 0°" : "Rotation: 0°"}
-                aria-label="Reset rotation"
-                className={`px-1.5 h-7 text-[11px] font-mono font-bold rounded transition ${
-                  isRotated
-                    ? "text-white bg-brand/80 hover:bg-brand cursor-pointer"
-                    : "text-zinc-300 disabled:opacity-75 cursor-default"
-                }`}
-              >
-                {normalizedRotation}°
-              </button>
-              <button
-                type="button"
-                onClick={handleRotateRight}
-                title="Rotate right 90°"
-                aria-label="Rotate right 90 degrees"
-                className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
-              >
-                <RotateCw className="h-3.5 w-3.5" />
-              </button>
+                <button
+                  type="button"
+                  onClick={handleRotateLeft}
+                  aria-label="Rotate left 90 degrees"
+                  className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetRotation}
+                  disabled={!isRotated}
+                  aria-label="Reset rotation"
+                  className={`px-2 h-8 text-[11px] font-mono font-bold rounded transition ${
+                    isRotated
+                      ? "text-white bg-brand/85 hover:bg-brand cursor-pointer"
+                      : "text-zinc-300 disabled:opacity-75 cursor-default"
+                  }`}
+                >
+                  {normalizedRotation}°
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRotateRight}
+                  aria-label="Rotate right 90 degrees"
+                  className="grid h-8 w-8 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
 
-            {/* Playback Speed cycle */}
-            <button
-              type="button"
-              onClick={cyclePlaybackSpeed}
-              title="Playback speed"
-              aria-label={`Playback speed: ${playbackSpeed}x`}
-              className="rounded-md bg-white/10 px-2 py-1 text-xs font-mono font-bold hover:bg-white/20 transition cursor-pointer"
-            >
-              {playbackSpeed}x
-            </button>
+            {/* Playback Speed Row */}
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-zinc-300">Speed</span>
+              <button
+                type="button"
+                onClick={cyclePlaybackSpeed}
+                aria-label={`Playback speed: ${playbackSpeed}x`}
+                className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-mono font-bold hover:bg-white/25 transition cursor-pointer"
+              >
+                {playbackSpeed}x
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
-            {/* Fullscreen toggle */}
-            <button
-              type="button"
-              onClick={toggleFullscreen}
-              aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
-              className="grid h-8 w-8 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
-            >
-              {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
-            </button>
+      {/* Bottom Controls Bar */}
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent px-2.5 sm:px-4 pb-1.5 sm:pb-3 pt-6 sm:pt-8 z-20 transition-opacity duration-200 ${
+          controlsVisible ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"
+        }`}
+      >
+        {/* Mobile (<640px) Single-Line Scrubber Row matching Screenshot 3 */}
+        <div className="flex sm:hidden items-center gap-2 text-white">
+          <span className="text-[11px] tabular-nums font-mono text-white/95 shrink-0">
+            {formatTime(currentTime)}
+          </span>
+          {renderTimelineScrubber(true)}
+          <span className="text-[11px] tabular-nums font-mono text-white/85 shrink-0">
+            {formattedDuration}
+          </span>
+          <button
+            type="button"
+            onClick={toggleFullscreen}
+            aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+            className="grid h-10 w-10 -mr-1.5 shrink-0 place-items-center rounded-full hover:bg-white/20 active:scale-90 transition cursor-pointer"
+          >
+            {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
+          </button>
+        </div>
+
+        {/* Tablet & Desktop (>=640px) Stacked Scrubber + Full Controls Bar */}
+        <div className="hidden sm:block">
+          {renderTimelineScrubber(false)}
+
+          <div className="mt-1.5 flex items-center justify-between gap-x-2 text-white">
+            <div className="flex items-center gap-2 min-w-0">
+              {/* Play/Pause toggle */}
+              <button
+                type="button"
+                onClick={togglePlay}
+                aria-label={isPlaying ? "Pause video" : "Play video"}
+                className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+              >
+                {isPlaying ? (
+                  <Pause className="h-4 w-4 fill-current" />
+                ) : (
+                  <Play className="h-4 w-4 fill-current translate-x-[1px]" />
+                )}
+              </button>
+
+              {/* Volume Control */}
+              <div className="flex items-center gap-1.5 group/vol">
+                <button
+                  type="button"
+                  onClick={toggleMute}
+                  aria-label={isMuted ? "Unmute" : "Mute"}
+                  className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+                >
+                  {isMuted || volume === 0 ? (
+                    <VolumeX className="h-4 w-4 text-red-400" />
+                  ) : (
+                    <Volume2 className="h-4 w-4" />
+                  )}
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={isMuted ? 0 : volume}
+                  onChange={handleVolumeChange}
+                  aria-label="Volume slider"
+                  className="w-16 md:w-20 h-1 accent-brand rounded-lg cursor-pointer transition-all"
+                />
+              </div>
+
+              {/* Time Display */}
+              <div className="text-xs tabular-nums text-zinc-200 font-mono shrink-0">
+                <span>{formatTime(currentTime)}</span>
+                <span className="mx-1 text-zinc-500">/</span>
+                <span>{formattedDuration}</span>
+              </div>
+            </div>
+
+            <div className="ml-auto flex items-center gap-1.5 shrink-0">
+              {/* Zoom Controls */}
+              <div
+                className="flex items-center rounded-md bg-white/10 p-0.5"
+                role="group"
+                aria-label="Video zoom controls"
+              >
+                <button
+                  type="button"
+                  onClick={handleZoomOut}
+                  disabled={zoom <= MIN_ZOOM}
+                  title="Zoom out"
+                  aria-label="Zoom out"
+                  className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+                >
+                  <ZoomOut className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetZoom}
+                  disabled={zoom <= MIN_ZOOM}
+                  title={zoom > MIN_ZOOM ? "Reset zoom to 100%" : "Zoom: 100%"}
+                  aria-label="Reset zoom"
+                  className={`px-1.5 h-7 text-[11px] font-mono font-bold rounded transition ${
+                    zoom > MIN_ZOOM
+                      ? "text-white bg-brand/80 hover:bg-brand cursor-pointer"
+                      : "text-zinc-300 disabled:opacity-75 cursor-default"
+                  }`}
+                >
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button
+                  type="button"
+                  onClick={handleZoomIn}
+                  disabled={zoom >= MAX_ZOOM}
+                  title="Zoom in"
+                  aria-label="Zoom in"
+                  className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none transition cursor-pointer"
+                >
+                  <ZoomIn className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {/* Rotation Controls */}
+              <div
+                className="flex items-center rounded-md bg-white/10 p-0.5"
+                role="group"
+                aria-label="Video rotation controls"
+              >
+                <button
+                  type="button"
+                  onClick={handleRotateLeft}
+                  title="Rotate left 90°"
+                  aria-label="Rotate left 90 degrees"
+                  className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetRotation}
+                  disabled={!isRotated}
+                  title={isRotated ? "Reset rotation to 0°" : "Rotation: 0°"}
+                  aria-label="Reset rotation"
+                  className={`px-1.5 h-7 text-[11px] font-mono font-bold rounded transition ${
+                    isRotated
+                      ? "text-white bg-brand/80 hover:bg-brand cursor-pointer"
+                      : "text-zinc-300 disabled:opacity-75 cursor-default"
+                  }`}
+                >
+                  {normalizedRotation}°
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRotateRight}
+                  title="Rotate right 90°"
+                  aria-label="Rotate right 90 degrees"
+                  className="grid h-7 w-7 place-items-center rounded hover:bg-white/15 transition cursor-pointer"
+                >
+                  <RotateCw className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
+              {/* Playback Speed cycle */}
+              <button
+                type="button"
+                onClick={cyclePlaybackSpeed}
+                title="Playback speed"
+                aria-label={`Playback speed: ${playbackSpeed}x`}
+                className="rounded-md bg-white/10 px-2 h-8 text-xs font-mono font-bold hover:bg-white/20 transition cursor-pointer"
+              >
+                {playbackSpeed}x
+              </button>
+
+              {/* Fullscreen toggle */}
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                className="grid h-9 w-9 place-items-center rounded-full hover:bg-white/20 transition cursor-pointer"
+              >
+                {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
+              </button>
+            </div>
           </div>
         </div>
       </div>

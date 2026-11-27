@@ -117,9 +117,120 @@ export function computeFittedVideoBox(
 }
 
 /**
+ * Clamps a target playback time safely within [0, duration].
+ */
+export function clampSeekTime(targetSeconds: number, durationSeconds: number): number {
+  if (!Number.isFinite(targetSeconds)) return 0;
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+    return Math.max(0, targetSeconds);
+  }
+  return Math.max(0, Math.min(durationSeconds, targetSeconds));
+}
+
+/**
+ * Maps a horizontal touch swipe delta (in pixels) across a player container
+ * to a clamped playback seek time without NaN or out-of-range jumps.
+ */
+export function computeSwipeSeekTime(
+  startTime: number,
+  deltaX: number,
+  containerWidth: number,
+  duration: number,
+): number {
+  if (!Number.isFinite(duration) || duration <= 0) return clampSeekTime(startTime, duration);
+  const safeWidth = Math.max(240, Number.isFinite(containerWidth) ? containerWidth : 360);
+  const fullSweepSeconds = Math.min(60, Math.max(15, duration));
+  const deltaSeconds = (deltaX / safeWidth) * fullSweepSeconds;
+  return clampSeekTime(startTime + deltaSeconds, duration);
+}
+
+export interface ResponsivePlayerViewportBox {
+  viewportWidth: number;
+  viewportHeight: number;
+  containerWidth: number;
+  containerHeight: number;
+  videoWidth: number;
+  videoHeight: number;
+  isEdgeToEdgeMobile: boolean;
+}
+
+/**
+ * Computes the Watch page player frame dimensions across mobile, tablet, laptop,
+ * desktop, and fullscreen viewports while preserving intrinsic video aspect ratio.
+ */
+export function computeResponsivePlayerDimensions(
+  viewportWidth: number,
+  viewportHeight: number,
+  videoW: number,
+  videoH: number,
+  rotationDeg = 0,
+  isFullscreen = false,
+  aspectMode: PlayerAspectMode = "standard",
+): ResponsivePlayerViewportBox | null {
+  if (viewportWidth <= 0 || viewportHeight <= 0) return null;
+
+  const isMobile = viewportWidth < 640;
+  const isDesktopTwoCol = viewportWidth >= 1024;
+
+  let availableWidth = viewportWidth;
+  if (!isFullscreen) {
+    if (isMobile) {
+      availableWidth = viewportWidth;
+    } else if (!isDesktopTwoCol) {
+      availableWidth = Math.max(280, viewportWidth - 48);
+    } else {
+      const mainWidth = Math.min(viewportWidth, 1600) - 48;
+      availableWidth = Math.max(320, mainWidth - 400 - 32);
+    }
+  }
+
+  const dims = resolveEffectiveVideoDimensions(videoW, videoH, rotationDeg);
+  const targetRatio = dims ? dims.aspectRatio : aspectMode === "short" ? 9 / 16 : 16 / 9;
+
+  let containerWidth = availableWidth;
+  let containerHeight = containerWidth / targetRatio;
+
+  if (isFullscreen) {
+    containerWidth = viewportWidth;
+    containerHeight = viewportHeight;
+  } else {
+    const maxIntrinsicHeight = viewportHeight * 0.8;
+    if (dims || aspectMode === "short") {
+      if (containerHeight > maxIntrinsicHeight) {
+        containerHeight = maxIntrinsicHeight;
+        containerWidth = containerHeight * targetRatio;
+      }
+      if (aspectMode === "short" && !dims) {
+        containerWidth = Math.min(420, containerWidth);
+        containerHeight = containerWidth / targetRatio;
+      }
+    }
+  }
+
+  const fitted = computeFittedVideoBox(
+    containerWidth,
+    containerHeight,
+    videoW,
+    videoH,
+    rotationDeg,
+    aspectMode,
+  );
+
+  return {
+    viewportWidth,
+    viewportHeight,
+    containerWidth,
+    containerHeight,
+    videoWidth: fitted ? fitted.visualWidth : containerWidth,
+    videoHeight: fitted ? fitted.visualHeight : containerHeight,
+    isEdgeToEdgeMobile: isMobile && !isFullscreen,
+  };
+}
+
+/**
  * Returns responsive container classes for FaceTubeVideoPlayer:
  * - Fullscreen fills the viewport cleanly without locking an external aspect box
- * - Normal ("standard") videos use responsive 16:9 (`aspect-video w-full`)
+ * - Normal ("standard") videos use responsive 16:9 (`aspect-video w-full`) with edge-to-edge mobile framing
  * - Shorts ("short") retain vertical 9:16 presentation across desktop, tablet, and mobile
  */
 export function getPlayerContainerClass(
@@ -130,9 +241,9 @@ export function getPlayerContainerClass(
     return "h-full w-full rounded-none";
   }
   if (aspectMode === "short") {
-    return "mx-auto aspect-[9/16] w-[min(420px,calc(80vh*9/16),100%)] rounded-2xl";
+    return "mx-auto aspect-[9/16] w-[min(420px,calc(80vh*9/16),100%)] rounded-none sm:rounded-2xl";
   }
-  return "aspect-video w-full rounded-2xl";
+  return "aspect-video w-full rounded-none sm:rounded-2xl";
 }
 
 /**
