@@ -22,6 +22,7 @@ import {
   type UserWallet,
   type LedgerTransaction,
 } from "@/lib/ledger-service";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
 
 export const Route = createFileRoute("/withdrawal-balance")({
   head: () => ({
@@ -39,7 +40,7 @@ export const Route = createFileRoute("/withdrawal-balance")({
 
 export function WithdrawalBalancePage() {
   const { user, profile, dbUser } = useAuth();
-  const userId = profile?.user_id || dbUser?.user_id || user?.email?.split("@")[0] || "FT483921";
+  const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
   const [wallet, setWallet] = useState<UserWallet | null>(null);
   const [withdrawalTxs, setWithdrawalTxs] = useState<LedgerTransaction[]>([]);
@@ -47,6 +48,14 @@ export function WithdrawalBalancePage() {
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
+    if (!userId) {
+      setWallet(null);
+      setWithdrawalTxs([]);
+      setDailyWithdrawn(0);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     try {
       const [w, allTxs, daily] = await Promise.all([
@@ -87,7 +96,7 @@ export function WithdrawalBalancePage() {
               </h1>
               <p className="text-sm text-muted-foreground">
                 History of completed payouts, settlement receipts, and daily withdrawal quota
-                tracking for User {userId}
+                tracking for {userId ? `User ${userId}` : "your account"}
               </p>
             </div>
           </div>
@@ -223,7 +232,8 @@ export function WithdrawalBalancePage() {
                 ) : (
                   <tr>
                     <td colSpan={6} className="px-4 py-8 text-center text-muted-foreground">
-                      No withdrawal records yet for User {userId}. Request a withdrawal above.
+                      No withdrawal records yet for {userId ? `User ${userId}` : "your account"}.
+                      Request a withdrawal above.
                     </td>
                   </tr>
                 )}

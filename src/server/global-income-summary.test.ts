@@ -6,6 +6,24 @@ import path from "node:path";
 import { handleApiRequest, resetInMemoryStore } from "./api-handler";
 import { resetPersistentPremiumState } from "./payments";
 import { setMysqlPoolForTesting } from "./mysql";
+import { api } from "../lib/api";
+import {
+  calculateTotalAdEarnings,
+  deduplicateGlobalIncomeTransactions,
+  extractGlobalIncomeEntryMeta,
+  getDailyWithdrawnAmount,
+  getGlobalIncomePaymentGroupKey,
+  getGlobalIncomeSummary,
+  getUserLedger,
+  getUserWallet,
+  groupGlobalIncomeTransactions,
+  paginateGroupedGlobalIncomeEntries,
+  resolveGlobalIncomeSourceMember,
+  resolveGroupedGlobalIncomeStatus,
+  sanitizeLedgerMemberText,
+  type LedgerTransaction,
+} from "../lib/ledger-service";
+import { resolveAuthenticatedUserId } from "../lib/video-service";
 
 interface MockAuthSession {
   token: string;
@@ -1082,5 +1100,644 @@ describe("FaceTube Task 2: Backend Global Income Summary Tests", () => {
       false,
       "global-income.tsx must omit poolAvgPerCreator completely",
     );
+  });
+});
+
+describe("Global Income per-video ledger deduplication and display metadata", () => {
+  const makeGlobalTx = (
+    overrides: Partial<LedgerTransaction> & { transactionId: string },
+  ): LedgerTransaction => ({
+    id: overrides.id ?? overrides.transactionId,
+    userId: "FT483921",
+    sourceUserId: "FT999001",
+    sourceUserName: "Uploader Creator",
+    incomeType: "global_income",
+    amount: 0.14,
+    status: "settled",
+    specialTag: "NORMAL_PREMIUM",
+    description: "Global Pool share",
+    createdAt: "2026-11-26T10:00:00.000Z",
+    isStale: false,
+    ...overrides,
+  });
+
+  it("extracts distinct rewardedVideoId and shared sourcePaymentId for legitimate per-video payouts from the same payment", () => {
+    const txs = [
+      makeGlobalTx({
+        transactionId: "TX_GLB_pay_Rzp123_vid_1",
+        videoId: "vid_1",
+        description: "Global Pool 50% share (Normal Premium ₹3.00 / 21 videos) for video #vid_1",
+      }),
+      makeGlobalTx({
+        transactionId: "TX_GLB_pay_Rzp123_vid_2",
+        videoId: "vid_2",
+        description: "Global Pool 50% share (Normal Premium ₹3.00 / 21 videos) for video #vid_2",
+      }),
+      makeGlobalTx({
+        transactionId: "TX_GLB_pay_Rzp123_vid_3",
+        videoId: "vid_3",
+        description: "Global Pool 50% share (Normal Premium ₹3.00 / 21 videos) for video #vid_3",
+      }),
+    ];
+
+    const metas = txs.map((tx) => extractGlobalIncomeEntryMeta(tx));
+    assert.deepEqual(
+      metas.map((m) => m.rewardedVideoId),
+      ["vid_1", "vid_2", "vid_3"],
+    );
+    assert.deepEqual(
+      metas.map((m) => m.sourcePaymentId),
+      ["pay_Rzp123", "pay_Rzp123", "pay_Rzp123"],
+    );
+
+    // Fallback when videoId field is omitted but description has `for video #<id>`
+    const fallbackMeta = extractGlobalIncomeEntryMeta(
+      makeGlobalTx({
+        transactionId: "TX_GLB_pay_live_999_vid_alpha_7",
+        description: "Global Pool share for video #vid_alpha_7 (Premium Video #12)",
+      }),
+    );
+    assert.equal(fallbackMeta.rewardedVideoId, "vid_alpha_7");
+    assert.equal(fallbackMeta.sourcePaymentId, "pay_live_999");
+    assert.equal(fallbackMeta.poolVideoNumber, "12");
+
+    // Settlement batch & reserve formats
+    const settleMeta = extractGlobalIncomeEntryMeta(
+      makeGlobalTx({
+        transactionId: "TX_GLB_SETTLE_batch_2026_01_vid_9",
+        videoId: "vid_9",
+      }),
+    );
+    assert.equal(settleMeta.rewardedVideoId, "vid_9");
+    assert.equal(settleMeta.settlementBatchId, "batch_2026_01");
+
+    const reserveMeta = extractGlobalIncomeEntryMeta(
+      makeGlobalTx({
+        transactionId: "TX_GLB_RESERVE_pay_Rzp777",
+        status: "pending",
+      }),
+    );
+    assert.equal(reserveMeta.sourcePaymentId, "pay_Rzp777");
+  });
+
+  it("preserves 3 legitimate per-video payouts while collapsing case-variant duplicates, stale rows, and non-global rows", () => {
+    const ledger: LedgerTransaction[] = [
+      makeGlobalTx({ transactionId: "TX_GLB_pay_Rzp123_vid_1", videoId: "vid_1" }),
+      makeGlobalTx({ transactionId: "tx_glb_pay_rzp123_vid_1", videoId: "vid_1" }), // case-variant duplicate
+      makeGlobalTx({ transactionId: "TX_GLB_pay_Rzp123_vid_2", videoId: "vid_2" }),
+      makeGlobalTx({ transactionId: "TX_GLB_pay_Rzp123_vid_3", videoId: "vid_3" }),
+      makeGlobalTx({ transactionId: "TX_GLB_pay_Stale_vid_4", videoId: "vid_4", isStale: true }),
+      makeGlobalTx({
+        transactionId: "TX_REF_pay_Rzp123",
+        incomeType: "referral_income",
+        amount: 1.0,
+      }),
+    ];
+
+    const deduped = deduplicateGlobalIncomeTransactions(ledger);
+    assert.equal(deduped.length, 3);
+    assert.deepEqual(
+      deduped.map((tx) => tx.videoId),
+      ["vid_1", "vid_2", "vid_3"],
+    );
+    const total = deduped.reduce((sum, tx) => sum + tx.amount, 0);
+    assert.ok(Math.abs(total - 0.42) < 1e-6);
+  });
+
+  it("verifies global-income.tsx distinguishes per-video rows & real statuses and transactions.php returns videoId + video_id", () => {
+    const routePath = path.resolve(process.cwd(), "src", "routes", "global-income.tsx");
+    const routeSrc = fs.readFileSync(routePath, "utf-8");
+
+    assert.ok(routeSrc.includes("deduplicateGlobalIncomeTransactions"));
+    assert.ok(routeSrc.includes("extractGlobalIncomeEntryMeta"));
+    assert.ok(routeSrc.includes("Rewarded Video"));
+    assert.ok(routeSrc.includes("renderGlobalTxStatus"));
+    assert.ok(routeSrc.includes("Pending"));
+    assert.ok(routeSrc.includes("Failed"));
+    assert.ok(routeSrc.includes("whitespace-normal break-words"));
+    assert.equal(routeSrc.includes("max-w-sm truncate"), false);
+
+    const phpTxPath = path.resolve(process.cwd(), "api", "wallet", "transactions.php");
+    const phpTxSrc = fs.readFileSync(phpTxPath, "utf-8");
+    assert.ok(phpTxSrc.includes("'videoId' => $tx['video_id'] ?? null"));
+    assert.ok(phpTxSrc.includes("'video_id' => $tx['video_id'] ?? null"));
+  });
+});
+
+describe("Global Income & Withdrawal Identity Guard and Source Member Sanitization", () => {
+  it("1. Enforces canonical resolveAuthenticatedUserId without FT483921 or email-prefix fallback in affected routes", () => {
+    for (const relPath of [
+      "src/routes/global-income.tsx",
+      "src/routes/withdrawal-balance.tsx",
+    ] as const) {
+      const src = fs.readFileSync(path.resolve(process.cwd(), relPath), "utf-8");
+      assert.equal(
+        src.includes("FT483921"),
+        false,
+        `${relPath} must not contain hardcoded FT483921 fallback`,
+      );
+      assert.equal(
+        src.includes('email?.split("@")[0]'),
+        false,
+        `${relPath} must not derive userId from email prefix`,
+      );
+      assert.ok(
+        src.includes("resolveAuthenticatedUserId"),
+        `${relPath} must use canonical resolveAuthenticatedUserId`,
+      );
+      assert.ok(src.includes("if (!userId)"), `${relPath} must guard against empty userId`);
+    }
+
+    const globalRouteSrc = fs.readFileSync(
+      path.resolve(process.cwd(), "src/routes/global-income.tsx"),
+      "utf-8",
+    );
+    assert.ok(
+      globalRouteSrc.includes("resolveGlobalIncomeSourceMember(group)"),
+      "global-income.tsx must render Source Member via resolveGlobalIncomeSourceMember",
+    );
+
+    assert.equal(
+      resolveAuthenticatedUserId({
+        user: { user_id: undefined, user_metadata: null } as any,
+        profile: null,
+        dbUser: null,
+      }),
+      "",
+    );
+    assert.equal(
+      resolveAuthenticatedUserId({
+        user: { user_id: "FT900431" },
+        profile: null,
+        dbUser: null,
+      }),
+      "FT900431",
+    );
+    assert.equal(
+      resolveAuthenticatedUserId({
+        user: null,
+        profile: { user_id: "FT102857" },
+        dbUser: { user_id: "FT900431" },
+      }),
+      "FT102857",
+    );
+  });
+
+  it("2. Does not issue wallet or ledger API requests when authenticated user ID is unavailable, while preserving logged-in requests", async () => {
+    const origGetBalance = api.wallet.getBalance;
+    const origGetTransactions = api.wallet.getTransactions;
+    const origGetGlobalSummary = api.wallet.getGlobalIncomeSummary;
+
+    let balanceCalls = 0;
+    let txCalls = 0;
+    let summaryCalls = 0;
+
+    try {
+      api.wallet.getBalance = async (uid?: string) => {
+        balanceCalls += 1;
+        return {
+          success: true,
+          wallet: {
+            user_id: uid,
+            balance: 120,
+            total_earned: 120,
+            total_withdrawn: 0,
+            referral_income: 0,
+            global_income: 120,
+            adsense_income: 0,
+            affiliate_income: 0,
+            updated_at: "2026-11-27T00:00:00.000Z",
+          },
+        };
+      };
+      api.wallet.getTransactions = async (uid?: string) => {
+        txCalls += 1;
+        return {
+          success: true,
+          transactions: [
+            {
+              id: "tx-logged-in-1",
+              transaction_id: "TX_GLB_pay_123_vid_1",
+              user_id: uid,
+              source_user_id: "FT262457",
+              source_user_name: "null",
+              video_id: "vid_1",
+              income_type: "global_income",
+              amount: 0.14,
+              status: "settled",
+              description: "Global Pool share",
+              created_at: "2026-11-27T00:00:00.000Z",
+            },
+          ],
+          total: 1,
+          hasMore: false,
+        };
+      };
+      api.wallet.getGlobalIncomeSummary = async (uid?: string) => {
+        summaryCalls += 1;
+        return {
+          success: true,
+          personal: {
+            userId: uid || "",
+            hasWalletRow: true,
+            totalIncome: 120,
+            globalIncome: 120,
+            balance: 120,
+            totalWithdrawn: 0,
+            walletTotalEarned: 120,
+            walletGlobalIncome: 120,
+            ledgerTotalEarned: 120,
+            ledgerGlobalIncome: 120,
+            walletVsLedgerDiff: 0,
+            globalTxCount: 1,
+            source: "wallet_balances" as const,
+          },
+          platform: {
+            totalPremiumTransactions: 1,
+            totalTransactionAmount: 6,
+            referralAllocationTotal: 1,
+            adminAllocationTotal: 1,
+            gstTotal: 0.9,
+            pgFeeTotal: 0.1,
+            globalPoolAllocationTotal: 3,
+            immediateGlobalPoolDistributedTotal: 3,
+            settlementBatchCount: 0,
+            settlementDistributedTotal: 0,
+            globalPoolDistributedTotal: 3,
+            pendingReserveCount: 0,
+            pendingReserveTotal: 0,
+            settledReserveCount: 0,
+            settledReserveTotal: 0,
+            cancelledReserveCount: 0,
+            cancelledReserveTotal: 0,
+            eligibleCreatorCount: 1,
+            eligibleVideoCount: 1,
+          },
+        };
+      };
+
+      // Unavailable / empty / whitespace user IDs -> zero network calls
+      const emptyWallet = await getUserWallet("");
+      const blankWallet = await getUserWallet("   ");
+      const emptyLedger = await getUserLedger("");
+      const blankLedger = await getUserLedger("   ");
+      const emptySummary = await getGlobalIncomeSummary("");
+      const blankSummary = await getGlobalIncomeSummary("   ");
+      const emptyDaily = await getDailyWithdrawnAmount("");
+
+      assert.equal(balanceCalls, 0);
+      assert.equal(txCalls, 0);
+      assert.equal(summaryCalls, 0);
+      assert.equal(emptyWallet.userId, "");
+      assert.equal(blankWallet.userId, "");
+      assert.deepEqual(emptyLedger, []);
+      assert.deepEqual(blankLedger, []);
+      assert.equal(emptySummary, null);
+      assert.equal(blankSummary, null);
+      assert.equal(emptyDaily, 0);
+
+      // Valid logged-in user -> normal API calls proceed and sourceUserName is sanitized
+      const liveWallet = await getUserWallet("FT900431");
+      const liveLedger = await getUserLedger("FT900431");
+      const liveSummary = await getGlobalIncomeSummary("FT900431");
+
+      assert.equal(balanceCalls, 1);
+      assert.equal(txCalls, 1);
+      assert.equal(summaryCalls, 1);
+      assert.equal(liveWallet.balance, 120);
+      assert.equal(liveSummary?.personal.totalIncome, 120);
+      assert.equal(liveLedger.length, 1);
+      assert.equal(liveLedger[0]?.sourceUserName, undefined);
+      assert.equal(resolveGlobalIncomeSourceMember(liveLedger[0]!), "FT262457");
+    } finally {
+      api.wallet.getBalance = origGetBalance;
+      api.wallet.getTransactions = origGetTransactions;
+      api.wallet.getGlobalIncomeSummary = origGetGlobalSummary;
+    }
+  });
+
+  it("3. Sanitizes sourceUserName edge cases and resolves fallback order without altering ledger amounts, IDs, statuses, or deduplication", () => {
+    const invalidInputs: unknown[] = [
+      null,
+      undefined,
+      "",
+      "   ",
+      "\t\n",
+      "null",
+      "NULL",
+      " null ",
+      "undefined",
+      "UNDEFINED",
+      " undefined ",
+    ];
+
+    for (const raw of invalidInputs) {
+      assert.equal(
+        sanitizeLedgerMemberText(raw),
+        undefined,
+        `Expected ${JSON.stringify(raw)} to be treated as missing`,
+      );
+      assert.equal(
+        resolveGlobalIncomeSourceMember({
+          sourceUserName: raw as any,
+          sourceUserId: "FT262457",
+        }),
+        "FT262457",
+      );
+      assert.equal(
+        resolveGlobalIncomeSourceMember({
+          sourceUserName: raw as any,
+          sourceUserId: raw as any,
+        }),
+        "Global System",
+      );
+    }
+
+    assert.equal(
+      resolveGlobalIncomeSourceMember({
+        sourceUserName: "  Maya Lin  ",
+        sourceUserId: "FT900431",
+      }),
+      "Maya Lin",
+    );
+
+    const ledger: LedgerTransaction[] = [
+      {
+        id: "1",
+        transactionId: "TX_GLB_pay_1_v1",
+        userId: "FT900431",
+        sourceUserId: "FT262457",
+        sourceUserName: "null",
+        videoId: "v1",
+        incomeType: "global_income",
+        amount: 0.14,
+        status: "settled",
+        description: "Share 1",
+        createdAt: "2026-11-27T00:00:00.000Z",
+      },
+      {
+        id: "2",
+        transactionId: "TX_GLB_pay_1_v2",
+        userId: "FT900431",
+        sourceUserId: undefined,
+        sourceUserName: "undefined",
+        videoId: "v2",
+        incomeType: "global_income",
+        amount: 0.14,
+        status: "pending",
+        description: "Share 2",
+        createdAt: "2026-11-27T00:00:01.000Z",
+      },
+    ];
+
+    const deduped = deduplicateGlobalIncomeTransactions(ledger);
+    assert.equal(deduped.length, 2);
+    assert.equal(deduped[0]?.amount, 0.14);
+    assert.equal(deduped[0]?.status, "settled");
+    assert.equal(deduped[1]?.status, "pending");
+    assert.equal(resolveGlobalIncomeSourceMember(deduped[0]!), "FT262457");
+    assert.equal(resolveGlobalIncomeSourceMember(deduped[1]!), "Global System");
+  });
+});
+
+describe("Global Income Payment-Level Display Grouping", () => {
+  const makeEntry = (
+    overrides: Partial<LedgerTransaction> & { transactionId: string },
+  ): LedgerTransaction => ({
+    id: overrides.id ?? overrides.transactionId,
+    userId: "FT900431",
+    sourceUserId: "FT262457",
+    sourceUserName: "Creator Uploader",
+    incomeType: "global_income",
+    amount: 0.14,
+    status: "settled",
+    specialTag: "NORMAL_PREMIUM",
+    description: "Global Pool 50% share",
+    createdAt: "2026-11-27T10:00:00.000Z",
+    isStale: false,
+    ...overrides,
+  });
+
+  it("1. Combines three ₹0.14 entries from the same payment (pay_U59VcCCe2vabiR) into one ₹0.42 row with 3 video allocations", () => {
+    const ledger: LedgerTransaction[] = [
+      makeEntry({
+        id: "row-1",
+        transactionId: "TX_GLB_pay_U59VcCCe2vabiR_vid_101",
+        videoId: "vid_101",
+        description: "Global Pool share for video #vid_101",
+      }),
+      makeEntry({
+        id: "row-2",
+        transactionId: "TX_GLB_pay_U59VcCCe2vabiR_vid_102",
+        videoId: "vid_102",
+        description: "Global Pool share for video #vid_102",
+      }),
+      makeEntry({
+        id: "row-3",
+        transactionId: "TX_GLB_pay_U59VcCCe2vabiR_vid_103",
+        videoId: "vid_103",
+        description: "Global Pool share for video #vid_103",
+      }),
+    ];
+
+    const grouped = groupGlobalIncomeTransactions(ledger);
+    assert.equal(grouped.length, 1);
+    const row = grouped[0]!;
+    assert.equal(row.sourcePaymentId, "pay_U59VcCCe2vabiR");
+    assert.equal(row.groupKey, "PAYMENT:PAY_U59VCCCE2VABIR");
+    assert.equal(row.amount, 0.42);
+    assert.equal(row.videoAllocationCount, 3);
+    assert.equal(row.entryCount, 3);
+    assert.deepEqual(row.videoIds, ["vid_101", "vid_102", "vid_103"]);
+    assert.equal(row.status, "settled");
+    assert.equal(resolveGlobalIncomeSourceMember(row), "Creator Uploader");
+  });
+
+  it("2. Keeps different payment IDs separate even when source user, timestamp, amount, and status are identical", () => {
+    const sameTimestamp = "2026-11-27T11:15:00.000Z";
+    const ledger: LedgerTransaction[] = [
+      makeEntry({
+        transactionId: "TX_GLB_pay_AAA111_vid_1",
+        videoId: "vid_1",
+        sourceUserId: "FT262457",
+        sourceUserName: "Same Uploader",
+        createdAt: sameTimestamp,
+        amount: 0.14,
+        status: "settled",
+      }),
+      makeEntry({
+        transactionId: "TX_GLB_pay_AAA111_vid_2",
+        videoId: "vid_2",
+        sourceUserId: "FT262457",
+        sourceUserName: "Same Uploader",
+        createdAt: sameTimestamp,
+        amount: 0.14,
+        status: "settled",
+      }),
+      makeEntry({
+        transactionId: "TX_GLB_pay_BBB222_vid_1",
+        videoId: "vid_1",
+        sourceUserId: "FT262457",
+        sourceUserName: "Same Uploader",
+        createdAt: sameTimestamp,
+        amount: 0.14,
+        status: "settled",
+      }),
+      makeEntry({
+        transactionId: "TX_GLB_84729103",
+        videoId: undefined,
+        sourceUserId: "FT262457",
+        sourceUserName: "Same Uploader",
+        createdAt: sameTimestamp,
+        amount: 0.14,
+        status: "settled",
+      }),
+      makeEntry({
+        transactionId: "TX_GLB_RESERVE_pay_CCC333",
+        videoId: undefined,
+        sourceUserId: "FT262457",
+        sourceUserName: "Same Uploader",
+        createdAt: sameTimestamp,
+        amount: 3.0,
+        status: "pending",
+      }),
+    ];
+
+    const grouped = groupGlobalIncomeTransactions(ledger);
+    assert.equal(grouped.length, 4);
+    assert.equal(grouped[0]?.sourcePaymentId, "pay_AAA111");
+    assert.equal(grouped[0]?.amount, 0.28);
+    assert.equal(grouped[0]?.videoAllocationCount, 2);
+    assert.equal(grouped[1]?.sourcePaymentId, "pay_BBB222");
+    assert.equal(grouped[1]?.amount, 0.14);
+    assert.equal(grouped[1]?.videoAllocationCount, 1);
+    assert.equal(grouped[2]?.displayTransactionId, "TX_GLB_84729103");
+    assert.equal(grouped[3]?.displayTransactionId, "TX_GLB_RESERVE_pay_CCC333");
+    assert.equal(grouped[3]?.status, "pending");
+
+    assert.notEqual(
+      getGlobalIncomePaymentGroupKey(ledger[0]!).groupKey,
+      getGlobalIncomePaymentGroupKey(ledger[2]!).groupKey,
+    );
+  });
+
+  it("3. Handles mixed statuses safely and never labels a group Settled unless all entries are settled", () => {
+    const settledPlusPending = groupGlobalIncomeTransactions([
+      makeEntry({ transactionId: "TX_GLB_pay_MIX1_v1", videoId: "v1", status: "settled" }),
+      makeEntry({ transactionId: "TX_GLB_pay_MIX1_v2", videoId: "v2", status: "pending" }),
+    ]);
+    assert.equal(settledPlusPending[0]?.status, "mixed");
+    assert.deepEqual(settledPlusPending[0]?.statusCounts, { settled: 1, pending: 1, failed: 0 });
+
+    const settledPlusFailed = groupGlobalIncomeTransactions([
+      makeEntry({ transactionId: "TX_GLB_pay_MIX2_v1", videoId: "v1", status: "settled" }),
+      makeEntry({ transactionId: "TX_GLB_pay_MIX2_v2", videoId: "v2", status: "failed" }),
+    ]);
+    assert.equal(settledPlusFailed[0]?.status, "mixed");
+
+    const allPending = resolveGroupedGlobalIncomeStatus([
+      { status: "pending" },
+      { status: "pending" },
+    ]);
+    assert.equal(allPending.status, "pending");
+
+    const allFailed = resolveGroupedGlobalIncomeStatus([
+      { status: "failed" },
+      { status: "failed" },
+    ]);
+    assert.equal(allFailed.status, "failed");
+
+    const allSettled = resolveGroupedGlobalIncomeStatus([
+      { status: "settled" },
+      { status: "settled" },
+    ]);
+    assert.equal(allSettled.status, "settled");
+  });
+
+  it("4. Preserves original ledger records and wallet calculations, and paginates grouped payments without splitting or omitting entries", () => {
+    const originalLedger: LedgerTransaction[] = [
+      makeEntry({
+        id: "a1",
+        transactionId: "TX_GLB_pay_P1_v1",
+        videoId: "v1",
+        amount: 0.14,
+        status: "settled",
+      }),
+      makeEntry({
+        id: "a2",
+        transactionId: "TX_GLB_pay_P1_v2",
+        videoId: "v2",
+        amount: 0.14,
+        status: "settled",
+      }),
+      makeEntry({
+        id: "a3",
+        transactionId: "TX_GLB_pay_P1_v3",
+        videoId: "v3",
+        amount: 0.14,
+        status: "settled",
+      }),
+      makeEntry({
+        id: "b1",
+        transactionId: "TX_GLB_pay_P2_v1",
+        videoId: "v1",
+        amount: 0.25,
+        status: "settled",
+      }),
+      makeEntry({
+        id: "b2",
+        transactionId: "TX_GLB_pay_P2_v2",
+        videoId: "v2",
+        amount: 0.25,
+        status: "settled",
+      }),
+      makeEntry({
+        id: "c1",
+        transactionId: "TX_GLB_pay_P3_v1",
+        videoId: "v1",
+        amount: 0.5,
+        status: "settled",
+      }),
+    ];
+    const snapshot = JSON.stringify(originalLedger);
+
+    const grouped = groupGlobalIncomeTransactions(originalLedger);
+    assert.equal(grouped.length, 3);
+    assert.equal(
+      JSON.stringify(originalLedger),
+      snapshot,
+      "Original ledger must remain unmodified",
+    );
+
+    // Sum across groups equals sum across original ledger and calculateTotalAdEarnings
+    const groupedSum = grouped.reduce((acc, g) => acc + Math.round(g.amount * 100), 0) / 100;
+    const earnings = calculateTotalAdEarnings(null, originalLedger);
+    assert.equal(groupedSum, 1.42);
+    assert.equal(earnings.globalIncome, 1.42);
+    assert.equal(earnings.totalAdEarnings, 1.42);
+
+    // Paginating grouped rows by 2 payments per page keeps pay_P1 (3 allocations) intact on page 1
+    // and pay_P3 on page 2 without splitting or omitting any payment or allocation.
+    const page1 = paginateGroupedGlobalIncomeEntries(grouped, 1, 2);
+    const page2 = paginateGroupedGlobalIncomeEntries(grouped, 2, 2);
+    assert.equal(page1.totalPages, 2);
+    assert.equal(page1.totalGroups, 3);
+    assert.equal(page1.items.length, 2);
+    assert.equal(page1.items[0]?.sourcePaymentId, "pay_P1");
+    assert.equal(page1.items[0]?.entryCount, 3);
+    assert.equal(page1.items[1]?.sourcePaymentId, "pay_P2");
+    assert.equal(page1.items[1]?.entryCount, 2);
+    assert.equal(page2.items.length, 1);
+    assert.equal(page2.items[0]?.sourcePaymentId, "pay_P3");
+    assert.equal(page2.items[0]?.entryCount, 1);
+
+    const routeSrc = fs.readFileSync(
+      path.resolve(process.cwd(), "src", "routes", "global-income.tsx"),
+      "utf-8",
+    );
+    assert.ok(routeSrc.includes("groupGlobalIncomeTransactions"));
+    assert.ok(routeSrc.includes("paginateGroupedGlobalIncomeEntries"));
+    assert.ok(routeSrc.includes("video allocations"));
+    assert.ok(routeSrc.includes("Mixed"));
   });
 });

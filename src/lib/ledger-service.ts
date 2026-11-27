@@ -520,10 +520,33 @@ export async function getUserWallet(userId: string): Promise<UserWallet> {
   return unconfirmedWallet;
 }
 
+export function sanitizeLedgerMemberText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  const lower = trimmed.toLowerCase();
+  if (lower === "null" || lower === "undefined") return undefined;
+  return trimmed;
+}
+
+export function resolveGlobalIncomeSourceMember(
+  tx: Pick<LedgerTransaction, "sourceUserName" | "sourceUserId">,
+): string {
+  return (
+    sanitizeLedgerMemberText(tx.sourceUserName) ||
+    sanitizeLedgerMemberText(tx.sourceUserId) ||
+    "Global System"
+  );
+}
+
 /**
  * Gets full ledger transactions for a user across all pages so calculations never truncate at 50/100 rows.
  */
 export async function getUserLedger(userId?: string): Promise<LedgerTransaction[]> {
+  if (userId !== undefined && (typeof userId !== "string" || userId.trim() === "")) {
+    return [];
+  }
+
   try {
     const collectedRaw: any[] = [];
     const seenIds = new Set<string>();
@@ -540,7 +563,9 @@ export async function getUserLedger(userId?: string): Promise<LedgerTransaction[
 
       let addedInBatch = 0;
       for (const item of batch) {
-        const key = String(item?.transaction_id || item?.transactionId || item?.id || "").trim();
+        const key = String(item?.transaction_id || item?.transactionId || item?.id || "")
+          .trim()
+          .toUpperCase();
         if (key) {
           if (seenIds.has(key)) continue;
           seenIds.add(key);
@@ -561,8 +586,13 @@ export async function getUserLedger(userId?: string): Promise<LedgerTransaction[
         id: String(d.id),
         transactionId: d.transaction_id || d.transactionId,
         userId: d.user_id || d.userId,
-        sourceUserId: d.source_user_id || d.sourceUserId || undefined,
-        sourceUserName: d.source_user_name || d.sourceUserName || undefined,
+        sourceUserId:
+          sanitizeLedgerMemberText(
+            typeof (d.source_user_id ?? d.sourceUserId) === "number"
+              ? String(d.source_user_id ?? d.sourceUserId)
+              : (d.source_user_id ?? d.sourceUserId),
+          ) || undefined,
+        sourceUserName: sanitizeLedgerMemberText(d.source_user_name ?? d.sourceUserName),
         videoId: d.video_id || d.videoId || undefined,
         incomeType: (d.income_type || d.incomeType || d.type) as IncomeType,
         amount: Number(d.amount) || 0,
@@ -594,6 +624,382 @@ export async function getUserLedger(userId?: string): Promise<LedgerTransaction[
     return markedStale.filter((tx) => tx.userId.trim().toUpperCase() === norm);
   }
   return markedStale;
+}
+
+export interface GlobalIncomeEntryMeta {
+  rewardedVideoId: string | null;
+  sourcePaymentId: string | null;
+  settlementBatchId: string | null;
+  poolVideoNumber: string | null;
+}
+
+/**
+ * Extracts the rewarded Sponsor video ID, source payment ID, or settlement batch ID
+ * from a Global Income ledger entry so legitimate per-video payouts from the same
+ * payment are clearly distinguishable from one another.
+ */
+export function extractGlobalIncomeEntryMeta(
+  tx: Pick<LedgerTransaction, "transactionId" | "videoId" | "description" | "batchId">,
+): GlobalIncomeEntryMeta {
+  const txId = String(tx.transactionId || "").trim();
+  const desc = String(tx.description || "");
+  const explicitVideoId = String(tx.videoId || "").trim();
+  const descVideoMatch = desc.match(/for\s+video\s+#([^\s(,)]+)/i);
+  const rewardedVideoId = explicitVideoId || (descVideoMatch?.[1]?.trim() ?? "") || null;
+
+  let sourcePaymentId: string | null = null;
+  let settlementBatchId: string | null = String(tx.batchId || "").trim() || null;
+
+  if (txId.startsWith("TX_GLB_SETTLE_")) {
+    const rest = txId.slice("TX_GLB_SETTLE_".length);
+    if (rewardedVideoId && rest.endsWith(`_${rewardedVideoId}`)) {
+      settlementBatchId =
+        settlementBatchId || rest.slice(0, rest.length - `_${rewardedVideoId}`.length) || null;
+    } else if (!settlementBatchId) {
+      const batchMatch = desc.match(/batch\s+([^\s(,)]+)/i);
+      if (batchMatch?.[1]) {
+        settlementBatchId = batchMatch[1].trim();
+      }
+    }
+  } else if (txId.startsWith("TX_GLB_RESERVE_")) {
+    sourcePaymentId = txId.slice("TX_GLB_RESERVE_".length).trim() || null;
+  } else if (txId.startsWith("TX_GLB_")) {
+    const rest = txId.slice("TX_GLB_".length);
+    if (rewardedVideoId && rest.endsWith(`_${rewardedVideoId}`)) {
+      sourcePaymentId = rest.slice(0, rest.length - `_${rewardedVideoId}`.length) || null;
+    } else {
+      const rzpMatch = rest.match(/^(pay_[^_]+)_(.+)$/);
+      if (rzpMatch) {
+        sourcePaymentId = rzpMatch[1] || null;
+      }
+    }
+  }
+
+  const poolMatch = desc.match(/Premium Video #(\d+)/i);
+  const poolVideoNumber = poolMatch?.[1] || null;
+
+  return {
+    rewardedVideoId,
+    sourcePaymentId,
+    settlementBatchId,
+    poolVideoNumber,
+  };
+}
+
+/**
+ * Filters live Global Income ledger entries and collapses any exact duplicate
+ * transaction IDs (case-insensitive) while preserving distinct per-video payouts
+ * (TX_GLB_<paymentId>_<videoId>) from the same pool distribution.
+ */
+export function deduplicateGlobalIncomeTransactions(
+  ledger: readonly LedgerTransaction[],
+): LedgerTransaction[] {
+  const seenKeys = new Set<string>();
+  const result: LedgerTransaction[] = [];
+
+  for (const tx of ledger) {
+    if (!tx || tx.isStale) continue;
+    if (
+      String(tx.incomeType || "")
+        .trim()
+        .toLowerCase() !== "global_income"
+    )
+      continue;
+
+    const dedupKey = String(tx.transactionId || tx.id || "")
+      .trim()
+      .toUpperCase();
+    if (dedupKey) {
+      if (seenKeys.has(dedupKey)) continue;
+      seenKeys.add(dedupKey);
+    }
+    result.push(tx);
+  }
+
+  return result;
+}
+
+export type GroupedGlobalIncomeStatus = "settled" | "pending" | "failed" | "mixed";
+
+export interface GroupedGlobalIncomeEntry {
+  groupKey: string;
+  sourcePaymentId: string | null;
+  settlementBatchId: string | null;
+  displayTransactionId: string;
+  transactionIds: string[];
+  videoIds: string[];
+  videoAllocationCount: number;
+  entryCount: number;
+  sourceUserId?: string | undefined;
+  sourceUserName?: string | undefined;
+  description: string;
+  specialTag?: string | undefined;
+  createdAt: string;
+  amount: number;
+  status: GroupedGlobalIncomeStatus;
+  statusCounts: {
+    settled: number;
+    pending: number;
+    failed: number;
+  };
+  entries: readonly LedgerTransaction[];
+}
+
+/**
+ * Derives a payment-level grouping key strictly from the transaction ID metadata.
+ * Only per-video Global Income entries sharing a verified source payment ID
+ * (e.g. TX_GLB_<paymentId>_<videoId>) are grouped together; reserve rows, batch
+ * rows without a payment ID, and unrelated entries keep unique per-entry keys.
+ */
+export function getGlobalIncomePaymentGroupKey(
+  tx: Pick<LedgerTransaction, "id" | "transactionId" | "videoId" | "description" | "batchId">,
+  fallbackIndex = 0,
+): { groupKey: string; sourcePaymentId: string | null; meta: GlobalIncomeEntryMeta } {
+  const txId = String(tx.transactionId || "").trim();
+  const txIdUpper = txId.toUpperCase();
+  const meta = extractGlobalIncomeEntryMeta(tx);
+
+  if (txIdUpper.startsWith("TX_GLB_RESERVE_")) {
+    const reserveKey = meta.sourcePaymentId
+      ? `RESERVE:${meta.sourcePaymentId.trim().toUpperCase()}`
+      : `TX:${
+          txIdUpper ||
+          String(tx.id || "")
+            .trim()
+            .toUpperCase() ||
+          `IDX_${fallbackIndex}`
+        }`;
+    return {
+      groupKey: reserveKey,
+      sourcePaymentId: meta.sourcePaymentId,
+      meta,
+    };
+  }
+
+  if (
+    txIdUpper.startsWith("TX_GLB_") &&
+    !txIdUpper.startsWith("TX_GLB_SETTLE_") &&
+    meta.sourcePaymentId
+  ) {
+    const normPayId = meta.sourcePaymentId.trim().toUpperCase();
+    return {
+      groupKey: `PAYMENT:${normPayId}`,
+      sourcePaymentId: meta.sourcePaymentId.trim(),
+      meta,
+    };
+  }
+
+  const uniqueFallback =
+    txIdUpper ||
+    String(tx.id || "")
+      .trim()
+      .toUpperCase() ||
+    `IDX_${fallbackIndex}`;
+  return {
+    groupKey: `TX:${uniqueFallback}`,
+    sourcePaymentId: meta.sourcePaymentId,
+    meta,
+  };
+}
+
+export function resolveGroupedGlobalIncomeStatus(
+  entries: readonly Pick<LedgerTransaction, "status">[],
+): {
+  status: GroupedGlobalIncomeStatus;
+  statusCounts: { settled: number; pending: number; failed: number };
+} {
+  let settled = 0;
+  let pending = 0;
+  let failed = 0;
+
+  for (const entry of entries) {
+    const normalized = String(entry.status || "settled")
+      .trim()
+      .toLowerCase();
+    if (normalized === "pending") {
+      pending += 1;
+    } else if (normalized === "settled" || normalized === "completed" || normalized === "") {
+      settled += 1;
+    } else {
+      failed += 1;
+    }
+  }
+
+  const total = entries.length;
+  let status: GroupedGlobalIncomeStatus = "mixed";
+  if (total > 0) {
+    if (settled === total) {
+      status = "settled";
+    } else if (pending === total) {
+      status = "pending";
+    } else if (failed === total) {
+      status = "failed";
+    }
+  }
+
+  return {
+    status,
+    statusCounts: { settled, pending, failed },
+  };
+}
+
+/**
+ * UI-only display grouping for Global Income ledger entries.
+ * Combines per-video payouts generated by the same Premium Upload payment into
+ * one display row while keeping all underlying LedgerTransaction records intact.
+ */
+export function groupGlobalIncomeTransactions(
+  ledger: readonly LedgerTransaction[],
+): GroupedGlobalIncomeEntry[] {
+  const deduped = deduplicateGlobalIncomeTransactions(ledger);
+  const groups = new Map<
+    string,
+    {
+      groupKey: string;
+      sourcePaymentId: string | null;
+      settlementBatchId: string | null;
+      entries: LedgerTransaction[];
+      videoIds: string[];
+      seenVideoKeys: Set<string>;
+    }
+  >();
+  const orderedKeys: string[] = [];
+
+  deduped.forEach((tx, index) => {
+    const { groupKey, sourcePaymentId, meta } = getGlobalIncomePaymentGroupKey(tx, index);
+    let bucket = groups.get(groupKey);
+    if (!bucket) {
+      bucket = {
+        groupKey,
+        sourcePaymentId,
+        settlementBatchId: meta.settlementBatchId,
+        entries: [],
+        videoIds: [],
+        seenVideoKeys: new Set<string>(),
+      };
+      groups.set(groupKey, bucket);
+      orderedKeys.push(groupKey);
+    }
+
+    bucket.entries.push(tx);
+    if (!bucket.sourcePaymentId && sourcePaymentId) {
+      bucket.sourcePaymentId = sourcePaymentId;
+    }
+    if (!bucket.settlementBatchId && meta.settlementBatchId) {
+      bucket.settlementBatchId = meta.settlementBatchId;
+    }
+    if (meta.rewardedVideoId) {
+      const vKey = meta.rewardedVideoId.trim().toUpperCase();
+      if (vKey && !bucket.seenVideoKeys.has(vKey)) {
+        bucket.seenVideoKeys.add(vKey);
+        bucket.videoIds.push(meta.rewardedVideoId.trim());
+      }
+    }
+  });
+
+  return orderedKeys.map((key) => {
+    const bucket = groups.get(key)!;
+    const entries = bucket.entries;
+    const first = entries[0]!;
+    const isPaymentGroup = key.startsWith("PAYMENT:");
+
+    // Sum amounts using 4-decimal integer micro-units to avoid IEEE 754 drift (e.g. 0.14 * 3 = 0.42)
+    let totalMicroUnits = 0;
+    let latestCreatedAt = first.createdAt || "";
+    let latestTimeMs = Date.parse(latestCreatedAt) || 0;
+    let resolvedSourceUserName: string | undefined;
+    let resolvedSourceUserId: string | undefined;
+    let resolvedSpecialTag: string | undefined;
+    const transactionIds: string[] = [];
+
+    for (const entry of entries) {
+      const amt = Number(entry.amount);
+      if (Number.isFinite(amt)) {
+        totalMicroUnits += Math.round(amt * 10000);
+      }
+      if (entry.transactionId) {
+        transactionIds.push(entry.transactionId);
+      }
+      if (!resolvedSourceUserName) {
+        resolvedSourceUserName = sanitizeLedgerMemberText(entry.sourceUserName);
+      }
+      if (!resolvedSourceUserId) {
+        resolvedSourceUserId = sanitizeLedgerMemberText(entry.sourceUserId);
+      }
+      if (!resolvedSpecialTag && typeof entry.specialTag === "string" && entry.specialTag.trim()) {
+        resolvedSpecialTag = entry.specialTag.trim();
+      }
+      const entryTimeMs = Date.parse(entry.createdAt || "");
+      if (Number.isFinite(entryTimeMs) && entryTimeMs > latestTimeMs) {
+        latestTimeMs = entryTimeMs;
+        latestCreatedAt = entry.createdAt;
+      }
+    }
+
+    const { status, statusCounts } = resolveGroupedGlobalIncomeStatus(entries);
+    const entryCount = entries.length;
+    const videoAllocationCount =
+      bucket.videoIds.length > 0
+        ? bucket.videoIds.length
+        : isPaymentGroup && entryCount > 1
+          ? entryCount
+          : 0;
+
+    const displayTransactionId =
+      entryCount > 1 && bucket.sourcePaymentId
+        ? `TX_GLB_${bucket.sourcePaymentId}`
+        : first.transactionId || first.id;
+
+    const description =
+      entryCount > 1
+        ? `Global Pool share across ${videoAllocationCount || entryCount} video allocations${
+            bucket.sourcePaymentId ? ` (Payment ${bucket.sourcePaymentId})` : ""
+          }`
+        : first.description;
+
+    return {
+      groupKey: bucket.groupKey,
+      sourcePaymentId: bucket.sourcePaymentId,
+      settlementBatchId: bucket.settlementBatchId,
+      displayTransactionId,
+      transactionIds,
+      videoIds: bucket.videoIds,
+      videoAllocationCount,
+      entryCount,
+      sourceUserId: resolvedSourceUserId,
+      sourceUserName: resolvedSourceUserName,
+      description,
+      specialTag: resolvedSpecialTag,
+      createdAt: latestCreatedAt,
+      amount: Math.round(totalMicroUnits) / 10000,
+      status,
+      statusCounts,
+      entries,
+    };
+  });
+}
+
+export function paginateGroupedGlobalIncomeEntries(
+  grouped: readonly GroupedGlobalIncomeEntry[],
+  page: number,
+  pageSize: number,
+): {
+  items: GroupedGlobalIncomeEntry[];
+  page: number;
+  totalPages: number;
+  totalGroups: number;
+} {
+  const safeSize = Math.max(1, Math.floor(pageSize) || 25);
+  const totalGroups = grouped.length;
+  const totalPages = Math.max(1, Math.ceil(totalGroups / safeSize));
+  const safePage = Math.min(totalPages, Math.max(1, Math.floor(page) || 1));
+  const start = (safePage - 1) * safeSize;
+  return {
+    items: grouped.slice(start, start + safeSize),
+    page: safePage,
+    totalPages,
+    totalGroups,
+  };
 }
 
 /**
@@ -665,6 +1071,9 @@ export interface GlobalIncomeSummary {
  * directly from the backend endpoint (zero localStorage calculations or fabricated fallbacks).
  */
 export async function getGlobalIncomeSummary(userId?: string): Promise<GlobalIncomeSummary | null> {
+  if (userId !== undefined && (typeof userId !== "string" || userId.trim() === "")) {
+    return null;
+  }
   const norm = typeof userId === "string" ? userId.trim().toUpperCase() : "";
   try {
     const res = await api.wallet.getGlobalIncomeSummary(norm || undefined);
@@ -821,7 +1230,8 @@ export function calculateWithdrawalBreakdown(amount: number): WithdrawalChargesB
 }
 
 export async function getDailyWithdrawnAmount(userId: string, dateStr?: string): Promise<number> {
-  const norm = userId.trim().toUpperCase();
+  const norm = typeof userId === "string" ? userId.trim().toUpperCase() : "";
+  if (!norm) return 0;
   const targetDate = dateStr || new Date().toISOString().split("T")[0];
   const allTxs = await getUserLedger(norm);
   const dailyWithdrawals = allTxs.filter((tx) => {

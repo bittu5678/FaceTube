@@ -76,6 +76,7 @@ try {
             'sourceUserName' => $tx['source_user_name'] ?? null,
             'source_user_name' => $tx['source_user_name'] ?? null,
             'videoId' => $tx['video_id'] ?? null,
+            'video_id' => $tx['video_id'] ?? null,
             'incomeType' => $tx['income_type'] ?? ($tx['type'] ?? 'referral_income'),
             'income_type' => $tx['income_type'] ?? ($tx['type'] ?? 'referral_income'),
             'amount' => floatval($tx['amount'] ?? 0),

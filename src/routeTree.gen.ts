@@ -10,6 +10,7 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AboutRouteImport } from './routes/about'
 import { Route as AdminRouteImport } from './routes/admin'
 import { Route as AdmobIncomeRouteImport } from './routes/admob-income'
 import { Route as AdsPromotionsRouteImport } from './routes/ads-promotions'
@@ -17,6 +18,7 @@ import { Route as AdsenseIncomeRouteImport } from './routes/adsense-income'
 import { Route as AdvertisementVideosRouteImport } from './routes/advertisement-videos'
 import { Route as AffiliateIncomeRouteImport } from './routes/affiliate-income'
 import { Route as AuthRouteImport } from './routes/auth'
+import { Route as ContactRouteImport } from './routes/contact'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as DirectReferralIncomeRouteImport } from './routes/direct-referral-income'
 import { Route as ExploreRouteImport } from './routes/explore'
@@ -32,6 +34,7 @@ import { Route as LiveVideosRouteImport } from './routes/live-videos'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as MyCertificateRouteImport } from './routes/my-certificate'
 import { Route as PremiumVideosRouteImport } from './routes/premium-videos'
+import { Route as PrivacyRouteImport } from './routes/privacy'
 import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ReferralIncomeRouteImport } from './routes/referral-income'
 import { Route as ReferralMembersRouteImport } from './routes/referral-members'
@@ -42,6 +45,7 @@ import { Route as ShortsRouteImport } from './routes/shorts'
 import { Route as SubscriptionsRouteImport } from './routes/subscriptions'
 import { Route as TeamIncomeRouteImport } from './routes/team-income'
 import { Route as TeamMembersRouteImport } from './routes/team-members'
+import { Route as TermsRouteImport } from './routes/terms'
 import { Route as UploadRouteImport } from './routes/upload'
 import { Route as WalletBalanceRouteImport } from './routes/wallet-balance'
 import { Route as WatchLaterRouteImport } from './routes/watch-later'
@@ -52,6 +56,11 @@ import { Route as WatchVideoIdRouteImport } from './routes/watch.$videoId'
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AboutRoute = AboutRouteImport.update({
+  id: '/about',
+  path: '/about',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AdminRoute = AdminRouteImport.update({
@@ -87,6 +96,11 @@ const AffiliateIncomeRoute = AffiliateIncomeRouteImport.update({
 const AuthRoute = AuthRouteImport.update({
   id: '/auth',
   path: '/auth',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ContactRoute = ContactRouteImport.update({
+  id: '/contact',
+  path: '/contact',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DashboardRoute = DashboardRouteImport.update({
@@ -164,6 +178,11 @@ const PremiumVideosRoute = PremiumVideosRouteImport.update({
   path: '/premium-videos',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PrivacyRoute = PrivacyRouteImport.update({
+  id: '/privacy',
+  path: '/privacy',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ProfileRoute = ProfileRouteImport.update({
   id: '/profile',
   path: '/profile',
@@ -214,6 +233,11 @@ const TeamMembersRoute = TeamMembersRouteImport.update({
   path: '/team-members',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TermsRoute = TermsRouteImport.update({
+  id: '/terms',
+  path: '/terms',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const UploadRoute = UploadRouteImport.update({
   id: '/upload',
   path: '/upload',
@@ -247,6 +271,7 @@ const WatchVideoIdRoute = WatchVideoIdRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/about': typeof AboutRoute
   '/admin': typeof AdminRoute
   '/admob-income': typeof AdmobIncomeRoute
   '/ads-promotions': typeof AdsPromotionsRoute
@@ -254,6 +279,7 @@ export interface FileRoutesByFullPath {
   '/advertisement-videos': typeof AdvertisementVideosRoute
   '/affiliate-income': typeof AffiliateIncomeRoute
   '/auth': typeof AuthRoute
+  '/contact': typeof ContactRoute
   '/dashboard': typeof DashboardRoute
   '/direct-referral-income': typeof DirectReferralIncomeRoute
   '/explore': typeof ExploreRoute
@@ -269,6 +295,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/my-certificate': typeof MyCertificateRoute
   '/premium-videos': typeof PremiumVideosRoute
+  '/privacy': typeof PrivacyRoute
   '/profile': typeof ProfileRoute
   '/referral-income': typeof ReferralIncomeRoute
   '/referral-members': typeof ReferralMembersRoute
@@ -279,6 +306,7 @@ export interface FileRoutesByFullPath {
   '/subscriptions': typeof SubscriptionsRoute
   '/team-income': typeof TeamIncomeRoute
   '/team-members': typeof TeamMembersRoute
+  '/terms': typeof TermsRoute
   '/upload': typeof UploadRoute
   '/wallet-balance': typeof WalletBalanceRoute
   '/watch-later': typeof WatchLaterRoute
@@ -288,6 +316,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/about': typeof AboutRoute
   '/admin': typeof AdminRoute
   '/admob-income': typeof AdmobIncomeRoute
   '/ads-promotions': typeof AdsPromotionsRoute
@@ -295,6 +324,7 @@ export interface FileRoutesByTo {
   '/advertisement-videos': typeof AdvertisementVideosRoute
   '/affiliate-income': typeof AffiliateIncomeRoute
   '/auth': typeof AuthRoute
+  '/contact': typeof ContactRoute
   '/dashboard': typeof DashboardRoute
   '/direct-referral-income': typeof DirectReferralIncomeRoute
   '/explore': typeof ExploreRoute
@@ -310,6 +340,7 @@ export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/my-certificate': typeof MyCertificateRoute
   '/premium-videos': typeof PremiumVideosRoute
+  '/privacy': typeof PrivacyRoute
   '/profile': typeof ProfileRoute
   '/referral-income': typeof ReferralIncomeRoute
   '/referral-members': typeof ReferralMembersRoute
@@ -320,6 +351,7 @@ export interface FileRoutesByTo {
   '/subscriptions': typeof SubscriptionsRoute
   '/team-income': typeof TeamIncomeRoute
   '/team-members': typeof TeamMembersRoute
+  '/terms': typeof TermsRoute
   '/upload': typeof UploadRoute
   '/wallet-balance': typeof WalletBalanceRoute
   '/watch-later': typeof WatchLaterRoute
@@ -330,6 +362,7 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/about': typeof AboutRoute
   '/admin': typeof AdminRoute
   '/admob-income': typeof AdmobIncomeRoute
   '/ads-promotions': typeof AdsPromotionsRoute
@@ -337,6 +370,7 @@ export interface FileRoutesById {
   '/advertisement-videos': typeof AdvertisementVideosRoute
   '/affiliate-income': typeof AffiliateIncomeRoute
   '/auth': typeof AuthRoute
+  '/contact': typeof ContactRoute
   '/dashboard': typeof DashboardRoute
   '/direct-referral-income': typeof DirectReferralIncomeRoute
   '/explore': typeof ExploreRoute
@@ -352,6 +386,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/my-certificate': typeof MyCertificateRoute
   '/premium-videos': typeof PremiumVideosRoute
+  '/privacy': typeof PrivacyRoute
   '/profile': typeof ProfileRoute
   '/referral-income': typeof ReferralIncomeRoute
   '/referral-members': typeof ReferralMembersRoute
@@ -362,6 +397,7 @@ export interface FileRoutesById {
   '/subscriptions': typeof SubscriptionsRoute
   '/team-income': typeof TeamIncomeRoute
   '/team-members': typeof TeamMembersRoute
+  '/terms': typeof TermsRoute
   '/upload': typeof UploadRoute
   '/wallet-balance': typeof WalletBalanceRoute
   '/watch-later': typeof WatchLaterRoute
@@ -373,6 +409,7 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/about'
     | '/admin'
     | '/admob-income'
     | '/ads-promotions'
@@ -380,6 +417,7 @@ export interface FileRouteTypes {
     | '/advertisement-videos'
     | '/affiliate-income'
     | '/auth'
+    | '/contact'
     | '/dashboard'
     | '/direct-referral-income'
     | '/explore'
@@ -395,6 +433,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/my-certificate'
     | '/premium-videos'
+    | '/privacy'
     | '/profile'
     | '/referral-income'
     | '/referral-members'
@@ -405,6 +444,7 @@ export interface FileRouteTypes {
     | '/subscriptions'
     | '/team-income'
     | '/team-members'
+    | '/terms'
     | '/upload'
     | '/wallet-balance'
     | '/watch-later'
@@ -414,6 +454,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/about'
     | '/admin'
     | '/admob-income'
     | '/ads-promotions'
@@ -421,6 +462,7 @@ export interface FileRouteTypes {
     | '/advertisement-videos'
     | '/affiliate-income'
     | '/auth'
+    | '/contact'
     | '/dashboard'
     | '/direct-referral-income'
     | '/explore'
@@ -436,6 +478,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/my-certificate'
     | '/premium-videos'
+    | '/privacy'
     | '/profile'
     | '/referral-income'
     | '/referral-members'
@@ -446,6 +489,7 @@ export interface FileRouteTypes {
     | '/subscriptions'
     | '/team-income'
     | '/team-members'
+    | '/terms'
     | '/upload'
     | '/wallet-balance'
     | '/watch-later'
@@ -455,6 +499,7 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/about'
     | '/admin'
     | '/admob-income'
     | '/ads-promotions'
@@ -462,6 +507,7 @@ export interface FileRouteTypes {
     | '/advertisement-videos'
     | '/affiliate-income'
     | '/auth'
+    | '/contact'
     | '/dashboard'
     | '/direct-referral-income'
     | '/explore'
@@ -477,6 +523,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/my-certificate'
     | '/premium-videos'
+    | '/privacy'
     | '/profile'
     | '/referral-income'
     | '/referral-members'
@@ -487,6 +534,7 @@ export interface FileRouteTypes {
     | '/subscriptions'
     | '/team-income'
     | '/team-members'
+    | '/terms'
     | '/upload'
     | '/wallet-balance'
     | '/watch-later'
@@ -497,6 +545,7 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AboutRoute: typeof AboutRoute
   AdminRoute: typeof AdminRoute
   AdmobIncomeRoute: typeof AdmobIncomeRoute
   AdsPromotionsRoute: typeof AdsPromotionsRoute
@@ -504,6 +553,7 @@ export interface RootRouteChildren {
   AdvertisementVideosRoute: typeof AdvertisementVideosRoute
   AffiliateIncomeRoute: typeof AffiliateIncomeRoute
   AuthRoute: typeof AuthRoute
+  ContactRoute: typeof ContactRoute
   DashboardRoute: typeof DashboardRoute
   DirectReferralIncomeRoute: typeof DirectReferralIncomeRoute
   ExploreRoute: typeof ExploreRoute
@@ -519,6 +569,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   MyCertificateRoute: typeof MyCertificateRoute
   PremiumVideosRoute: typeof PremiumVideosRoute
+  PrivacyRoute: typeof PrivacyRoute
   ProfileRoute: typeof ProfileRoute
   ReferralIncomeRoute: typeof ReferralIncomeRoute
   ReferralMembersRoute: typeof ReferralMembersRoute
@@ -529,6 +580,7 @@ export interface RootRouteChildren {
   SubscriptionsRoute: typeof SubscriptionsRoute
   TeamIncomeRoute: typeof TeamIncomeRoute
   TeamMembersRoute: typeof TeamMembersRoute
+  TermsRoute: typeof TermsRoute
   UploadRoute: typeof UploadRoute
   WalletBalanceRoute: typeof WalletBalanceRoute
   WatchLaterRoute: typeof WatchLaterRoute
@@ -544,6 +596,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/about': {
+      id: '/about'
+      path: '/about'
+      fullPath: '/about'
+      preLoaderRoute: typeof AboutRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/admin': {
@@ -593,6 +652,13 @@ declare module '@tanstack/react-router' {
       path: '/auth'
       fullPath: '/auth'
       preLoaderRoute: typeof AuthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/contact': {
+      id: '/contact'
+      path: '/contact'
+      fullPath: '/contact'
+      preLoaderRoute: typeof ContactRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/dashboard': {
@@ -700,6 +766,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PremiumVideosRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/privacy': {
+      id: '/privacy'
+      path: '/privacy'
+      fullPath: '/privacy'
+      preLoaderRoute: typeof PrivacyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/profile': {
       id: '/profile'
       path: '/profile'
@@ -770,6 +843,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TeamMembersRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/terms': {
+      id: '/terms'
+      path: '/terms'
+      fullPath: '/terms'
+      preLoaderRoute: typeof TermsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/upload': {
       id: '/upload'
       path: '/upload'
@@ -817,6 +897,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AboutRoute: AboutRoute,
   AdminRoute: AdminRoute,
   AdmobIncomeRoute: AdmobIncomeRoute,
   AdsPromotionsRoute: AdsPromotionsRoute,
@@ -824,6 +905,7 @@ const rootRouteChildren: RootRouteChildren = {
   AdvertisementVideosRoute: AdvertisementVideosRoute,
   AffiliateIncomeRoute: AffiliateIncomeRoute,
   AuthRoute: AuthRoute,
+  ContactRoute: ContactRoute,
   DashboardRoute: DashboardRoute,
   DirectReferralIncomeRoute: DirectReferralIncomeRoute,
   ExploreRoute: ExploreRoute,
@@ -839,6 +921,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   MyCertificateRoute: MyCertificateRoute,
   PremiumVideosRoute: PremiumVideosRoute,
+  PrivacyRoute: PrivacyRoute,
   ProfileRoute: ProfileRoute,
   ReferralIncomeRoute: ReferralIncomeRoute,
   ReferralMembersRoute: ReferralMembersRoute,
@@ -849,6 +932,7 @@ const rootRouteChildren: RootRouteChildren = {
   SubscriptionsRoute: SubscriptionsRoute,
   TeamIncomeRoute: TeamIncomeRoute,
   TeamMembersRoute: TeamMembersRoute,
+  TermsRoute: TermsRoute,
   UploadRoute: UploadRoute,
   WalletBalanceRoute: WalletBalanceRoute,
   WatchLaterRoute: WatchLaterRoute,

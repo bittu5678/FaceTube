@@ -4375,17 +4375,16 @@ function applyRecoveredPremiumStoreWalletLedger(
   const { paymentId, uploaderId, userName, videoId, verifiedReferrerId, result } = params;
   if (!result.distribution) return;
 
-  const alreadyHasLedger = targetStore.walletTransactions.some(
-    (t: any) =>
-      t.transactionId === `TX_ADM_${paymentId}` ||
-      t.transaction_id === `TX_ADM_${paymentId}` ||
-      t.transactionId === `TX_REF_${paymentId}` ||
-      t.transaction_id === `TX_REF_${paymentId}` ||
-      t.transactionId === `TX_REF_PENDING_${paymentId}` ||
-      t.transaction_id === `TX_REF_PENDING_${paymentId}` ||
-      t.transactionId === `TX_GLB_RESERVE_${paymentId}` ||
-      t.transaction_id === `TX_GLB_RESERVE_${paymentId}`,
-  );
+  const alreadyHasLedger = targetStore.walletTransactions.some((t: any) => {
+    const txId = String(t.transactionId || t.transaction_id || "");
+    return (
+      txId === `TX_ADM_${paymentId}` ||
+      txId === `TX_REF_${paymentId}` ||
+      txId === `TX_REF_PENDING_${paymentId}` ||
+      txId === `TX_GLB_RESERVE_${paymentId}` ||
+      txId.startsWith(`TX_GLB_${paymentId}_`)
+    );
+  });
   if (alreadyHasLedger) return;
 
   if (!targetStore.wallets) targetStore.wallets = {};
@@ -7139,23 +7138,19 @@ async function dispatchApiRequest(
             orderRecord.status === "paid" ||
             result.error?.includes("already") ||
             result.duplicate ||
-            store.walletTransactions.some(
-              (t: any) =>
-                t.transactionId === txCheckId ||
-                t.transaction_id === txCheckId ||
-                (purpose === "ads_promotion" &&
-                  (t.transactionId === `TX_ADS_ADM_${result.paymentId}` ||
-                    t.transaction_id === `TX_ADS_ADM_${result.paymentId}`)) ||
+            store.walletTransactions.some((t: any) => {
+              const txId = String(t.transactionId || t.transaction_id || "");
+              return (
+                txId === txCheckId ||
+                (purpose === "ads_promotion" && txId === `TX_ADS_ADM_${result.paymentId}`) ||
                 (purpose === "premium_video_upload" &&
-                  (t.transactionId === `TX_ADM_${result.paymentId}` ||
-                    t.transaction_id === `TX_ADM_${result.paymentId}` ||
-                    t.transactionId === `TX_REF_${result.paymentId}` ||
-                    t.transaction_id === `TX_REF_${result.paymentId}` ||
-                    t.transactionId === `TX_REF_PENDING_${result.paymentId}` ||
-                    t.transaction_id === `TX_REF_PENDING_${result.paymentId}` ||
-                    t.transactionId === `TX_GLB_RESERVE_${result.paymentId}` ||
-                    t.transaction_id === `TX_GLB_RESERVE_${result.paymentId}`)),
-            ),
+                  (txId === `TX_ADM_${result.paymentId}` ||
+                    txId === `TX_REF_${result.paymentId}` ||
+                    txId === `TX_REF_PENDING_${result.paymentId}` ||
+                    txId === `TX_GLB_RESERVE_${result.paymentId}` ||
+                    txId.startsWith(`TX_GLB_${result.paymentId}_`)))
+              );
+            }),
           );
 
           if (result.verified && !isDuplicate) {
