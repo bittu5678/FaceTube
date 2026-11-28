@@ -2887,14 +2887,8 @@ describe("FaceTube Google AdMob Integration & Backend Statements Test Suite", ()
         reportPhp,
         /round\(floatval\(\$summaryRow\['total_admob_income'\] \?\? 0\),\s*2\)/,
       );
-      assert.match(
-        reportPhp,
-        /COALESCE\(lt\.ledger_admob_income,\s*wb\.admob_income,\s*0\.00\)/,
-      );
-      assert.match(
-        reportPhp,
-        /round\(floatval\(\$r\['admob_income'\]\),\s*2\)/,
-      );
+      assert.match(reportPhp, /COALESCE\(lt\.ledger_admob_income,\s*wb\.admob_income,\s*0\.00\)/);
+      assert.match(reportPhp, /round\(floatval\(\$r\['admob_income'\]\),\s*2\)/);
       assert.match(reportPhp, /'AdMob Income \(INR\)'/);
       assert.match(
         reportPhp,
