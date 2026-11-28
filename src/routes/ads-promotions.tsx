@@ -166,12 +166,15 @@ function AdsPromotionsPage() {
     .trim()
     .toUpperCase();
   const effectiveNormId = effectiveUserId.trim().toUpperCase();
-  const promotionalAliasOwners: Record<string, string> = {
-    FTVIP: "FT102857",
-    CREATOR50: "FT483921",
-  };
+  const matchedAliasUser = rawReferralCode
+    ? (allUsers || []).find(
+        (u) =>
+          (u.referral_code || "").trim().toUpperCase() === rawReferralCode ||
+          (u.user_id || "").trim().toUpperCase() === rawReferralCode,
+      )
+    : null;
   const resolvedSponsorId = rawReferralCode
-    ? promotionalAliasOwners[rawReferralCode] || rawReferralCode
+    ? matchedAliasUser?.user_id || (rawReferralCode === "FTVIP" ? "FT102857" : rawReferralCode)
     : null;
   const verifiedSponsorId =
     resolvedSponsorId && resolvedSponsorId !== effectiveNormId ? resolvedSponsorId : null;

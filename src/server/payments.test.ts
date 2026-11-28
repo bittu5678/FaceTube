@@ -40,6 +40,9 @@ import {
   getStoredWallets,
 } from "../lib/ledger-service";
 
+process.env["RAZORPAY_SKIP_REMOTE_CHECK"] = "true";
+process.env["RAZORPAY_KEY_ID"] = process.env["RAZORPAY_KEY_ID"] || "rzp_test_suite_key_id";
+
 beforeEach(() => {
   resetStoreForTests();
 });

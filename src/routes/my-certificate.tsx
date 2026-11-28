@@ -191,7 +191,7 @@ function MyCertificatePage() {
     return () => {
       if (timer) clearTimeout(timer);
     };
-  }, [selectedRank, userId, userName, userEmail, subscriberDisplay, certificateId, issueDate]);
+  }, [selectedRank, userId, userName, userEmail, subscriberDisplay, certificateId, issueDate, subscribersLoaded]);
 
   // Handlers for the 3 requested buttons:
   // 1. Download PDF (Clean single-page A4 PDF)

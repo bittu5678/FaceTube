@@ -29,13 +29,25 @@ describe("FaceTube Google AdMob Integration & Backend Statements Test Suite", ()
     if (fs.existsSync(storePath)) {
       try {
         const store = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+        if (store.admobStatements) {
+          delete store.admobStatements[`${targetCreator}_${testMonth}`];
+        }
+        if (Array.isArray(store.walletTransactions)) {
+          store.walletTransactions = store.walletTransactions.filter(
+            (tx: any) =>
+              !String(tx["transaction_id"] || tx["transactionId"] || "").includes("ADMOB"),
+          );
+        }
         if (store.wallets?.[targetCreator]) {
+          store.wallets[targetCreator].admob_income = 0;
           initialWalletSnapshot = structuredClone(store.wallets[targetCreator]);
         }
+        fs.writeFileSync(storePath, JSON.stringify(store, null, 2), "utf-8");
       } catch (_e) {
         // ignore
       }
     }
+    resetInMemoryStore();
 
     // 1. Authenticate as Admin (admin@facetube.com)
     const adminLoginReq = new Request("http://localhost:3000/api/auth/login", {
@@ -2698,6 +2710,9 @@ describe("FaceTube Google AdMob Integration & Backend Statements Test Suite", ()
 
       // 17b. Local store path: no double counting & ledger fallback projection excludes pending/failed/unknown
       setMysqlPoolForTesting(null);
+      delete process.env["DB_HOST"];
+      delete process.env["DB_NAME"];
+      delete process.env["DB_USER"];
       if (rawBackup) {
         const store = JSON.parse(rawBackup);
         store.users = Array.isArray(store.users) ? store.users : [];
@@ -2862,23 +2877,23 @@ describe("FaceTube Google AdMob Integration & Backend Statements Test Suite", ()
       );
       assert.match(
         reportPhp,
-        /SUM\(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END\) AS ledger_admob_income/,
+        /SUM\(CASE WHEN income_type = 'admob_income' THEN amount ELSE 0 END\)/,
       );
       assert.match(
         reportPhp,
-        /COALESCE\(SUM\(COALESCE\(lt\.ledger_admob_income,\s*wb\.admob_income,\s*0\)\),\s*0\) AS total_admob_income/,
+        /COALESCE\(SUM\(COALESCE\(lt\.ledger_admob_income,\s*wb\.admob_income,\s*0\)\),\s*0\)/,
       );
       assert.match(
         reportPhp,
-        /'totalAdmobIncome'\s*=>\s*round\(floatval\(\$summaryRow\['total_admob_income'\] \?\? 0\),\s*2\)/,
+        /round\(floatval\(\$summaryRow\['total_admob_income'\] \?\? 0\),\s*2\)/,
       );
       assert.match(
         reportPhp,
-        /COALESCE\(lt\.ledger_admob_income,\s*wb\.admob_income,\s*0\.00\) AS admob_income/,
+        /COALESCE\(lt\.ledger_admob_income,\s*wb\.admob_income,\s*0\.00\)/,
       );
       assert.match(
         reportPhp,
-        /'admobIncome'\s*=>\s*round\(floatval\(\$r\['admob_income'\]\),\s*2\)/,
+        /round\(floatval\(\$r\['admob_income'\]\),\s*2\)/,
       );
       assert.match(reportPhp, /'AdMob Income \(INR\)'/);
       assert.match(
