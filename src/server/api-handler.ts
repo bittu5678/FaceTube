@@ -67,6 +67,12 @@ import {
   validateChatRequestPayload,
   type RecommendationCandidateVideo,
 } from "./gemini-service.ts";
+import {
+  handleWatchTimeRoute,
+  type WatchSessionRecord,
+  type WatchTimeEventRecord,
+  type VideoWatchDailyRecord,
+} from "./watch-time.ts";
 
 function getStoreDataDir(): string {
   const override = process.env["FACETUBE_DATA_DIR"]?.trim();
@@ -1254,7 +1260,7 @@ export function validateSafeAffiliateUrl(
   return { valid: true, url: parsed.toString(), host };
 }
 
-interface ServerStore {
+export interface ServerStore {
   users: Array<{
     id: string;
     user_id: string;
@@ -1547,6 +1553,9 @@ interface ServerStore {
     created_at: string;
     updated_at: string;
   }>;
+  watchSessions?: WatchSessionRecord[] | undefined;
+  watchTimeEvents?: WatchTimeEventRecord[] | undefined;
+  videoWatchDaily?: VideoWatchDailyRecord[] | undefined;
 }
 
 /**
@@ -2167,6 +2176,9 @@ function createEmptyProductionStore(): ServerStore {
     subscriptionRefundRequests: [],
     channelSubscriptions: [],
     uploadedAssets: [],
+    watchSessions: [],
+    watchTimeEvents: [],
+    videoWatchDaily: [],
   };
 }
 
@@ -2223,6 +2235,9 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
         if (!inMemoryStore.kycAuditLog) inMemoryStore.kycAuditLog = [];
         if (!inMemoryStore.channelSubscriptions) inMemoryStore.channelSubscriptions = [];
         if (!inMemoryStore.uploadedAssets) inMemoryStore.uploadedAssets = [];
+        if (!inMemoryStore.watchSessions) inMemoryStore.watchSessions = [];
+        if (!inMemoryStore.watchTimeEvents) inMemoryStore.watchTimeEvents = [];
+        if (!inMemoryStore.videoWatchDaily) inMemoryStore.videoWatchDaily = [];
         if (Array.isArray(inMemoryStore.videos)) {
           const verifiedSeedIds = new Set([
             "vid-seed-001",
@@ -2268,6 +2283,9 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
   if (!inMemoryStore.kycAuditLog) inMemoryStore.kycAuditLog = [];
   if (!inMemoryStore.channelSubscriptions) inMemoryStore.channelSubscriptions = [];
   if (!inMemoryStore.uploadedAssets) inMemoryStore.uploadedAssets = [];
+  if (!inMemoryStore.watchSessions) inMemoryStore.watchSessions = [];
+  if (!inMemoryStore.watchTimeEvents) inMemoryStore.watchTimeEvents = [];
+  if (!inMemoryStore.videoWatchDaily) inMemoryStore.videoWatchDaily = [];
   saveStore(inMemoryStore, env);
   return inMemoryStore;
 }
@@ -30997,6 +31015,49 @@ async function dispatchApiRequest(
       } catch (err) {
         return handleAiError(err);
       }
+    }
+  }
+
+  // 26. Real Watch Time Tracking API (Phase 2)
+  if (
+    route === "watch-time/session" ||
+    route === "watch-time/heartbeat" ||
+    route === "watch-time/analytics"
+  ) {
+    const readEnv = (key: string) => readEnvValue(env, key);
+    const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+    const pool = getMysqlPool();
+    if (isProduction && !pool) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "Database connection unavailable in production environment.",
+        },
+        503,
+      );
+    }
+
+    const authUser = await getAuthUserFromRequest(request, store, pool, env);
+    const rawTestEpoch = !isProduction ? env?.["__TEST_NOW_EPOCH"] : undefined;
+    const parsedTestEpoch =
+      rawTestEpoch && /^\d+$/.test(rawTestEpoch) ? Number(rawTestEpoch) : undefined;
+
+    const wtResponse = await handleWatchTimeRoute({
+      route,
+      method,
+      url,
+      request,
+      store,
+      pool,
+      isProduction,
+      authUser,
+      requireAuth,
+      jsonResponse,
+      saveStore: (updatedStore) => saveStore(updatedStore, env),
+      nowEpochSec: parsedTestEpoch,
+    });
+    if (wtResponse) {
+      return wtResponse;
     }
   }
 

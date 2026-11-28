@@ -2595,4 +2595,123 @@ export const api = {
       });
     },
   },
+
+  watchTime: {
+    startSession: async (videoId: string) => {
+      return apiFetch<WatchTimeSessionResponse>("/watch-time/session.php", {
+        method: "POST",
+        body: JSON.stringify({ video_id: videoId }),
+      });
+    },
+
+    sendHeartbeat: async (
+      payload: WatchTimeHeartbeatRequest,
+      options?: { keepalive?: boolean },
+    ) => {
+      return apiFetch<WatchTimeHeartbeatResponse>("/watch-time/heartbeat.php", {
+        method: "POST",
+        body: JSON.stringify(payload),
+        ...(options?.keepalive ? { keepalive: true } : {}),
+      });
+    },
+
+    getAnalytics: async (params?: {
+      userId?: string;
+      period?: "7D" | "28D" | "30D" | "90D" | "12M";
+      days?: number;
+    }) => {
+      const qs = new URLSearchParams();
+      if (params?.userId) qs.set("user_id", params.userId);
+      if (params?.period) qs.set("period", params.period);
+      if (params?.days && Number.isFinite(params.days)) qs.set("days", String(params.days));
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return apiFetch<WatchTimeAnalyticsResponse>(`/watch-time/analytics.php${suffix}`);
+    },
+  },
 };
+
+export interface WatchTimeSessionResponse {
+  success: boolean;
+  session_id: string;
+  sessionId?: string;
+  video_id: string;
+  content_type: "short" | "long";
+  is_self_watch: boolean;
+  heartbeat_interval_seconds: number;
+  max_delta_seconds: number;
+  expires_at: string;
+  error?: string;
+  code?: string;
+}
+
+export interface WatchTimeHeartbeatRequest {
+  session_id: string;
+  seq: number;
+  idempotency_key: string;
+  delta_seconds: number;
+  position_seconds: number;
+  event_type: "heartbeat" | "pause" | "hidden" | "ended" | "unload";
+  client_timestamp?: string;
+}
+
+export interface WatchTimeHeartbeatResponse {
+  success: boolean;
+  deduplicated?: boolean;
+  session_id: string;
+  seq?: number;
+  credited_seconds: number;
+  total_watched_seconds: number;
+  is_qualified: boolean;
+  status: string;
+  code?: string;
+  error?: string;
+}
+
+export interface WatchTimeAnalyticsHistoryPoint {
+  date: string;
+  day: string;
+  watched_seconds: number;
+  hours: number;
+  qualified_watched_seconds: number;
+  qualified_sessions: number;
+}
+
+export interface WatchTimeAnalyticsResponse {
+  success: boolean;
+  creator_user_id: string;
+  period: string;
+  days: number;
+  timezone: string;
+  has_data: boolean;
+  summary: {
+    total_watched_seconds: number;
+    total_hours: number;
+    qualified_watched_seconds: number;
+    qualified_sessions: number;
+    avg_view_duration_seconds: number;
+    avg_view_duration_formatted: string;
+    previous_period_watched_seconds: number;
+    growth_percent: number | null;
+  };
+  lifetime: {
+    total_watched_seconds: number;
+    total_hours: number;
+    qualified_watched_seconds: number;
+    qualified_sessions: number;
+    avg_view_duration_seconds: number;
+    avg_view_duration_formatted: string;
+  };
+  history: WatchTimeAnalyticsHistoryPoint[];
+  top_videos: Array<{
+    video_id: string;
+    title: string;
+    content_type: "short" | "long";
+    total_watched_seconds: number;
+    hours: number;
+    qualified_watched_seconds: number;
+    qualified_sessions: number;
+    avg_view_duration_seconds: number;
+    avg_view_duration_formatted: string;
+  }>;
+  error?: string;
+}

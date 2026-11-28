@@ -29,7 +29,12 @@ import {
   resolvePlayerAspectMode,
 } from "@/lib/video-player-layout";
 
+import { useAuth } from "@/lib/auth-context";
+import { useWatchTimeTracker } from "@/hooks/useWatchTimeTracker";
+import { resolveAuthenticatedUserId } from "@/lib/video-service";
+
 interface FaceTubeVideoPlayerProps {
+  videoId?: string | undefined;
   src?: string | undefined;
   poster?: string | undefined;
   title?: string | undefined;
@@ -62,6 +67,7 @@ function getMimeType(url: string): string {
 }
 
 export function FaceTubeVideoPlayer({
+  videoId,
   src,
   poster,
   title = "Video",
@@ -74,6 +80,8 @@ export function FaceTubeVideoPlayer({
 }: FaceTubeVideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const { user, profile, dbUser } = useAuth();
+  const authUserId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -166,6 +174,13 @@ export function FaceTubeVideoPlayer({
 
   const normalizedRotation = ((rotation % 360) + 360) % 360;
   const isRotated = normalizedRotation !== 0;
+
+  useWatchTimeTracker({
+    videoRef,
+    videoId,
+    isAuthenticated: Boolean(authUserId),
+    isReady: Boolean(cleanSrc && !hasError),
+  });
 
   // Reset playback state when source URL changes (without wiping metadata on unrelated prop renders)
   useEffect(() => {
@@ -1348,7 +1363,7 @@ export function FaceTubeVideoPlayer({
                 {isPlaying ? (
                   <Pause className="h-6 w-6 sm:h-7 sm:w-7 fill-current" />
                 ) : (
-                  <Play className="h-6 w-6 sm:h-7 sm:w-7 translate-x-[1.5px] fill-current" />
+                  <Play className="h-6 w-6 sm:h-7 sm:w-7 translate-x-[1.5px] fill-current text-red-600" />
                 )}
               </button>
 

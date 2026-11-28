@@ -35,7 +35,12 @@ import { DashboardSummaryCards } from "@/components/videohub/DashboardSummaryCar
 import { DashboardCategoriesSection } from "@/components/videohub/DashboardCategoriesSection";
 import { useAuth } from "@/lib/auth-context";
 import { resolveChannelAvatarUrl, resolveChannelDisplayName } from "@/lib/channel-branding";
-import { api } from "@/lib/api";
+import { api, type WatchTimeAnalyticsResponse } from "@/lib/api";
+import {
+  buildWatchTimeDashboardViewState,
+  formatWatchDurationCompact,
+  type WatchTimePeriod,
+} from "@/lib/watch-time-analytics";
 import {
   calculateUserVideoCounts,
   resolveAuthenticatedUserId,
@@ -65,18 +70,6 @@ export const Route = createFileRoute("/dashboard")({
   }),
   component: DashboardPage,
 });
-
-// Analytics trend data for Charts
-
-const WATCH_TIME_CHART_DATA = [
-  { day: "Mon", hours: 410 },
-  { day: "Tue", hours: 520 },
-  { day: "Wed", hours: 480 },
-  { day: "Thu", hours: 640 },
-  { day: "Fri", hours: 780 },
-  { day: "Sat", hours: 910 },
-  { day: "Sun", hours: 860 },
-];
 
 function DashboardPage() {
   const searchParams = Route.useSearch();
@@ -141,6 +134,12 @@ function DashboardPage() {
   } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isEarningsLoading, setIsEarningsLoading] = useState(false);
+
+  const [watchTimePeriod, setWatchTimePeriod] = useState<WatchTimePeriod>("7D");
+  const [watchTimeData, setWatchTimeData] = useState<WatchTimeAnalyticsResponse | null>(null);
+  const [isWatchTimeLoading, setIsWatchTimeLoading] = useState(true);
+  const [watchTimeError, setWatchTimeError] = useState<string | null>(null);
+  const [watchTimeRefreshKey, setWatchTimeRefreshKey] = useState(0);
 
   const userId = resolveAuthenticatedUserId({ user, profile, dbUser });
   const channelName = resolveChannelDisplayName({ user, profile, dbUser }, "Creator");
@@ -264,6 +263,53 @@ function DashboardPage() {
     };
   }, [userId, earningsPeriod]);
 
+  useEffect(() => {
+    let mounted = true;
+    if (!userId) {
+      setWatchTimeData(null);
+      setWatchTimeError(null);
+      setIsWatchTimeLoading(false);
+      return;
+    }
+
+    async function loadWatchTimeAnalytics() {
+      setIsWatchTimeLoading(true);
+      setWatchTimeError(null);
+      try {
+        const res = await api.watchTime.getAnalytics({
+          userId,
+          period: watchTimePeriod,
+        });
+        if (!mounted) return;
+        if (res && res.success) {
+          setWatchTimeData(res);
+          setWatchTimeError(null);
+        } else {
+          setWatchTimeData(null);
+          setWatchTimeError(res?.error || "Unable to load watch time analytics.");
+        }
+      } catch (err: unknown) {
+        if (!mounted) return;
+        const msg =
+          err instanceof Error && err.message
+            ? err.message
+            : "Unable to load watch time analytics.";
+        setWatchTimeData(null);
+        setWatchTimeError(msg);
+      } finally {
+        if (mounted) {
+          setIsWatchTimeLoading(false);
+        }
+      }
+    }
+
+    void loadWatchTimeAnalytics();
+    return () => {
+      mounted = false;
+    };
+  }, [userId, watchTimePeriod, watchTimeRefreshKey]);
+
+  const watchTimeView = buildWatchTimeDashboardViewState(watchTimeData);
   const currentCreatorRank = calculateRankFromSubscribers(subscriberCount);
   const adEarnings = calculateTotalAdEarnings(wallet);
 
@@ -523,41 +569,141 @@ function DashboardPage() {
             </p>
           </div>
 
-          {/* Chart 2: Watch Time Section */}
+          {/* Chart 2: Watch Time Section (Real Backend Analytics) */}
           <div className="rounded-3xl border border-border bg-card p-5 sm:p-6 shadow-card space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
                   <Clock className="h-3.5 w-3.5 text-blue-400" />
                   Watch Time (Hours)
                 </span>
-                <div className="text-2xl font-black text-foreground mt-0.5">4,660 hrs</div>
+                <div className="text-2xl font-black text-foreground mt-0.5">
+                  {isWatchTimeLoading ? (
+                    <span className="text-sm font-normal text-muted-foreground">Loading...</span>
+                  ) : watchTimeError ? (
+                    "--"
+                  ) : (
+                    watchTimeView.hoursLabel
+                  )}
+                </div>
               </div>
-              <span className="text-[11px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full flex items-center gap-0.5">
-                <TrendingUp className="h-3 w-3" /> +18.4%
-              </span>
+
+              <div className="flex flex-col items-end gap-1.5">
+                <div className="flex items-center rounded-xl bg-secondary/60 p-0.5 border border-border/50">
+                  {(["7D", "30D", "90D", "12M"] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      onClick={() => setWatchTimePeriod(p)}
+                      className={`rounded-lg px-2 py-0.5 text-[10px] font-semibold transition ${
+                        watchTimePeriod === p
+                          ? "bg-sky-500 text-black shadow-sm font-bold"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+
+                {!isWatchTimeLoading && !watchTimeError && (
+                  <span
+                    className={`text-[11px] font-bold px-2 py-0.5 rounded-full flex items-center gap-0.5 ${
+                      watchTimeView.growthDirection === "positive"
+                        ? "text-emerald-400 bg-emerald-500/10"
+                        : watchTimeView.growthDirection === "negative"
+                          ? "text-rose-400 bg-rose-500/10"
+                          : "text-muted-foreground bg-secondary/70"
+                    }`}
+                  >
+                    {watchTimeView.growthDirection !== "neutral" && (
+                      <TrendingUp className="h-3 w-3" />
+                    )}
+                    {watchTimeView.growthLabel}
+                  </span>
+                )}
+              </div>
             </div>
 
-            <div className="h-44 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={WATCH_TIME_CHART_DATA}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
-                  <XAxis dataKey="day" stroke="#71717a" fontSize={11} tickLine={false} />
-                  <YAxis stroke="#71717a" fontSize={11} tickLine={false} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#18181b",
-                      borderColor: "#27272a",
-                      borderRadius: "12px",
-                      fontSize: "12px",
-                    }}
-                  />
-                  <Bar dataKey="hours" fill="#38bdf8" radius={[6, 6, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+            {isWatchTimeLoading ? (
+              <div className="h-44 w-full flex items-center justify-center rounded-2xl bg-secondary/20 animate-pulse">
+                <span className="text-xs text-muted-foreground">
+                  Loading watch time analytics...
+                </span>
+              </div>
+            ) : watchTimeError ? (
+              <div className="h-44 w-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-rose-500/40 bg-rose-500/5 p-6 text-center space-y-2">
+                <Clock className="h-7 w-7 text-rose-400/70" />
+                <p className="text-xs font-semibold text-rose-300">{watchTimeError}</p>
+                <button
+                  type="button"
+                  onClick={() => setWatchTimeRefreshKey((k) => k + 1)}
+                  className="rounded-lg bg-secondary px-3 py-1 text-[11px] font-bold text-foreground hover:bg-secondary/80 transition cursor-pointer"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : !watchTimeView.hasData || watchTimeView.history.length === 0 ? (
+              <div className="h-44 w-full flex flex-col items-center justify-center rounded-2xl border border-dashed border-border/60 bg-secondary/10 p-6 text-center">
+                <Clock className="h-8 w-8 text-blue-400/50 mb-2" />
+                <p className="text-xs font-semibold text-foreground">No data yet</p>
+                <p className="text-[11px] text-muted-foreground/70 mt-1 max-w-[240px]">
+                  Verified watch time from authenticated viewers will appear here
+                </p>
+              </div>
+            ) : (
+              <div className="h-44 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={watchTimeView.history}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                    <XAxis dataKey="day" stroke="#71717a" fontSize={11} tickLine={false} />
+                    <YAxis stroke="#71717a" fontSize={11} tickLine={false} />
+                    <Tooltip
+                      contentStyle={{
+                        backgroundColor: "#18181b",
+                        borderColor: "#27272a",
+                        borderRadius: "12px",
+                        fontSize: "12px",
+                      }}
+                      content={({ active, payload, label }) => {
+                        if (!active || !payload || !payload.length || !payload[0]) return null;
+                        const pt = payload[0].payload as {
+                          date?: string;
+                          hours?: number;
+                          watched_seconds?: number;
+                        };
+                        const sec = Number(pt?.watched_seconds || 0);
+                        return (
+                          <div className="rounded-xl border border-border bg-popover/95 px-3 py-2 shadow-xl backdrop-blur-md text-xs space-y-0.5">
+                            <div className="font-bold text-foreground">{pt?.date || label}</div>
+                            <div className="text-sky-400 font-semibold">
+                              {Number(pt?.hours || 0)} hrs ({formatWatchDurationCompact(sec)})
+                            </div>
+                          </div>
+                        );
+                      }}
+                    />
+                    <Bar dataKey="hours" fill="#38bdf8" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+
             <p className="text-[11px] text-muted-foreground text-center">
-              Avg view duration: <strong>8m 42s</strong> across all videos
+              {isWatchTimeLoading ? (
+                "Calculating average view duration..."
+              ) : watchTimeError ? (
+                "Average view duration unavailable"
+              ) : !watchTimeView.hasData ? (
+                <>
+                  Avg view duration: <strong>No data yet</strong>
+                </>
+              ) : (
+                <>
+                  Avg view duration: <strong>{watchTimeView.avgViewDurationLabel}</strong> across
+                  qualified views
+                </>
+              )}
             </p>
           </div>
 

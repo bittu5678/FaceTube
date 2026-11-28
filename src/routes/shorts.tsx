@@ -31,9 +31,11 @@ import {
   getVideoBadgeLabels,
   isPubliclyCacheableVideo,
   isShortVideo,
+  resolveAuthenticatedUserId,
 } from "@/lib/video-service";
 import { getShortsStageCardClass } from "@/lib/video-player-layout";
 import { api } from "@/lib/api";
+import { useWatchTimeTracker } from "@/hooks/useWatchTimeTracker";
 
 export interface ShortsSearch {
   id?: string | undefined;
@@ -59,7 +61,8 @@ export const Route = createFileRoute("/shorts")({
 function ShortsPage() {
   const router = useRouter();
   const searchParams = Route.useSearch();
-  const { user, profile } = useAuth();
+  const { user, profile, dbUser } = useAuth();
+  const authUserId = resolveAuthenticatedUserId({ user, profile, dbUser });
 
   const handleBack = useCallback(
     (e?: React.MouseEvent) => {
@@ -232,6 +235,13 @@ function ShortsPage() {
       vid.pause();
     }
   }, [isPlaying, isMuted, activeShort?.id]);
+
+  useWatchTimeTracker({
+    videoRef: shortVideoRef,
+    videoId: activeShort?.videoUrl ? activeShort.id : undefined,
+    isAuthenticated: Boolean(authUserId),
+    isReady: Boolean(activeShort?.videoUrl && !loadingShorts),
+  });
 
   // Clean up any pending single-tap timeout on unmount
   useEffect(() => {
@@ -712,7 +722,7 @@ function ShortsPage() {
               >
                 {!isPlaying && (
                   <div className="grid h-16 w-16 place-items-center rounded-full bg-[#00D6C9] text-zinc-950 shadow-2xl ring-1 ring-white/25 transition hover:bg-[#00B8AD] active:bg-[#00B8AD] animate-in fade-in zoom-in pointer-events-none">
-                    <Play className="h-8 w-8 translate-x-0.5 fill-current" />
+                    <Play className="h-8 w-8 translate-x-0.5 fill-current text-red-600" />
                   </div>
                 )}
               </div>

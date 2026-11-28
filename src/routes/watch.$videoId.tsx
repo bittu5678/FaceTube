@@ -390,6 +390,7 @@ function WatchPage() {
           <div className="-mx-4 w-[calc(100%+2rem)] sm:mx-0 sm:w-full">
             <FaceTubeVideoPlayer
               key={video.id}
+              videoId={video.id}
               src={video.videoUrl}
               poster={video.thumb || video.thumbnailUrl}
               title={video.title}
