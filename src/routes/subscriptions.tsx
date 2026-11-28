@@ -28,7 +28,14 @@ import { toast } from "sonner";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { VideoCard } from "@/components/videohub/VideoCard";
-import { creators, allVideos } from "@/data/videos";
+import type { Video } from "@/data/videos";
+import {
+  convertUploadedToCatalogVideo,
+  deriveCreatorsFromVideos,
+  fetchUploadedVideos,
+  isPubliclyCacheableVideo,
+  type DerivedCreator,
+} from "@/lib/video-service";
 import { useAuth } from "@/lib/auth-context";
 import { api } from "@/lib/api";
 import { initiatePaidSubscriptionPayment, preloadRazorpayScript } from "@/lib/razorpay-service";
@@ -163,6 +170,27 @@ function SubscriptionsPage() {
     "All",
   );
   const [selectedCreator, setSelectedCreator] = useState<string | null>(null);
+  const [channelVideos, setChannelVideos] = useState<Video[]>([]);
+  const [channelCreators, setChannelCreators] = useState<DerivedCreator[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    fetchUploadedVideos()
+      .then((uploaded) => {
+        if (!active) return;
+        const publicUploads = uploaded.filter(isPubliclyCacheableVideo);
+        setChannelVideos(publicUploads.map(convertUploadedToCatalogVideo));
+        setChannelCreators(deriveCreatorsFromVideos(publicUploads));
+      })
+      .catch(() => {
+        if (!active) return;
+        setChannelVideos([]);
+        setChannelCreators([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Subscriber Plans state
   const [plans, setPlans] = useState<SubscriberPlan[]>(DEFAULT_PLANS);
@@ -469,7 +497,7 @@ function SubscriptionsPage() {
     }
   };
 
-  const filteredVideos = allVideos.filter((v) => {
+  const filteredVideos = channelVideos.filter((v) => {
     if (selectedCreator) {
       return v.channel === selectedCreator;
     }
@@ -1340,19 +1368,11 @@ function SubscriptionsPage() {
                   </span>
                 </button>
 
-                {creators.map((c, i) => {
+                {channelCreators.map((c) => {
                   const isSelected = selectedCreator === c.name;
-                  const isLive = i === 1; // demo live badge for 1 channel
-                  const creatorMeta = c as typeof c & {
-                    channelLogoUrl?: string | undefined;
-                    channel_logo_url?: string | undefined;
-                    channelName?: string | undefined;
-                    channel_name?: string | undefined;
-                  };
-                  const creatorName = creatorMeta.channelName || creatorMeta.channel_name || c.name;
                   return (
                     <button
-                      key={c.name}
+                      key={c.key}
                       type="button"
                       onClick={() => setSelectedCreator(isSelected ? null : c.name)}
                       className={`relative flex flex-col items-center gap-1.5 shrink-0 group transition ${
@@ -1363,30 +1383,20 @@ function SubscriptionsPage() {
                         className={`relative grid h-14 w-14 place-items-center rounded-full font-bold text-sm text-white shadow-sm transition-all ${
                           isSelected
                             ? "ring-4 ring-brand bg-gradient-to-br from-brand to-brand-dark"
-                            : isLive
-                              ? "ring-2 ring-red-500 bg-gradient-to-br from-red-600 to-amber-600"
-                              : "ring-2 ring-border bg-gradient-to-br from-neutral-800 to-neutral-700 group-hover:ring-brand/50"
+                            : "ring-2 ring-border bg-gradient-to-br from-neutral-800 to-neutral-700 group-hover:ring-brand/50"
                         }`}
                       >
                         <ChannelAvatar
-                          src={creatorMeta.channelLogoUrl || creatorMeta.channel_logo_url}
-                          name={creatorName}
+                          src={c.channelLogoUrl}
+                          name={c.name}
                           initials={c.initials}
                           sizeClassName="h-14 w-14"
                           imageRingClassName=""
                           fallbackClassName="bg-transparent text-sm font-bold text-white"
                         />
-                        {isLive && (
-                          <span className="absolute -bottom-1 rounded-full bg-red-600 px-1.5 py-0.2 text-[8px] font-black uppercase text-white tracking-widest ring-2 ring-background">
-                            LIVE
-                          </span>
-                        )}
-                        {!isLive && i % 2 === 0 && (
-                          <span className="absolute top-0 right-0 h-2.5 w-2.5 rounded-full bg-brand ring-2 ring-background" />
-                        )}
                       </div>
                       <span className="text-[11px] font-medium text-foreground max-w-[64px] truncate">
-                        {creatorName}
+                        {c.name}
                       </span>
                     </button>
                   );
@@ -1423,11 +1433,17 @@ function SubscriptionsPage() {
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                {filteredVideos.map((v) => (
-                  <VideoCard key={`sub-video-${v.id}`} video={v} />
-                ))}
-              </div>
+              {filteredVideos.length === 0 ? (
+                <p className="rounded-2xl border border-dashed border-border p-8 text-center text-sm text-muted-foreground">
+                  No creator uploads available right now.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {filteredVideos.map((v) => (
+                    <VideoCard key={`sub-video-${v.id}`} video={v} />
+                  ))}
+                </div>
+              )}
             </section>
           </div>
         )}

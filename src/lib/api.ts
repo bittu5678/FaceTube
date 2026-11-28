@@ -768,9 +768,10 @@ export const api = {
       );
     },
 
-    get: async (id: string) => {
+    get: async (id: string, options?: { skipView?: boolean }) => {
+      const skipViewQs = options?.skipView ? "&skipView=1" : "";
       return apiFetch<{ success: boolean; video: any }>(
-        `/videos/get.php?id=${encodeURIComponent(id)}`,
+        `/videos/get.php?id=${encodeURIComponent(id)}${skipViewQs}`,
       );
     },
 

@@ -18,6 +18,10 @@ export type Video = {
   channel: string;
   initials: string;
   views: string;
+  viewsCount?: number;
+  likes?: number;
+  liked?: boolean;
+  viewerLiked?: boolean;
   age: string;
   duration: string;
   thumb: string;

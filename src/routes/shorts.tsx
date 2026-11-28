@@ -91,6 +91,9 @@ function ShortsPage() {
 
   useEffect(() => {
     let mounted = true;
+    if (!authUserId) {
+      setLiked({});
+    }
     setLoadingShorts(true);
     fetchUploadedVideos({ contentType: "short" })
       .then((videos) => {
@@ -101,32 +104,59 @@ function ShortsPage() {
               isPubliclyCacheableVideo(v) &&
               isShortVideo({ contentType: v.contentType, duration: v.duration }),
           )
-          .map((v): ShortItem => ({
-            id: v.id,
-            title: v.title,
-            creator: v.channelName || v.creatorName || "FaceTube Creator",
-            creatorHandle: `@${(v.channelName || v.creatorName || "creator").toLowerCase().replace(/\s+/g, "")}`,
-            initials: (v.channelName || v.creatorName || "FC").slice(0, 2).toUpperCase(),
-            views: `${(v.views || 0).toLocaleString()} views`,
-            likes: (v.likes || 0).toLocaleString(),
-            comments: "0",
-            shares: "0",
-            soundTrack: `${v.channelName || v.creatorName || "FaceTube"} · Original Audio`,
-            tags: [v.category?.toLowerCase() || "shorts", "facetube"],
-            thumb: v.thumbnailUrl,
-            aspectColor: "from-purple-900/60 to-brand/80",
-            videoUrl: v.videoUrl,
-            userId: String(v.userId || (v as any).user_id || ""),
-            channelLogoUrl: v.channelLogoUrl || (v as any).channel_logo_url,
-            videoType: v.videoType,
-            isPromoted: v.isPromoted,
-            promotionExpiresAt: v.promotionExpiresAt,
-          }));
+          .map((v): ShortItem => {
+            const viewerLiked = Boolean(
+              authUserId && (v.viewerLiked ?? (typeof v.liked === "boolean" && v.liked)),
+            );
+            return {
+              id: v.id,
+              title: v.title,
+              creator: v.channelName || v.creatorName || "FaceTube Creator",
+              creatorHandle: `@${(v.channelName || v.creatorName || "creator").toLowerCase().replace(/\s+/g, "")}`,
+              initials: (v.channelName || v.creatorName || "FC").slice(0, 2).toUpperCase(),
+              views: `${(Number(v.views) || 0).toLocaleString()} views`,
+              viewsCount: Number(v.views) || 0,
+              likes: (Number(v.likes) || 0).toLocaleString(),
+              likesCount: Number(v.likes) || 0,
+              liked: viewerLiked,
+              viewerLiked,
+              comments: "0",
+              commentsCount: 0,
+              shares: "",
+              soundTrack: `${v.channelName || v.creatorName || "FaceTube"} · Original Audio`,
+              tags: [v.category?.toLowerCase() || "shorts", "facetube"],
+              thumb: v.thumbnailUrl,
+              aspectColor: "from-purple-900/60 to-brand/80",
+              videoUrl: v.videoUrl,
+              userId: String(v.userId || (v as any).user_id || ""),
+              channelLogoUrl: v.channelLogoUrl || (v as any).channel_logo_url,
+              videoType: v.videoType,
+              isPromoted: v.isPromoted,
+              promotionExpiresAt: v.promotionExpiresAt,
+            };
+          });
         setUploadedShorts(mapped);
+        if (authUserId) {
+          const nextLiked: Record<string, boolean> = {};
+          for (const item of mapped) {
+            nextLiked[item.id] = Boolean(item.viewerLiked);
+          }
+          setLiked(nextLiked);
+        } else {
+          setLiked({});
+        }
+        const nextLikeCounts: Record<string, number> = {};
+        for (const item of mapped) {
+          nextLikeCounts[item.id] = Number(item.likesCount) || 0;
+        }
+        setLikeCounts(nextLikeCounts);
       })
       .catch((err) => {
         console.warn("Could not fetch shorts from API:", err);
-        if (mounted) setUploadedShorts([]);
+        if (mounted) {
+          setUploadedShorts([]);
+          setLiked({});
+        }
       })
       .finally(() => {
         if (mounted) setLoadingShorts(false);
@@ -134,7 +164,7 @@ function ShortsPage() {
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [authUserId]);
 
   const allShorts: ShortItem[] = useMemo(() => {
     const seen = new Set<string>();
@@ -165,6 +195,8 @@ function ShortsPage() {
     }
   }, [searchParams.id, allShorts]);
   const [liked, setLiked] = useState<Record<string, boolean>>({});
+  const [likeCounts, setLikeCounts] = useState<Record<string, number>>({});
+  const [isLiking, setIsLiking] = useState<Record<string, boolean>>({});
   const [disliked, setDisliked] = useState<Record<string, boolean>>({});
   const [subscribedCreators, setSubscribedCreators] = useState<Record<string, boolean>>({});
   const [selfCreators, setSelfCreators] = useState<Record<string, boolean>>({});
@@ -173,14 +205,11 @@ function ShortsPage() {
   const [isPlaying, setIsPlaying] = useState(true);
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [newComment, setNewComment] = useState("");
+  const [isPostingComment, setIsPostingComment] = useState(false);
   const [shortComments, setShortComments] = useState<
     Record<string, Array<{ id: string; user: string; text: string; time: string }>>
-  >({
-    "s-1": [
-      { id: "1", user: "Jordan Cole", text: "That transition at 0:05 was insane!", time: "2h ago" },
-      { id: "2", user: "Sara Connor", text: "Which lens did you use for this?", time: "4h ago" },
-    ],
-  });
+  >({});
+  const [shortCommentsTotal, setShortCommentsTotal] = useState<Record<string, number>>({});
 
   const touchStartY = useRef<number | null>(null);
   const activeShort: ShortItem | undefined = allShorts[currentIndex] ?? allShorts[0];
@@ -224,6 +253,43 @@ function ShortsPage() {
     setShortProgressPercent(0);
     setShortVideoDims(null);
   }, [currentIndex, activeShort?.id, resetZoom]);
+
+  useEffect(() => {
+    const shortId = activeShort?.id;
+    if (!shortId) return;
+    let active = true;
+    api.comments
+      .list(shortId)
+      .then((res) => {
+        if (!active) return;
+        const rawList = Array.isArray(res?.comments) ? res.comments : [];
+        const mapped = rawList.map((c: any) => {
+          const createdRaw = String(c.createdAt || c.created_at || "");
+          const parsedDate = createdRaw
+            ? new Date(createdRaw.includes("T") ? createdRaw : createdRaw.replace(" ", "T") + "Z")
+            : null;
+          const timeLabel =
+            parsedDate && !Number.isNaN(parsedDate.getTime())
+              ? parsedDate.toLocaleDateString()
+              : "Recently";
+          return {
+            id: String(c.id),
+            user: String(c.userName || c.user_name || "FaceTube Viewer"),
+            text: String(c.comment || ""),
+            time: timeLabel,
+          };
+        });
+        setShortComments((prev) => ({ ...prev, [shortId]: mapped }));
+        setShortCommentsTotal((prev) => ({
+          ...prev,
+          [shortId]: typeof res?.total === "number" ? res.total : mapped.length,
+        }));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [activeShort?.id]);
 
   useEffect(() => {
     const vid = shortVideoRef.current;
@@ -424,14 +490,32 @@ function ShortsPage() {
     }
   };
 
-  const toggleLike = (id: string) => {
-    setLiked((prev) => {
-      const next = !prev[id];
-      if (next) toast.success("Added to Liked Videos");
-      return { ...prev, [id]: next };
-    });
-    if (!liked[id] && disliked[id]) {
-      setDisliked((prev) => ({ ...prev, [id]: false }));
+  const toggleLike = async (id: string) => {
+    if (!authUserId) {
+      toast.error("Please sign in to like shorts.");
+      return;
+    }
+    if (isLiking[id]) return;
+    setIsLiking((prev) => ({ ...prev, [id]: true }));
+    try {
+      const res = await api.videos.like(id, authUserId);
+      if (res && res.success) {
+        const nextLiked = Boolean(res.liked);
+        setLiked((prev) => ({ ...prev, [id]: nextLiked }));
+        setLikeCounts((prev) => ({ ...prev, [id]: Number(res.likes) || 0 }));
+        if (nextLiked) {
+          toast.success("Liked");
+          if (disliked[id]) {
+            setDisliked((prev) => ({ ...prev, [id]: false }));
+          }
+        }
+      } else {
+        toast.error("Could not update like.");
+      }
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Could not update like.");
+    } finally {
+      setIsLiking((prev) => ({ ...prev, [id]: false }));
     }
   };
 
@@ -517,22 +601,55 @@ function ShortsPage() {
     }
   };
 
-  const handleAddComment = (e: React.FormEvent) => {
+  const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activeShort || !newComment.trim()) return;
-    const authorName = profile?.full_name || user?.email?.split("@")[0] || "You";
-    const newEntry = {
-      id: String(Date.now()),
-      user: authorName,
-      text: newComment.trim(),
-      time: "Just now",
-    };
-    setShortComments((prev) => ({
-      ...prev,
-      [activeShort.id]: [newEntry, ...(prev[activeShort.id] || [])],
-    }));
-    setNewComment("");
-    toast.success("Comment posted!");
+    const trimmed = newComment.trim();
+    if (!activeShort || !trimmed) return;
+    if (!authUserId) {
+      toast.error("Please sign in to comment on shorts.");
+      return;
+    }
+    if (isPostingComment) return;
+
+    const authorName =
+      profile?.channel_name || profile?.full_name || user?.email?.split("@")[0] || "You";
+    const authorAvatar = profile?.channel_logo_url || profile?.avatar_url || undefined;
+    setIsPostingComment(true);
+    try {
+      const res = await api.comments.create({
+        videoId: activeShort.id,
+        userId: authUserId,
+        userName: authorName,
+        ...(authorAvatar ? { avatarUrl: authorAvatar } : {}),
+        comment: trimmed,
+      });
+      if (res && res.success) {
+        const created = res.comment || {};
+        const newEntry = {
+          id: String(created.id || Date.now()),
+          user: String(created.userName || created.user_name || authorName),
+          text: String(created.comment || trimmed),
+          time: "Just now",
+        };
+        setShortComments((prev) => ({
+          ...prev,
+          [activeShort.id]: [newEntry, ...(prev[activeShort.id] || [])],
+        }));
+        setShortCommentsTotal((prev) => ({
+          ...prev,
+          [activeShort.id]:
+            (prev[activeShort.id] ?? shortComments[activeShort.id]?.length ?? 0) + 1,
+        }));
+        setNewComment("");
+        toast.success("Comment posted!");
+      } else {
+        toast.error("Failed to post comment.");
+      }
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Failed to post comment.");
+    } finally {
+      setIsPostingComment(false);
+    }
   };
 
   return (
@@ -811,7 +928,7 @@ function ShortsPage() {
                   <ThumbsUp className="h-5 w-5" />
                 </div>
                 <span className="text-[11px] font-semibold text-foreground">
-                  {liked[activeShort.id] ? "Liked" : activeShort.likes}
+                  {(likeCounts[activeShort.id] ?? activeShort.likesCount ?? 0).toLocaleString()}
                 </span>
               </button>
 
@@ -845,8 +962,12 @@ function ShortsPage() {
                   <MessageSquare className="h-5 w-5" />
                 </div>
                 <span className="text-[11px] font-semibold text-foreground">
-                  {(shortComments[activeShort.id]?.length || 0) +
-                    parseInt(activeShort.comments, 10) || activeShort.comments}
+                  {(
+                    shortCommentsTotal[activeShort.id] ??
+                    shortComments[activeShort.id]?.length ??
+                    activeShort.commentsCount ??
+                    0
+                  ).toLocaleString()}
                 </span>
               </button>
 
@@ -869,9 +990,7 @@ function ShortsPage() {
                 <div className="grid h-11 w-11 place-items-center rounded-full bg-secondary/80 text-foreground hover:bg-secondary backdrop-blur-md transition">
                   <Share2 className="h-5 w-5" />
                 </div>
-                <span className="text-[11px] font-semibold text-foreground">
-                  {activeShort.shares}
-                </span>
+                <span className="text-[11px] font-semibold text-foreground">Share</span>
               </button>
 
               {/* Up / Down Navigation Controls for Desktop */}

@@ -1,12 +1,18 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { History, Trash2, Pause, Play, Search, X, ShieldAlert } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
-import { allVideos, type Video } from "@/data/videos";
-import { getVideoBadgeLabels } from "@/lib/video-service";
+import type { Video } from "@/data/videos";
+import {
+  convertUploadedToCatalogVideo,
+  fetchUploadedVideos,
+  getVideoBadgeLabels,
+  isPubliclyCacheableVideo,
+} from "@/lib/video-service";
 import {
   clearRecentWatchedVideoIds,
+  getRecentWatchedVideoIds,
   isWatchHistoryPaused,
   setWatchHistoryPaused,
 } from "@/lib/watch-history";
@@ -25,9 +31,39 @@ export const Route = createFileRoute("/history")({
 });
 
 export function HistoryPage() {
-  const [historyList, setHistoryList] = useState<Video[]>(allVideos.slice(0, 8));
+  const [historyList, setHistoryList] = useState<Video[]>([]);
   const [isPaused, setIsPaused] = useState<boolean>(() => isWatchHistoryPaused());
   const [filterQuery, setFilterQuery] = useState("");
+
+  useEffect(() => {
+    const watchedIds = getRecentWatchedVideoIds();
+    if (watchedIds.length === 0) {
+      setHistoryList([]);
+      return;
+    }
+    let active = true;
+    fetchUploadedVideos()
+      .then((uploaded) => {
+        if (!active) return;
+        const catalogById = new Map<string, Video>();
+        for (const item of uploaded) {
+          if (item && item.id && isPubliclyCacheableVideo(item)) {
+            const cat = convertUploadedToCatalogVideo(item);
+            catalogById.set(cat.id, cat);
+          }
+        }
+        const resolved = watchedIds
+          .map((id) => catalogById.get(id))
+          .filter((v): v is Video => Boolean(v));
+        setHistoryList(resolved);
+      })
+      .catch(() => {
+        if (active) setHistoryList([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const handleRemove = (id: string) => {
     setHistoryList((prev) => prev.filter((v) => v.id !== id));
@@ -90,15 +126,14 @@ export function HistoryPage() {
               </div>
             ) : (
               <div className="space-y-4">
-                {filtered.map((video, idx) => {
-                  const progressPct = [85, 45, 100, 20, 60, 90, 30, 75][idx % 8];
+                {filtered.map((video) => {
                   const labels = getVideoBadgeLabels(video);
                   return (
                     <div
                       key={`hist-${video.id}`}
                       className="group flex flex-col sm:flex-row gap-4 p-3 rounded-2xl border border-border bg-card transition hover:border-brand/40"
                     >
-                      {/* Video Thumbnail with Progress Bar */}
+                      {/* Video Thumbnail */}
                       <Link
                         to="/watch/$videoId"
                         params={{ videoId: video.id }}
@@ -112,10 +147,6 @@ export function HistoryPage() {
                         <span className="absolute bottom-1.5 right-1.5 rounded bg-black/80 px-1.5 py-0.5 text-[10px] font-bold text-white">
                           {video.duration}
                         </span>
-                        {/* YouTube style Red Watched Progress Bar */}
-                        <div className="absolute bottom-0 inset-x-0 h-1 bg-black/60">
-                          <div className="h-full bg-brand" style={{ width: `${progressPct}%` }} />
-                        </div>
                       </Link>
 
                       {/* Video Info */}
@@ -163,10 +194,6 @@ export function HistoryPage() {
                         </div>
 
                         <div className="flex items-center gap-2 mt-3 text-[11px] text-muted-foreground">
-                          <span className="rounded-full bg-secondary px-2 py-0.5 font-semibold text-foreground">
-                            {progressPct}% watched
-                          </span>
-                          <span>•</span>
                           <span>Watched recently</span>
                         </div>
                       </div>

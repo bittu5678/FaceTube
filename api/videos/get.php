@@ -108,8 +108,34 @@ try {
         jsonResponse(['success' => false, 'error' => 'Unauthorized: Unpaid Sponsor videos are only accessible to their creator or administrators.'], 403);
     }
 
-    // Increment views ONLY after access authorization succeeds
-    $pdo->prepare('UPDATE uploaded_videos SET views = views + 1 WHERE id = ?')->execute([$id]);
+    $rawSkipView = strtolower(trim((string)($_GET['skipView'] ?? ($_GET['skip_view'] ?? ''))));
+    $skipView = in_array($rawSkipView, ['1', 'true'], true);
+
+    // Increment views ONLY after access authorization succeeds (unless skipView is requested)
+    if (!$skipView) {
+        $pdo->prepare('UPDATE uploaded_videos SET views = views + 1 WHERE id = ?')->execute([$id]);
+    }
+
+    $viewerLiked = false;
+    if ($authUser) {
+        $authUserId = trim((string)($authUser['user_id'] ?? ''));
+        $authAltId = trim((string)($authUser['id'] ?? ''));
+        $primaryLikeUid = $authUserId !== '' ? $authUserId : $authAltId;
+        if ($primaryLikeUid !== '') {
+            try {
+                if ($authAltId !== '' && strcasecmp($authAltId, $primaryLikeUid) !== 0) {
+                    $stmtLike = $pdo->prepare('SELECT id FROM video_likes WHERE video_id = ? AND (UPPER(user_id) = UPPER(?) OR UPPER(user_id) = UPPER(?)) LIMIT 1');
+                    $stmtLike->execute([$id, $primaryLikeUid, $authAltId]);
+                } else {
+                    $stmtLike = $pdo->prepare('SELECT id FROM video_likes WHERE video_id = ? AND UPPER(user_id) = UPPER(?) LIMIT 1');
+                    $stmtLike->execute([$id, $primaryLikeUid]);
+                }
+                $viewerLiked = (bool)$stmtLike->fetch();
+            } catch (Throwable $_likeErr) {
+                $viewerLiked = false;
+            }
+        }
+    }
 
     $expiryTime = !empty($row['promotion_expires_at']) ? strtotime($row['promotion_expires_at']) : false;
     $isActivePromoted = !empty($row['is_promoted']) && $expiryTime !== false && $expiryTime > time();
@@ -143,8 +169,11 @@ try {
         'category' => $row['category'] ?? 'General',
         'duration' => $row['duration'] ?? '0:00',
         'visibility' => $visibility,
-        'views' => (int)$row['views'] + 1,
+        'views' => (int)$row['views'] + ($skipView ? 0 : 1),
         'likes' => (int)$row['likes'],
+        'viewerLiked' => $viewerLiked,
+        'viewer_liked' => $viewerLiked,
+        'liked' => $viewerLiked,
         'paymentStatus' => $row['payment_status'],
         'payment_status' => $row['payment_status'],
         'paymentId' => $row['payment_id'],

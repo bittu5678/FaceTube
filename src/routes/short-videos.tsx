@@ -1,15 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, useEffect, useMemo } from "react";
-import {
-  Clapperboard,
-  Plus,
-  Eye,
-  Heart,
-  MessageCircle,
-  Share2,
-  TrendingUp,
-  Sparkles,
-} from "lucide-react";
+import { Clapperboard, Plus } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import type { ShortItem } from "@/data/shorts";
@@ -56,10 +47,13 @@ function ShortVideosPage() {
               creator: channel,
               creatorHandle: `@${channel.toLowerCase().replace(/\s+/g, "")}`,
               initials: (channel.slice(0, 2) || "FC").toUpperCase(),
-              views: `${(v.views || 0).toLocaleString()} views`,
-              likes: (v.likes || 0).toLocaleString(),
+              views: `${(Number(v.views) || 0).toLocaleString()} views`,
+              viewsCount: Number(v.views) || 0,
+              likes: (Number(v.likes) || 0).toLocaleString(),
+              likesCount: Number(v.likes) || 0,
               comments: "0",
-              shares: "0",
+              commentsCount: 0,
+              shares: "",
               soundTrack: `${channel} · Original Audio`,
               tags: [v.category?.toLowerCase() || "shorts", "facetube"],
               thumb: v.thumbnailUrl,
@@ -94,6 +88,16 @@ function ShortVideosPage() {
     }
     return list;
   }, [uploadedShorts]);
+
+  const totalShortViews = useMemo(
+    () => allShorts.reduce((sum, s) => sum + (s.viewsCount ?? 0), 0),
+    [allShorts],
+  );
+  const totalShortLikes = useMemo(
+    () => allShorts.reduce((sum, s) => sum + (s.likesCount ?? 0), 0),
+    [allShorts],
+  );
+
   return (
     <VideoHubLayout>
       <div className="px-4 py-6 sm:px-6 lg:px-8 space-y-6">
@@ -132,26 +136,25 @@ function ShortVideosPage() {
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium">Uploaded Shorts</span>
-            <p className="text-2xl font-black text-brand">18</p>
-            <p className="text-[11px] text-muted-foreground">Vertical reels</p>
+            <p className="text-2xl font-black text-brand">{allShorts.length.toLocaleString()}</p>
+            <p className="text-[11px] text-muted-foreground">Public short videos</p>
           </div>
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium">Shorts Views</span>
-            <p className="text-2xl font-black text-foreground">280.4K</p>
-            <p className="text-[11px] text-emerald-400 font-semibold">+42% this week</p>
+            <p className="text-2xl font-black text-foreground">
+              {totalShortViews.toLocaleString()}
+            </p>
+            <p className="text-[11px] text-muted-foreground">Across uploaded shorts</p>
           </div>
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium">Total Likes</span>
-            <p className="text-2xl font-black text-foreground">34.2K</p>
-            <p className="text-[11px] text-muted-foreground">94.8% positive ratio</p>
-          </div>
-          <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
-            <span className="text-xs text-muted-foreground font-medium">Shorts Bonus Earned</span>
-            <p className="text-2xl font-black text-emerald-400">₹340.50</p>
-            <p className="text-[11px] text-muted-foreground">Creator fund payout</p>
+            <p className="text-2xl font-black text-foreground">
+              {totalShortLikes.toLocaleString()}
+            </p>
+            <p className="text-[11px] text-muted-foreground">Across uploaded shorts</p>
           </div>
         </div>
 

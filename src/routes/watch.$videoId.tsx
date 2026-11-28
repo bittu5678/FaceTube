@@ -1,5 +1,5 @@
 import { createFileRoute, Link, notFound, useRouter } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   Play,
   ThumbsUp,
@@ -29,6 +29,7 @@ import {
   convertUploadedToCatalogVideo,
   getVideoBadgeLabels,
   isPubliclyCacheableVideo,
+  resolveAuthenticatedUserId,
   type UploadedVideo,
 } from "@/lib/video-service";
 import {
@@ -49,6 +50,7 @@ export const Route = createFileRoute("/watch/$videoId")({
       return {
         video: resolution.video,
         needsClientAuth: false,
+        viewerAuthHydrated: typeof window !== "undefined" && Boolean(getStoredAuthToken()),
         videoId: params.videoId,
       };
     }
@@ -56,6 +58,7 @@ export const Route = createFileRoute("/watch/$videoId")({
       return {
         video: null as Video | null,
         needsClientAuth: true,
+        viewerAuthHydrated: false,
         videoId: params.videoId,
       };
     }
@@ -102,7 +105,12 @@ function WatchNotFound() {
 }
 
 function WatchPage() {
-  const { video: initialVideo, needsClientAuth, videoId } = Route.useLoaderData();
+  const {
+    video: initialVideo,
+    needsClientAuth,
+    viewerAuthHydrated,
+    videoId,
+  } = Route.useLoaderData();
   const [video, setVideo] = useState<Video | null>(initialVideo);
   const [verifyingAccess, setVerifyingAccess] = useState<boolean>(() =>
     Boolean(needsClientAuth && !initialVideo),
@@ -110,11 +118,16 @@ function WatchPage() {
   const [accessDenied, setAccessDenied] = useState<boolean>(false);
 
   const router = useRouter();
-  const { user, profile } = useAuth();
+  const { user, profile, dbUser } = useAuth();
+  const authUserId = resolveAuthenticatedUserId({ user, profile, dbUser });
+  const clientAuthVideoIdRef = useRef<string | null>(null);
+  const hydratedAuthKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     setVideo(initialVideo);
     setAccessDenied(false);
+    clientAuthVideoIdRef.current = null;
+    hydratedAuthKeyRef.current = null;
 
     if (!needsClientAuth || initialVideo) {
       setVerifyingAccess(false);
@@ -134,6 +147,7 @@ function WatchPage() {
       .then((authorizedVideo) => {
         if (!active) return;
         if (authorizedVideo) {
+          clientAuthVideoIdRef.current = authorizedVideo.id;
           setVideo(authorizedVideo);
           setAccessDenied(false);
         } else {
@@ -182,6 +196,11 @@ function WatchPage() {
   const [isSelfChannel, setIsSelfChannel] = useState(false);
 
   useEffect(() => {
+    setSubscribed(false);
+    setSubscriberCount(null);
+    setIsSelfChannel(false);
+    setIsSubscribing(false);
+
     if (!video || !creatorUserId) return;
     let mounted = true;
     api.channel
@@ -197,7 +216,7 @@ function WatchPage() {
     return () => {
       mounted = false;
     };
-  }, [video, creatorUserId]);
+  }, [video, creatorUserId, authUserId]);
 
   const handleToggleSubscribe = async () => {
     if (!video || !creatorUserId) return;
@@ -241,29 +260,142 @@ function WatchPage() {
     }
   };
 
-  const [liked, setLiked] = useState(false);
+  const [liked, setLiked] = useState<boolean>(() =>
+    Boolean(
+      (initialVideo as any)?.viewerLiked ??
+      (typeof (initialVideo as any)?.liked === "boolean" && (initialVideo as any).liked),
+    ),
+  );
+  const [likeCount, setLikeCount] = useState<number>(
+    () => Number((initialVideo as any)?.likes) || 0,
+  );
+  const [isLiking, setIsLiking] = useState(false);
   const [disliked, setDisliked] = useState(false);
   const [saved, setSaved] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [commentText, setCommentText] = useState("");
+  const [isPostingComment, setIsPostingComment] = useState(false);
+  const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentsTotal, setCommentsTotal] = useState<number>(0);
   const [comments, setComments] = useState<
     Array<{ id: string; n: string; i: string; t: string; time: string; avatar?: string | null }>
-  >([
-    {
-      id: "c1",
-      n: "Aria Kapoor",
-      i: "AK",
-      t: "The pacing on this is perfect. Bookmarked the whole middle section.",
-      time: "2 days ago",
-    },
-    {
-      id: "c2",
-      n: "Marcus Bell",
-      i: "MB",
-      t: "Been waiting for this one. The part at 08:12 finally made it click for me.",
-      time: "2 days ago",
-    },
-  ]);
+  >([]);
+
+  const currentVideoId = video?.id;
+  const currentVideoLikes = Number((video as any)?.likes) || 0;
+  const currentVideoViewerLiked = Boolean(
+    (video as any)?.viewerLiked ??
+    (typeof (video as any)?.liked === "boolean" && (video as any).liked),
+  );
+
+  useEffect(() => {
+    if (!currentVideoId) {
+      setLiked(false);
+      setLikeCount(0);
+      return;
+    }
+    setDisliked(false);
+    setLikeCount(currentVideoLikes);
+    setLiked(Boolean(authUserId && currentVideoViewerLiked));
+  }, [currentVideoId, currentVideoLikes, currentVideoViewerLiked, authUserId]);
+
+  useEffect(() => {
+    if (!currentVideoId) return;
+    if (!authUserId) {
+      hydratedAuthKeyRef.current = null;
+      setLiked(false);
+      return;
+    }
+    const token = getStoredAuthToken();
+    if (!token) {
+      setLiked(false);
+      return;
+    }
+    const authKey = `${currentVideoId}:${authUserId}`;
+    if (hydratedAuthKeyRef.current === authKey) {
+      return;
+    }
+    if (viewerAuthHydrated || clientAuthVideoIdRef.current === currentVideoId) {
+      hydratedAuthKeyRef.current = authKey;
+      setLiked(
+        Boolean(
+          (video as any)?.viewerLiked ??
+          (typeof (video as any)?.liked === "boolean" && (video as any).liked),
+        ),
+      );
+      return;
+    }
+
+    let active = true;
+    hydratedAuthKeyRef.current = authKey;
+    api.videos
+      .get(currentVideoId, { skipView: true })
+      .then((res) => {
+        if (!active || !res?.success || !res.video) return;
+        const nextViewerLiked = Boolean(
+          res.video.viewerLiked ??
+          res.video.viewer_liked ??
+          (typeof res.video.liked === "boolean" ? res.video.liked : false),
+        );
+        setLiked(nextViewerLiked);
+        setLikeCount(Number(res.video.likes) || 0);
+      })
+      .catch(() => {
+        // Keep safe default without inferring liked state from total likes count
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [currentVideoId, authUserId, viewerAuthHydrated, video]);
+
+  useEffect(() => {
+    if (!currentVideoId) return;
+    let active = true;
+    setComments([]);
+    setCommentsTotal(0);
+    setCommentsLoading(true);
+
+    api.comments
+      .list(currentVideoId)
+      .then((res) => {
+        if (!active) return;
+        const rawList = Array.isArray(res?.comments) ? res.comments : [];
+        const mapped = rawList.map((c: any) => {
+          const displayName = String(c.userName || c.user_name || "FaceTube Viewer").trim();
+          const createdRaw = String(c.createdAt || c.created_at || "");
+          const parsedDate = createdRaw
+            ? new Date(createdRaw.includes("T") ? createdRaw : createdRaw.replace(" ", "T") + "Z")
+            : null;
+          const timeLabel =
+            parsedDate && !Number.isNaN(parsedDate.getTime())
+              ? parsedDate.toLocaleDateString()
+              : "Recently";
+          return {
+            id: String(c.id),
+            n: displayName || "FaceTube Viewer",
+            i: (displayName || "FT").slice(0, 2).toUpperCase(),
+            t: String(c.comment || ""),
+            time: timeLabel,
+            avatar: c.channelLogoUrl || c.channel_logo_url || c.avatarUrl || c.avatar_url || null,
+          };
+        });
+        setComments(mapped);
+        setCommentsTotal(typeof res?.total === "number" ? res.total : mapped.length);
+      })
+      .catch(() => {
+        if (!active) return;
+        setComments([]);
+        setCommentsTotal(0);
+      })
+      .finally(() => {
+        if (active) setCommentsLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [currentVideoId]);
 
   const [uploadedVideos, setUploadedVideos] = useState<UploadedVideo[]>([]);
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
@@ -318,9 +450,29 @@ function WatchPage() {
 
   const interleavedRelated = interleaveFeedWithImages(related, uploadedImages, IMAGE_FEED_INTERVAL);
 
-  const handleToggleLike = () => {
-    setLiked((v) => !v);
-    if (!liked && disliked) setDisliked(false);
+  const handleToggleLike = async () => {
+    if (!video?.id) return;
+    if (!authUserId) {
+      toast.error("Please sign in to like videos.");
+      return;
+    }
+    if (isLiking) return;
+    setIsLiking(true);
+    try {
+      const res = await api.videos.like(video.id, authUserId);
+      if (res && res.success) {
+        const nextLiked = Boolean(res.liked);
+        setLiked(nextLiked);
+        setLikeCount(Number(res.likes) || 0);
+        if (nextLiked && disliked) setDisliked(false);
+      } else {
+        toast.error("Could not update like.");
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Could not update like.");
+    } finally {
+      setIsLiking(false);
+    }
   };
 
   const handleToggleDislike = () => {
@@ -357,28 +509,54 @@ function WatchPage() {
     });
   };
 
-  const handleAddComment = (e: React.FormEvent) => {
+  const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!commentText.trim()) return;
+    const trimmed = commentText.trim();
+    if (!trimmed || !video?.id) return;
+    if (!authUserId) {
+      toast.error("Please sign in to post a comment.");
+      return;
+    }
+    if (isPostingComment) return;
 
     const authorName =
       profile?.channel_name || profile?.full_name || user?.email?.split("@")[0] || "You";
     const authorInitials = authorName.slice(0, 2).toUpperCase();
     const authorAvatar = profile?.channel_logo_url || profile?.avatar_url || null;
 
-    setComments((prev) => [
-      {
-        id: `c-${Date.now()}`,
-        n: authorName,
-        i: authorInitials,
-        t: commentText.trim(),
-        time: "Just now",
-        avatar: authorAvatar,
-      },
-      ...prev,
-    ]);
-    setCommentText("");
-    toast.success("Comment posted!");
+    setIsPostingComment(true);
+    try {
+      const res = await api.comments.create({
+        videoId: video.id,
+        userId: authUserId,
+        userName: authorName,
+        ...(authorAvatar ? { avatarUrl: authorAvatar } : {}),
+        comment: trimmed,
+      });
+      if (res && res.success) {
+        const created = res.comment || {};
+        setComments((prev) => [
+          {
+            id: String(created.id || `c-${Date.now()}`),
+            n: String(created.userName || created.user_name || authorName),
+            i: authorInitials,
+            t: String(created.comment || trimmed),
+            time: "Just now",
+            avatar: created.avatarUrl || created.avatar_url || authorAvatar,
+          },
+          ...prev,
+        ]);
+        setCommentsTotal((prev) => prev + 1);
+        setCommentText("");
+        toast.success("Comment posted!");
+      } else {
+        toast.error("Failed to post comment.");
+      }
+    } catch (err: any) {
+      toast.error(err?.message || "Failed to post comment.");
+    } finally {
+      setIsPostingComment(false);
+    }
   };
 
   return (
@@ -463,13 +641,14 @@ function WatchPage() {
               <div className="flex items-center overflow-hidden rounded-full bg-secondary">
                 <button
                   type="button"
+                  disabled={isLiking}
                   onClick={handleToggleLike}
                   className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition hover:bg-muted ${
                     liked ? "text-brand font-bold" : "text-foreground"
                   }`}
                 >
                   <ThumbsUp className={`h-4 w-4 ${liked ? "fill-brand" : ""}`} />
-                  {liked ? "24K" : "23K"}
+                  {likeCount.toLocaleString()}
                 </button>
                 <span className="h-6 w-px bg-border" />
                 <button
@@ -551,7 +730,9 @@ function WatchPage() {
           {/* Interactive Comments Section */}
           <section className="mt-8 space-y-6">
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-bold">{comments.length + 1282} Comments</h2>
+              <h2 className="text-base font-bold">
+                {commentsTotal.toLocaleString()} {commentsTotal === 1 ? "Comment" : "Comments"}
+              </h2>
             </div>
 
             {/* Add Comment Input Form */}
@@ -583,10 +764,11 @@ function WatchPage() {
                     </button>
                     <button
                       type="submit"
-                      className="inline-flex items-center gap-1.5 rounded-full bg-brand px-4 py-1.5 text-xs font-bold text-white shadow-sm transition hover:bg-brand-dark"
+                      disabled={isPostingComment}
+                      className="inline-flex items-center gap-1.5 rounded-full bg-brand px-4 py-1.5 text-xs font-bold text-white shadow-sm transition hover:bg-brand-dark disabled:opacity-60"
                     >
                       <Send className="h-3 w-3" />
-                      Comment
+                      {isPostingComment ? "Posting..." : "Comment"}
                     </button>
                   </div>
                 )}
@@ -594,24 +776,32 @@ function WatchPage() {
             </form>
 
             <div className="space-y-5">
-              {comments.map((c) => (
-                <div key={c.id} className="flex gap-3 animate-in fade-in">
-                  <ChannelAvatar
-                    src={c.avatar}
-                    name={c.n}
-                    initials={c.i}
-                    sizeClassName="h-9 w-9"
-                    imageRingClassName="ring-1 ring-border shadow-sm"
-                    fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-brand-foreground"
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold">
-                      {c.n} <span className="font-normal text-muted-foreground">· {c.time}</span>
-                    </p>
-                    <p className="text-sm text-foreground/85 mt-0.5">{c.t}</p>
+              {commentsLoading ? (
+                <p className="text-xs text-muted-foreground">Loading comments...</p>
+              ) : comments.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No comments yet. Be the first to share your thoughts.
+                </p>
+              ) : (
+                comments.map((c) => (
+                  <div key={c.id} className="flex gap-3 animate-in fade-in">
+                    <ChannelAvatar
+                      src={c.avatar}
+                      name={c.n}
+                      initials={c.i}
+                      sizeClassName="h-9 w-9"
+                      imageRingClassName="ring-1 ring-border shadow-sm"
+                      fallbackClassName="bg-gradient-to-br from-brand to-brand-dark text-xs font-bold text-brand-foreground"
+                    />
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold">
+                        {c.n} <span className="font-normal text-muted-foreground">· {c.time}</span>
+                      </p>
+                      <p className="text-sm text-foreground/85 mt-0.5">{c.t}</p>
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </section>
         </div>

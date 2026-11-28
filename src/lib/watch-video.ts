@@ -19,6 +19,20 @@ function checkAdPromotionActive(item: {
   return !Number.isNaN(t) && t > Date.now();
 }
 
+function resolveViewerLikedFlag(raw: Record<string, unknown>): boolean {
+  const explicit =
+    raw["viewerLiked"] ??
+    raw["viewer_liked"] ??
+    (typeof raw["liked"] === "boolean" ? raw["liked"] : undefined);
+  if (typeof explicit === "boolean") return explicit;
+  if (typeof explicit === "number") return explicit === 1;
+  if (typeof explicit === "string") {
+    const clean = explicit.trim().toLowerCase();
+    return clean === "true" || clean === "1";
+  }
+  return false;
+}
+
 export function mapApiVideoToCatalogVideo(v: Record<string, any>): Video {
   const thumbUrl = resolveVideoThumbnail({
     thumbnailUrl: v["thumbnail_url"] || v["thumbnailUrl"],
@@ -39,6 +53,7 @@ export function mapApiVideoToCatalogVideo(v: Record<string, any>): Video {
     "FaceTube Creator";
   const rawChannelLogo = v["channel_logo_url"] || v["channelLogoUrl"] || "";
   const channelLogoUrl = rawChannelLogo ? resolveMediaUrl(rawChannelLogo) || undefined : undefined;
+  const viewerLiked = resolveViewerLikedFlag(v);
 
   return {
     id: String(v["id"]),
@@ -49,6 +64,10 @@ export function mapApiVideoToCatalogVideo(v: Record<string, any>): Video {
     channel_logo_url: channelLogoUrl,
     initials: computeChannelInitials(channelName, "FT"),
     views: `${(Number(v["views"]) || 0).toLocaleString()} views`,
+    viewsCount: Number(v["views"]) || 0,
+    likes: Number(v["likes"]) || 0,
+    liked: viewerLiked,
+    viewerLiked,
     age: parsedAge,
     duration: v["duration"] || "0:00",
     thumb: thumbUrl,
@@ -115,6 +134,10 @@ export function findPublicCachedVideo(id: string): Video | undefined {
       channel_logo_url: channelLogoUrl,
       initials: computeChannelInitials(channelName, "FC"),
       views: `${(Number(match.views) || 0).toLocaleString()} views`,
+      viewsCount: Number(match.views) || 0,
+      likes: Number(match.likes) || 0,
+      liked: false,
+      viewerLiked: false,
       age: parsedAge,
       duration: match.duration || "0:00",
       thumb: thumbUrl,
@@ -148,13 +171,9 @@ export type WatchVideoResolution =
  * - Fails closed on 401/403/404/5xx/network failures in the browser.
  * - During SSR (where localStorage Bearer tokens are unavailable), surfaces
  *   `needs_client_auth` on 401/403 so the client can verify authorization once.
- * - Only falls back to staticShowcaseVideos (never seedVideos) when the server
- *   explicitly returns 404.
+ * - Returns `not_found` when the server returns 404 (never falls back to static demo videos).
  */
-export async function resolveWatchVideo(
-  id: string,
-  options?: { showcaseVideos?: Video[] },
-): Promise<WatchVideoResolution> {
+export async function resolveWatchVideo(id: string): Promise<WatchVideoResolution> {
   try {
     const res = await api.videos.get(id);
     if (res && res.success && res.video) {
@@ -175,27 +194,6 @@ export async function resolveWatchVideo(
     }
 
     if (httpStatus === 404) {
-      let showcaseList: Video[] | undefined = options?.showcaseVideos;
-      if (!showcaseList) {
-        try {
-          const videosMod = await import("@/data/videos");
-          showcaseList = videosMod.staticShowcaseVideos;
-        } catch {
-          showcaseList = undefined;
-        }
-      }
-      const showcaseMatch = showcaseList?.find((v) => v.id === id);
-      if (showcaseMatch) {
-        const thumbUrl = showcaseMatch.thumb || showcaseMatch.thumbnail || "";
-        return {
-          status: "ok",
-          video: {
-            ...showcaseMatch,
-            thumbnail: thumbUrl,
-            thumbnailUrl: showcaseMatch.thumbnailUrl || thumbUrl,
-          },
-        };
-      }
       return { status: "not_found" };
     }
 

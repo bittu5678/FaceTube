@@ -12,8 +12,13 @@ export interface ShortItem {
   creatorHandle: string;
   initials: string;
   views: string;
+  viewsCount?: number;
   likes: string;
+  likesCount?: number;
+  liked?: boolean;
+  viewerLiked?: boolean;
   comments: string;
+  commentsCount?: number;
   shares: string;
   soundTrack: string;
   tags: string[];

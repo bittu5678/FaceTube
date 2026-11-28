@@ -109,8 +109,8 @@ export function LivePage() {
             streamer: primaryCreatorName || pickName(s.streamer) || "FaceTube Creator",
             streamerHandle: `@${(primaryCreatorName || "creator").toLowerCase().replace(/\s+/g, "")}`,
             initials: (primaryCreatorName || "FT").substring(0, 2).toUpperCase(),
-            viewers: `${s.viewers_count || 1} viewers`,
-            viewersCount: Number(s.viewers_count) || 1,
+            viewers: `${(Number(s.viewers_count) || 0).toLocaleString()} ${(Number(s.viewers_count) || 0) === 1 ? "viewer" : "viewers"}`,
+            viewersCount: Number(s.viewers_count) || 0,
             category: s.category || "Coding & Tech",
             tags: ["live", "stream"],
             thumb:
@@ -318,8 +318,8 @@ export function LivePage() {
           streamer: authorName,
           streamerHandle: `@${authorName.toLowerCase().replace(/\s+/g, "")}`,
           initials: authorName.substring(0, 2).toUpperCase(),
-          viewers: "1 viewer",
-          viewersCount: 1,
+          viewers: `${(Number(res.stream.viewers_count) || 0).toLocaleString()} ${(Number(res.stream.viewers_count) || 0) === 1 ? "viewer" : "viewers"}`,
+          viewersCount: Number(res.stream.viewers_count) || 0,
           category: res.stream.category || newCategory,
           tags: ["live"],
           thumb:
@@ -397,7 +397,7 @@ export function LivePage() {
                 isOwner={isOwner}
                 disabled={studioOpen}
                 thumbnailUrl={activeStream.thumb}
-                initialViewers={activeStream.viewersCount || 1}
+                initialViewers={activeStream.viewersCount ?? 0}
                 onOpenStudio={() => setStudioOpen(true)}
                 onEndBroadcast={handleEndActiveStream}
               />

@@ -49,7 +49,7 @@ export function LiveKitViewerPlayer({
   isOwner = false,
   disabled = false,
   thumbnailUrl,
-  initialViewers = 1,
+  initialViewers = 0,
   onOpenStudio,
   onEndBroadcast,
 }: LiveKitViewerPlayerProps) {

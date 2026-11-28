@@ -133,7 +133,31 @@ try {
     $stmt->execute($params);
     $rows = $stmt->fetchAll();
 
-    $videos = array_map(function ($row) {
+    $likedVideoMap = [];
+    $authAltId = $authUser ? trim((string)($authUser['id'] ?? '')) : '';
+    $primaryLikeUid = $authUserId !== '' ? $authUserId : $authAltId;
+    if ($primaryLikeUid !== '' && !empty($rows)) {
+        try {
+            $videoIds = array_values(array_unique(array_filter(array_map(static fn($r) => (string)($r['id'] ?? ''), $rows))));
+            if (!empty($videoIds)) {
+                $placeholders = implode(',', array_fill(0, count($videoIds), '?'));
+                if ($authAltId !== '' && strcasecmp($authAltId, $primaryLikeUid) !== 0) {
+                    $stmtLikes = $pdo->prepare("SELECT video_id FROM video_likes WHERE (UPPER(user_id) = UPPER(?) OR UPPER(user_id) = UPPER(?)) AND video_id IN ({$placeholders})");
+                    $stmtLikes->execute(array_merge([$primaryLikeUid, $authAltId], $videoIds));
+                } else {
+                    $stmtLikes = $pdo->prepare("SELECT video_id FROM video_likes WHERE UPPER(user_id) = UPPER(?) AND video_id IN ({$placeholders})");
+                    $stmtLikes->execute(array_merge([$primaryLikeUid], $videoIds));
+                }
+                foreach ($stmtLikes->fetchAll() as $likeRow) {
+                    $likedVideoMap[(string)$likeRow['video_id']] = true;
+                }
+            }
+        } catch (Throwable $_likeListErr) {
+            $likedVideoMap = [];
+        }
+    }
+
+    $videos = array_map(function ($row) use ($likedVideoMap) {
         $expiryTime = !empty($row['promotion_expires_at']) ? strtotime($row['promotion_expires_at']) : false;
         $isActivePromoted = !empty($row['is_promoted']) && $expiryTime !== false && $expiryTime > time();
         $channelLogoUrl = !empty($row['creator_channel_logo_url'])
@@ -151,6 +175,7 @@ try {
             $visibility = 'private';
         }
         $isBlocked = !empty($row['is_blocked']);
+        $viewerLiked = !empty($likedVideoMap[(string)$row['id']]);
 
         return [
             'id' => $row['id'],
@@ -177,6 +202,9 @@ try {
             'visibility' => $visibility,
             'views' => (int)$row['views'],
             'likes' => (int)$row['likes'],
+            'viewerLiked' => $viewerLiked,
+            'viewer_liked' => $viewerLiked,
+            'liked' => $viewerLiked,
             'paymentStatus' => $row['payment_status'],
             'payment_status' => $row['payment_status'],
             'paymentId' => $row['payment_id'],

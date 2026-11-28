@@ -98,7 +98,7 @@ export const INITIAL_SEED_IMAGES: UploadedImage[] = [
 ];
 
 export function getStoredImages(): UploadedImage[] {
-  if (typeof window === "undefined") return INITIAL_SEED_IMAGES;
+  if (typeof window === "undefined") return [];
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_IMAGES_KEY);
     if (raw) {
@@ -107,16 +107,16 @@ export function getStoredImages(): UploadedImage[] {
         const seen = new Set<string>();
         const unique = parsed.filter((item: any) => {
           if (!item || !item.id || seen.has(item.id)) return false;
+          if (String(item.id).startsWith("img-seed-")) return false;
           seen.add(item.id);
           return true;
         });
-        return unique.length > 0 ? unique : INITIAL_SEED_IMAGES;
+        return unique;
       }
     }
-    localStorage.setItem(LOCAL_STORAGE_IMAGES_KEY, JSON.stringify(INITIAL_SEED_IMAGES));
-    return INITIAL_SEED_IMAGES;
+    return [];
   } catch {
-    return INITIAL_SEED_IMAGES;
+    return [];
   }
 }
 

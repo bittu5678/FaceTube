@@ -1514,6 +1514,12 @@ export interface ServerStore {
     subscriber_user_id: string;
     created_at: string;
   }>;
+  videoLikes?: Array<{
+    id: number | string;
+    video_id: string;
+    user_id: string;
+    created_at: string;
+  }>;
   admobReportSnapshots?: Array<{
     id: number;
     publisher_id: string;
@@ -2132,6 +2138,7 @@ function getInitialStore(): ServerStore {
     certificates: {},
     walletTransactions: [],
     channelSubscriptions: [],
+    videoLikes: [],
   };
 }
 
@@ -2175,6 +2182,7 @@ function createEmptyProductionStore(): ServerStore {
     paymentOrders: [],
     subscriptionRefundRequests: [],
     channelSubscriptions: [],
+    videoLikes: [],
     uploadedAssets: [],
     watchSessions: [],
     watchTimeEvents: [],
@@ -2234,6 +2242,7 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
           inMemoryStore.subscriptionRefundRequests = [];
         if (!inMemoryStore.kycAuditLog) inMemoryStore.kycAuditLog = [];
         if (!inMemoryStore.channelSubscriptions) inMemoryStore.channelSubscriptions = [];
+        if (!inMemoryStore.videoLikes) inMemoryStore.videoLikes = [];
         if (!inMemoryStore.uploadedAssets) inMemoryStore.uploadedAssets = [];
         if (!inMemoryStore.watchSessions) inMemoryStore.watchSessions = [];
         if (!inMemoryStore.watchTimeEvents) inMemoryStore.watchTimeEvents = [];
@@ -2282,6 +2291,7 @@ function loadStore(env?: Record<string, string | undefined>): ServerStore {
   if (!inMemoryStore.subscriptionRefundRequests) inMemoryStore.subscriptionRefundRequests = [];
   if (!inMemoryStore.kycAuditLog) inMemoryStore.kycAuditLog = [];
   if (!inMemoryStore.channelSubscriptions) inMemoryStore.channelSubscriptions = [];
+  if (!inMemoryStore.videoLikes) inMemoryStore.videoLikes = [];
   if (!inMemoryStore.uploadedAssets) inMemoryStore.uploadedAssets = [];
   if (!inMemoryStore.watchSessions) inMemoryStore.watchSessions = [];
   if (!inMemoryStore.watchTimeEvents) inMemoryStore.watchTimeEvents = [];
@@ -11449,6 +11459,38 @@ async function dispatchApiRequest(
           `;
           const [rows] = (await pool.query(sql, [...params, limit, offset])) as any;
           const rowList = Array.isArray(rows) ? rows : [];
+          const likedVideoIds = new Set<string>();
+          const authAltId = authUser ? String(authUser.id || "").trim() : "";
+          const primaryLikeUid = authUserId || authAltId;
+          if (primaryLikeUid && rowList.length > 0) {
+            try {
+              const videoIds = Array.from(
+                new Set(rowList.map((r: any) => String(r?.id || "")).filter(Boolean)),
+              );
+              if (videoIds.length > 0) {
+                const placeholders = videoIds.map(() => "?").join(",");
+                let likeRowsResult: any;
+                if (authAltId && authAltId.toUpperCase() !== primaryLikeUid.toUpperCase()) {
+                  [likeRowsResult] = (await pool.query(
+                    `SELECT video_id FROM video_likes WHERE (UPPER(user_id) = UPPER(?) OR UPPER(user_id) = UPPER(?)) AND video_id IN (${placeholders})`,
+                    [primaryLikeUid, authAltId, ...videoIds],
+                  )) as any;
+                } else {
+                  [likeRowsResult] = (await pool.query(
+                    `SELECT video_id FROM video_likes WHERE UPPER(user_id) = UPPER(?) AND video_id IN (${placeholders})`,
+                    [primaryLikeUid, ...videoIds],
+                  )) as any;
+                }
+                if (Array.isArray(likeRowsResult)) {
+                  for (const lr of likeRowsResult) {
+                    if (lr?.video_id) likedVideoIds.add(String(lr.video_id));
+                  }
+                }
+              }
+            } catch {
+              // Keep viewerLiked false if video_likes lookup fails or is mocked out
+            }
+          }
           const formatted = rowList.map((r: any) => {
             const active = isAdPromotionActive({
               is_promoted: r.is_promoted,
@@ -11458,6 +11500,7 @@ async function dispatchApiRequest(
             const channelLogoUrl = r.creator_channel_logo_url || null;
             const visibility = resolveStoredVisibilityFailClosed(r.visibility);
             const isBlocked = Boolean(r.is_blocked);
+            const viewerLiked = likedVideoIds.has(String(r.id));
             return {
               id: String(r.id),
               userId: r.user_id,
@@ -11483,6 +11526,9 @@ async function dispatchApiRequest(
               visibility,
               views: Number(r.views) || 0,
               likes: Number(r.likes) || 0,
+              viewerLiked,
+              viewer_liked: viewerLiked,
+              liked: viewerLiked,
               paymentStatus: r.payment_status || "not_required",
               payment_status: r.payment_status || "not_required",
               paymentId: r.payment_id,
@@ -11594,6 +11640,24 @@ async function dispatchApiRequest(
       });
 
       const paged = filtered.slice(offset, offset + limit);
+      const authAltId = authUser ? String(authUser.id || "").trim() : "";
+      const storeLikedIds = new Set<string>();
+      if (authUser && (authUserId || authAltId)) {
+        const uidSet = new Set(
+          [authUserId, authAltId].filter(Boolean).map((uid) => uid.toUpperCase()),
+        );
+        for (const likeEntry of store.videoLikes || []) {
+          if (
+            uidSet.has(
+              String(likeEntry.user_id || "")
+                .trim()
+                .toUpperCase(),
+            )
+          ) {
+            storeLikedIds.add(String(likeEntry.video_id));
+          }
+        }
+      }
       const formatted = paged.map((v) => {
         const active = isAdPromotionActive(v);
         const owner = store.users.find(
@@ -11603,6 +11667,7 @@ async function dispatchApiRequest(
         const channelLogoUrl = owner?.channel_logo_url || null;
         const visibility = resolveStoredVisibilityFailClosed(v.visibility);
         const isBlocked = Boolean(v.is_blocked);
+        const viewerLiked = storeLikedIds.has(String(v.id));
         return {
           ...v,
           userId: v.user_id,
@@ -11617,6 +11682,9 @@ async function dispatchApiRequest(
           videoType: v.video_type,
           contentType: v.content_type,
           visibility,
+          viewerLiked,
+          viewer_liked: viewerLiked,
+          liked: viewerLiked,
           paymentStatus: v.payment_status,
           paymentId: v.payment_id,
           paymentAmount: v.payment_amount,
@@ -11655,6 +11723,11 @@ async function dispatchApiRequest(
     if (method === "GET") {
       const id = String(url.searchParams.get("id") || "").trim();
       if (!id) return jsonResponse({ success: false, error: "Missing video id" }, 400);
+      const skipView = ["1", "true"].includes(
+        String(url.searchParams.get("skipView") ?? url.searchParams.get("skip_view") ?? "")
+          .trim()
+          .toLowerCase(),
+      );
 
       const readEnv = (key: string) => readEnvValue(env, key);
       const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
@@ -11771,8 +11844,33 @@ async function dispatchApiRequest(
               );
             }
 
-            // Increment views ONLY after access authorization passes
-            await pool.query("UPDATE uploaded_videos SET views = views + 1 WHERE id = ?", [id]);
+            // Increment views ONLY after access authorization passes (unless skipView is requested)
+            if (!skipView) {
+              await pool.query("UPDATE uploaded_videos SET views = views + 1 WHERE id = ?", [id]);
+            }
+
+            let viewerLiked = false;
+            const authAltId = authUser ? String(authUser.id || "").trim() : "";
+            const primaryLikeUid = authUserId || authAltId;
+            if (primaryLikeUid) {
+              try {
+                let likeCheckRows: any;
+                if (authAltId && authAltId.toUpperCase() !== primaryLikeUid.toUpperCase()) {
+                  [likeCheckRows] = (await pool.query(
+                    "SELECT id FROM video_likes WHERE video_id = ? AND (UPPER(user_id) = UPPER(?) OR UPPER(user_id) = UPPER(?)) LIMIT 1",
+                    [id, primaryLikeUid, authAltId],
+                  )) as any;
+                } else {
+                  [likeCheckRows] = (await pool.query(
+                    "SELECT id FROM video_likes WHERE video_id = ? AND UPPER(user_id) = UPPER(?) LIMIT 1",
+                    [id, primaryLikeUid],
+                  )) as any;
+                }
+                viewerLiked = Array.isArray(likeCheckRows) && likeCheckRows.length > 0;
+              } catch {
+                viewerLiked = false;
+              }
+            }
 
             const active = isAdPromotionActive({
               is_promoted: r.is_promoted,
@@ -11805,8 +11903,11 @@ async function dispatchApiRequest(
                 category: r.category || "General",
                 duration: r.duration || "0:00",
                 visibility,
-                views: (Number(r.views) || 0) + 1,
+                views: (Number(r.views) || 0) + (skipView ? 0 : 1),
                 likes: Number(r.likes) || 0,
+                viewerLiked,
+                viewer_liked: viewerLiked,
+                liked: viewerLiked,
                 paymentStatus: r.payment_status,
                 payment_status: r.payment_status,
                 paymentId: r.payment_id,
@@ -11924,9 +12025,27 @@ async function dispatchApiRequest(
           );
         }
 
-        // Increment views ONLY after access authorization passes
-        v.views = (Number(v.views) || 0) + 1;
-        saveStore(store, env);
+        // Increment views ONLY after access authorization passes (unless skipView is requested)
+        if (!skipView) {
+          v.views = (Number(v.views) || 0) + 1;
+          saveStore(store, env);
+        }
+
+        const authAltId = authUser ? String(authUser.id || "").trim() : "";
+        const uidSet = new Set(
+          [authUserId, authAltId].filter(Boolean).map((uid) => uid.toUpperCase()),
+        );
+        const viewerLiked =
+          uidSet.size > 0 &&
+          (store.videoLikes || []).some(
+            (l) =>
+              String(l.video_id) === String(v.id) &&
+              uidSet.has(
+                String(l.user_id || "")
+                  .trim()
+                  .toUpperCase(),
+              ),
+          );
 
         const active = isAdPromotionActive(v);
         const owner = store.users.find(
@@ -11950,6 +12069,9 @@ async function dispatchApiRequest(
             videoType: v.video_type,
             contentType: v.content_type,
             visibility,
+            viewerLiked,
+            viewer_liked: viewerLiked,
+            liked: viewerLiked,
             paymentStatus: v.payment_status,
             paymentId: v.payment_id,
             paymentAmount: v.payment_amount,
@@ -12738,26 +12860,339 @@ async function dispatchApiRequest(
 
   if (route === "videos/like") {
     if (method === "POST") {
-      const body = await request.json();
-      const vid = store.videos.find((v) => v.id === body.videoId);
-      if (vid) {
-        vid.likes = (vid.likes || 0) + 1;
-        saveStore(store, env);
+      let body: Record<string, any> = {};
+      try {
+        body = ((await request.json()) as Record<string, any>) || {};
+      } catch {
+        return jsonResponse({ success: false, error: "Invalid JSON payload" }, 400);
+      }
 
-        const pool = getMysqlPool();
-        if (pool) {
-          try {
-            await pool.query("UPDATE uploaded_videos SET likes = likes + 1 WHERE id = ?", [
-              body.videoId,
-            ]);
-          } catch (_e) {
-            // Ignore error if MySQL is unreachable
+      const videoId = String(body["videoId"] ?? body["video_id"] ?? "").trim();
+      const requestedUserId = String(body["userId"] ?? body["user_id"] ?? "").trim();
+      if (!videoId) {
+        return jsonResponse({ success: false, error: "Video ID is required." }, 400);
+      }
+
+      const readEnv = (key: string) => readEnvValue(env, key);
+      const isProduction = isFailClosedProductionEnv(readEnv("APP_ENV"), readEnv("NODE_ENV"));
+      const pool = getMysqlPool();
+
+      let authUser: AuthUser | null = null;
+      try {
+        authUser = await getAuthUserFromRequest(request, store, pool, env);
+      } catch (authErr: any) {
+        if (authErr instanceof AuthDatabaseError) {
+          return jsonResponse({ success: false, error: authErr.message }, authErr.status);
+        }
+        throw authErr;
+      }
+
+      const isAdmin = Boolean(
+        authUser &&
+        String(authUser.role || "")
+          .trim()
+          .toLowerCase() === "admin",
+      );
+
+      let effectiveUserId = "";
+      if (authUser) {
+        const authCheck = requireAuth(authUser, requestedUserId || null);
+        if (!authCheck.success) return authCheck.response;
+        effectiveUserId = authCheck.effectiveUserId.trim();
+      } else if (!isProduction && requestedUserId) {
+        effectiveUserId = requestedUserId;
+      }
+
+      if (pool) {
+        let conn: any = null;
+        try {
+          const hasTransactionConn = typeof (pool as any).getConnection === "function";
+          if (hasTransactionConn) {
+            conn = await (pool as any).getConnection();
+            await conn.beginTransaction();
+          }
+          const runner = conn || pool;
+
+          const selectVideoSql = conn
+            ? "SELECT id, user_id, likes, is_blocked, visibility, video_type, payment_status FROM uploaded_videos WHERE id = ? LIMIT 1 FOR UPDATE"
+            : "SELECT id, user_id, likes, is_blocked, visibility, video_type, payment_status FROM uploaded_videos WHERE id = ? LIMIT 1";
+          const [videoRows] = (await runner.query(selectVideoSql, [videoId])) as any;
+
+          if (!Array.isArray(videoRows) || videoRows.length === 0) {
+            if (conn) await conn.rollback();
+            return jsonResponse({ success: false, error: "Video not found" }, 404);
+          }
+
+          const videoRow = videoRows[0];
+          if (videoRow.is_blocked) {
+            if (conn) await conn.rollback();
+            return jsonResponse(
+              {
+                success: false,
+                error: "This video has been blocked by administrators for content moderation.",
+              },
+              403,
+            );
+          }
+
+          const rowOwner = String(videoRow.user_id || "").trim();
+          const isOwner = Boolean(
+            authUser &&
+            (rowOwner.toUpperCase() ===
+              String(authUser.user_id || "")
+                .trim()
+                .toUpperCase() ||
+              (authUser.id && rowOwner.toUpperCase() === String(authUser.id).trim().toUpperCase())),
+          );
+          const visibility = resolveStoredVisibilityFailClosed(videoRow.visibility);
+          const vType = String(videoRow.video_type || "free")
+            .trim()
+            .toLowerCase();
+          const pStatus =
+            String(videoRow.payment_status || "")
+              .trim()
+              .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+          const isPaymentEligible =
+            (vType === "free" && (pStatus === "not_required" || pStatus === "paid")) ||
+            (vType === "premium" && pStatus === "paid");
+
+          if (visibility === "private" && !isOwner && !isAdmin) {
+            if (conn) await conn.rollback();
+            return jsonResponse(
+              {
+                success: false,
+                error: authUser
+                  ? "Unauthorized: This private video is only accessible to its creator or administrators."
+                  : "Authentication required to interact with this private video.",
+              },
+              authUser ? 403 : 401,
+            );
+          }
+          if (!isPaymentEligible && !isOwner && !isAdmin) {
+            if (conn) await conn.rollback();
+            return jsonResponse(
+              {
+                success: false,
+                error: authUser
+                  ? "Unauthorized: Unpaid Sponsor videos are only accessible to their creator or administrators."
+                  : "Authentication required to interact with this unpaid Sponsor video.",
+              },
+              authUser ? 403 : 401,
+            );
+          }
+
+          if (!effectiveUserId) {
+            if (conn) await conn.rollback();
+            return jsonResponse(
+              {
+                success: false,
+                error: "Authentication required. Please provide a valid Bearer session token.",
+              },
+              401,
+            );
+          }
+
+          const authAltId =
+            authUser &&
+            (!requestedUserId || requestedUserId.toUpperCase() === effectiveUserId.toUpperCase())
+              ? String(authUser.id || "").trim()
+              : "";
+          let existingLikes: any;
+          if (authAltId && authAltId.toUpperCase() !== effectiveUserId.toUpperCase()) {
+            [existingLikes] = (await runner.query(
+              "SELECT id FROM video_likes WHERE video_id = ? AND (UPPER(user_id) = UPPER(?) OR UPPER(user_id) = UPPER(?)) LIMIT 1",
+              [videoId, effectiveUserId, authAltId],
+            )) as any;
+          } else {
+            [existingLikes] = (await runner.query(
+              "SELECT id FROM video_likes WHERE video_id = ? AND UPPER(user_id) = UPPER(?) LIMIT 1",
+              [videoId, effectiveUserId],
+            )) as any;
+          }
+
+          const alreadyLiked = Array.isArray(existingLikes) && existingLikes.length > 0;
+          let newLiked = false;
+
+          if (alreadyLiked) {
+            if (authAltId && authAltId.toUpperCase() !== effectiveUserId.toUpperCase()) {
+              await runner.query(
+                "DELETE FROM video_likes WHERE video_id = ? AND (UPPER(user_id) = UPPER(?) OR UPPER(user_id) = UPPER(?))",
+                [videoId, effectiveUserId, authAltId],
+              );
+            } else {
+              await runner.query(
+                "DELETE FROM video_likes WHERE video_id = ? AND UPPER(user_id) = UPPER(?)",
+                [videoId, effectiveUserId],
+              );
+            }
+            await runner.query(
+              "UPDATE uploaded_videos SET likes = GREATEST(0, COALESCE(likes, 0) - 1) WHERE id = ?",
+              [videoId],
+            );
+            newLiked = false;
+          } else {
+            await runner.query(
+              "INSERT INTO video_likes (video_id, user_id, created_at) VALUES (?, ?, NOW())",
+              [videoId, effectiveUserId],
+            );
+            await runner.query(
+              "UPDATE uploaded_videos SET likes = COALESCE(likes, 0) + 1 WHERE id = ?",
+              [videoId],
+            );
+            newLiked = true;
+          }
+
+          const [updatedRows] = (await runner.query(
+            "SELECT likes FROM uploaded_videos WHERE id = ? LIMIT 1",
+            [videoId],
+          )) as any;
+          const likes = Math.max(0, Number(updatedRows?.[0]?.likes ?? 0) || 0);
+          if (conn) await conn.commit();
+
+          return jsonResponse({ success: true, liked: newLiked, likes });
+        } catch (dbErr) {
+          if (conn) {
+            try {
+              await conn.rollback();
+            } catch {
+              // ignore rollback failure
+            }
+          }
+          if (isProduction) {
+            return jsonResponse(
+              {
+                success: false,
+                error: isMysqlConnectionUnavailableError(dbErr)
+                  ? "Database connection unavailable while updating video like."
+                  : "Database error while updating video like.",
+              },
+              isMysqlConnectionUnavailableError(dbErr) ? 503 : 500,
+            );
+          }
+          // Non-production fallback to local store if MySQL is unreachable
+        } finally {
+          if (conn && typeof conn.release === "function") {
+            conn.release();
           }
         }
-
-        return jsonResponse({ success: true, liked: true, likes: vid.likes });
       }
-      return jsonResponse({ success: false, error: "Video not found" }, 404);
+
+      const vid = store.videos.find((v) => v.id === videoId);
+      if (!vid) {
+        return jsonResponse({ success: false, error: "Video not found" }, 404);
+      }
+
+      if (vid.is_blocked) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "This video has been blocked by administrators for content moderation.",
+          },
+          403,
+        );
+      }
+
+      const rowOwner = String(vid.user_id || "").trim();
+      const isOwner = Boolean(
+        authUser &&
+        (rowOwner.toUpperCase() ===
+          String(authUser.user_id || "")
+            .trim()
+            .toUpperCase() ||
+          (authUser.id && rowOwner.toUpperCase() === String(authUser.id).trim().toUpperCase())),
+      );
+      const visibility = resolveStoredVisibilityFailClosed(vid.visibility);
+      const vType = String(vid.video_type || "free")
+        .trim()
+        .toLowerCase();
+      const pStatus =
+        String(vid.payment_status || "")
+          .trim()
+          .toLowerCase() || (vType === "free" ? "not_required" : "pending");
+      const isPaymentEligible =
+        (vType === "free" && (pStatus === "not_required" || pStatus === "paid")) ||
+        (vType === "premium" && pStatus === "paid");
+
+      if (visibility === "private" && !isOwner && !isAdmin) {
+        return jsonResponse(
+          {
+            success: false,
+            error: authUser
+              ? "Unauthorized: This private video is only accessible to its creator or administrators."
+              : "Authentication required to interact with this private video.",
+          },
+          authUser ? 403 : 401,
+        );
+      }
+      if (!isPaymentEligible && !isOwner && !isAdmin) {
+        return jsonResponse(
+          {
+            success: false,
+            error: authUser
+              ? "Unauthorized: Unpaid Sponsor videos are only accessible to their creator or administrators."
+              : "Authentication required to interact with this unpaid Sponsor video.",
+          },
+          authUser ? 403 : 401,
+        );
+      }
+
+      if (!effectiveUserId) {
+        return jsonResponse(
+          {
+            success: false,
+            error: "Authentication required. Please provide a valid Bearer session token.",
+          },
+          401,
+        );
+      }
+
+      if (!store.videoLikes) store.videoLikes = [];
+      const authAltId =
+        authUser &&
+        (!requestedUserId || requestedUserId.toUpperCase() === effectiveUserId.toUpperCase())
+          ? String(authUser.id || "").trim()
+          : "";
+      const normSet = new Set(
+        [effectiveUserId, authAltId].filter(Boolean).map((uid) => uid.toUpperCase()),
+      );
+      const alreadyLiked = store.videoLikes.some(
+        (l) =>
+          String(l.video_id) === videoId &&
+          normSet.has(
+            String(l.user_id || "")
+              .trim()
+              .toUpperCase(),
+          ),
+      );
+
+      let newLiked = false;
+      if (alreadyLiked) {
+        store.videoLikes = store.videoLikes.filter(
+          (l) =>
+            !(
+              String(l.video_id) === videoId &&
+              normSet.has(
+                String(l.user_id || "")
+                  .trim()
+                  .toUpperCase(),
+              )
+            ),
+        );
+        vid.likes = Math.max(0, (Number(vid.likes) || 0) - 1);
+        newLiked = false;
+      } else {
+        store.videoLikes.push({
+          id: Date.now(),
+          video_id: videoId,
+          user_id: effectiveUserId,
+          created_at: new Date().toISOString(),
+        });
+        vid.likes = Math.max(0, Number(vid.likes) || 0) + 1;
+        newLiked = true;
+      }
+      saveStore(store, env);
+
+      return jsonResponse({ success: true, liked: newLiked, likes: vid.likes });
     }
   }
 

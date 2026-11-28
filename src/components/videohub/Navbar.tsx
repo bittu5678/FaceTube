@@ -27,7 +27,6 @@ import { ThemeToggle } from "./ThemeToggle";
 import { ChannelAvatar } from "./ChannelAvatar";
 import { useAuth } from "@/lib/auth-context";
 import { resolveChannelAvatarUrl, resolveChannelDisplayName } from "@/lib/channel-branding";
-import { allVideos } from "@/data/videos";
 
 interface SpeechRecognitionResultItem {
   transcript: string;
@@ -80,49 +79,6 @@ interface NotificationItem {
   unread: boolean;
 }
 
-const INITIAL_NOTIFICATIONS: NotificationItem[] = [
-  {
-    id: "notif-1",
-    type: "subscriber",
-    title: "New Subscriber",
-    description: "Alex Rivera subscribed to your channel",
-    time: "2 min ago",
-    unread: true,
-  },
-  {
-    id: "notif-2",
-    type: "comment",
-    title: "New Comment",
-    description: "Marcus Bell commented: 'Brilliant explanation on state management!'",
-    time: "15 min ago",
-    unread: true,
-  },
-  {
-    id: "notif-3",
-    type: "like",
-    title: "New Like",
-    description: "Elena Rostova and 28 others liked your video",
-    time: "1 hour ago",
-    unread: true,
-  },
-  {
-    id: "notif-4",
-    type: "earnings",
-    title: "Sponsor Earnings",
-    description: "₹142.50 earned from ad placements and creator revenue",
-    time: "3 hours ago",
-    unread: true,
-  },
-  {
-    id: "notif-5",
-    type: "update",
-    title: "System Update",
-    description: "FaceTube 2.4 update: 4K 60fps streaming & creator tools are now live",
-    time: "1 day ago",
-    unread: true,
-  },
-];
-
 export function Navbar({
   onToggleSidebar,
   query,
@@ -135,7 +91,7 @@ export function Navbar({
   const { user, profile, dbUser, role, isAdmin, signOut } = useAuth();
   const [profileOpen, setProfileOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [searchInput, setSearchInput] = useState(query ?? "");
   const [isListening, setIsListening] = useState(false);
@@ -169,16 +125,7 @@ export function Navbar({
   const filteredSuggestions = useMemo(() => {
     const q = searchInput.trim().toLowerCase();
     if (!q) return popularSuggestions.slice(0, 6);
-    const set = new Set<string>();
-    for (const v of allVideos) {
-      if (v.title.toLowerCase().includes(q)) set.add(v.title);
-      if (v.category.toLowerCase().includes(q)) set.add(v.category);
-      if (v.channel.toLowerCase().includes(q)) set.add(v.channel);
-    }
-    for (const p of popularSuggestions) {
-      if (p.toLowerCase().includes(q)) set.add(p);
-    }
-    const list = Array.from(set);
+    const list = popularSuggestions.filter((p) => p.toLowerCase().includes(q));
     return list.length > 0 ? list.slice(0, 7) : popularSuggestions.slice(0, 5);
   }, [searchInput, popularSuggestions]);
 
@@ -682,62 +629,68 @@ export function Navbar({
                   </div>
 
                   <div className="max-h-[360px] overflow-y-auto divide-y divide-border/40 py-1">
-                    {notifications.map((n) => {
-                      const Icon =
-                        n.type === "subscriber"
-                          ? UserPlus
-                          : n.type === "comment"
-                            ? MessageSquare
-                            : n.type === "like"
-                              ? ThumbsUp
-                              : n.type === "earnings"
-                                ? DollarSign
-                                : Sparkles;
+                    {notifications.length === 0 ? (
+                      <div className="px-4 py-8 text-center text-xs text-muted-foreground">
+                        No notifications yet
+                      </div>
+                    ) : (
+                      notifications.map((n) => {
+                        const Icon =
+                          n.type === "subscriber"
+                            ? UserPlus
+                            : n.type === "comment"
+                              ? MessageSquare
+                              : n.type === "like"
+                                ? ThumbsUp
+                                : n.type === "earnings"
+                                  ? DollarSign
+                                  : Sparkles;
 
-                      const iconColor =
-                        n.type === "subscriber"
-                          ? "bg-brand/15 text-brand"
-                          : n.type === "comment"
-                            ? "bg-blue-500/15 text-blue-500"
-                            : n.type === "like"
-                              ? "bg-amber-500/15 text-amber-500"
-                              : n.type === "earnings"
-                                ? "bg-emerald-500/15 text-emerald-500"
-                                : "bg-purple-500/15 text-purple-500";
+                        const iconColor =
+                          n.type === "subscriber"
+                            ? "bg-brand/15 text-brand"
+                            : n.type === "comment"
+                              ? "bg-blue-500/15 text-blue-500"
+                              : n.type === "like"
+                                ? "bg-amber-500/15 text-amber-500"
+                                : n.type === "earnings"
+                                  ? "bg-emerald-500/15 text-emerald-500"
+                                  : "bg-purple-500/15 text-purple-500";
 
-                      return (
-                        <button
-                          key={n.id}
-                          type="button"
-                          onClick={() =>
-                            setNotifications((prev) =>
-                              prev.map((item) =>
-                                item.id === n.id ? { ...item, unread: false } : item,
-                              ),
-                            )
-                          }
-                          className={`flex w-full items-start gap-3 rounded-xl p-2.5 text-left transition hover:bg-secondary ${
-                            n.unread ? "bg-secondary/40 font-medium" : "opacity-80"
-                          }`}
-                        >
-                          <div
-                            className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${iconColor}`}
+                        return (
+                          <button
+                            key={n.id}
+                            type="button"
+                            onClick={() =>
+                              setNotifications((prev) =>
+                                prev.map((item) =>
+                                  item.id === n.id ? { ...item, unread: false } : item,
+                                ),
+                              )
+                            }
+                            className={`flex w-full items-start gap-3 rounded-xl p-2.5 text-left transition hover:bg-secondary ${
+                              n.unread ? "bg-secondary/40 font-medium" : "opacity-80"
+                            }`}
                           >
-                            <Icon className="h-4 w-4" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className="text-xs font-bold text-foreground">{n.title}</p>
-                            <p className="text-[11px] leading-relaxed text-muted-foreground line-clamp-2">
-                              {n.description}
-                            </p>
-                            <p className="mt-1 text-[10px] text-muted-foreground/75">{n.time}</p>
-                          </div>
-                          {n.unread && (
-                            <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-brand ring-2 ring-background" />
-                          )}
-                        </button>
-                      );
-                    })}
+                            <div
+                              className={`grid h-9 w-9 shrink-0 place-items-center rounded-full ${iconColor}`}
+                            >
+                              <Icon className="h-4 w-4" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="text-xs font-bold text-foreground">{n.title}</p>
+                              <p className="text-[11px] leading-relaxed text-muted-foreground line-clamp-2">
+                                {n.description}
+                              </p>
+                              <p className="mt-1 text-[10px] text-muted-foreground/75">{n.time}</p>
+                            </div>
+                            {n.unread && (
+                              <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-brand ring-2 ring-background" />
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
                   </div>
                 </div>
               )}

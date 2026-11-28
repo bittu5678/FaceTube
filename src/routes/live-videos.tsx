@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState, useCallback } from "react";
-import { Radio, Plus, Play, Calendar, Users, MessageSquare, DollarSign, Tv } from "lucide-react";
+import { Radio, Tv } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
 import { api } from "@/lib/api";
@@ -71,6 +71,7 @@ function LiveVideosPage() {
                 .slice(0, 2)
                 .toUpperCase() || "FT";
 
+            const viewersCount = Number(s.viewers_count) || 0;
             return {
               id: String(s.id),
               userId: s.user_id,
@@ -83,8 +84,8 @@ function LiveVideosPage() {
               status: s.status === "live" ? "Live Now" : "Upcoming",
               scheduledFor: s.status === "live" ? "Broadcasting live" : "Scheduled",
               duration: "Live",
-              views: `${s.viewers_count || 1} viewers`,
-              superchats: "₹655.00",
+              viewersCount,
+              views: `${viewersCount.toLocaleString()} ${viewersCount === 1 ? "viewer" : "viewers"}`,
               thumbnail:
                 s.thumbnail_url ||
                 "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=600",
@@ -100,6 +101,11 @@ function LiveVideosPage() {
   useEffect(() => {
     loadStreams();
   }, [loadStreams]);
+
+  const liveNowCount = streamList.filter((s) => s.status === "Live Now").length;
+  const upcomingCount = streamList.filter((s) => s.status === "Upcoming").length;
+  const totalLiveViewers = streamList.reduce((sum, s) => sum + (Number(s.viewersCount) || 0), 0);
+
   return (
     <VideoHubLayout>
       <div className="px-4 py-6 sm:px-6 lg:px-8 space-y-6">
@@ -114,7 +120,7 @@ function LiveVideosPage() {
                 Live Videos
               </h1>
               <p className="text-sm text-muted-foreground">
-                Live stream control room, RTMP keys, upcoming schedules, and SuperChat donations
+                Live stream control room, RTMP keys, and upcoming schedules
               </p>
             </div>
           </div>
@@ -138,25 +144,28 @@ function LiveVideosPage() {
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium">Total Live Streams</span>
-            <p className="text-2xl font-black text-emerald-400">3</p>
-            <p className="text-[11px] text-muted-foreground">1 Upcoming, 2 Past</p>
-          </div>
-          <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
-            <span className="text-xs text-muted-foreground font-medium">SuperChat Earnings</span>
-            <p className="text-2xl font-black text-foreground">₹655.00</p>
-            <p className="text-[11px] text-emerald-400 font-semibold">Live audience tips</p>
+            <p className="text-2xl font-black text-emerald-400">
+              {streamList.length.toLocaleString()}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              {liveNowCount} Live, {upcomingCount} Upcoming
+            </p>
           </div>
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium">Total Live Viewers</span>
-            <p className="text-2xl font-black text-foreground">37.0K</p>
-            <p className="text-[11px] text-muted-foreground">Peak concurrent 1,840</p>
+            <p className="text-2xl font-black text-foreground">
+              {totalLiveViewers.toLocaleString()}
+            </p>
+            <p className="text-[11px] text-muted-foreground">
+              Across active &amp; scheduled streams
+            </p>
           </div>
           <div className="rounded-2xl border border-border bg-card p-4 space-y-1 shadow-card">
             <span className="text-xs text-muted-foreground font-medium">Stream Health</span>
-            <p className="text-2xl font-black text-emerald-400">Excellent</p>
+            <p className="text-2xl font-black text-emerald-400">Ready</p>
             <p className="text-[11px] text-muted-foreground">1080p60 RTMP ready</p>
           </div>
         </div>
@@ -214,9 +223,7 @@ function LiveVideosPage() {
                   </div>
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-2 border-t border-border/60">
                     <span>{stream.scheduledFor}</span>
-                    {stream.superchats && (
-                      <span className="font-bold text-emerald-400">Tips: {stream.superchats}</span>
-                    )}
+                    <span className="font-medium text-foreground/80">{stream.views}</span>
                   </div>
 
                   {stream.userId &&

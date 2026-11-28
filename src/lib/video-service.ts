@@ -150,6 +150,8 @@ export interface UploadedVideo {
   duration: string;
   views: number;
   likes: number;
+  viewerLiked?: boolean | undefined;
+  liked?: boolean | undefined;
   paymentStatus: VideoPaymentStatus;
   paymentId?: string | undefined;
   paymentAmount: number; // e.g. 0 for free, 6 for premium
@@ -823,6 +825,12 @@ export async function fetchUploadedVideos(
           duration: d.duration || "0:00",
           views: Number(d.views) || 0,
           likes: Number(d.likes) || 0,
+          viewerLiked: Boolean(
+            d.viewerLiked ?? d.viewer_liked ?? (typeof d.liked === "boolean" ? d.liked : false),
+          ),
+          liked: Boolean(
+            d.viewerLiked ?? d.viewer_liked ?? (typeof d.liked === "boolean" ? d.liked : false),
+          ),
           paymentStatus: (d.payment_status ||
             d.paymentStatus ||
             "not_required") as VideoPaymentStatus,
@@ -1670,6 +1678,10 @@ export function convertUploadedToCatalogVideo(v: UploadedVideo): Video {
     channel_logo_url: channelLogoUrl,
     initials: computeChannelInitials(channelName, "FT"),
     views: `${(Number(v.views) || 0).toLocaleString()} views`,
+    viewsCount: Number(v.views) || 0,
+    likes: Number(v.likes) || 0,
+    liked: Boolean(v.viewerLiked ?? (typeof v.liked === "boolean" ? v.liked : false)),
+    viewerLiked: Boolean(v.viewerLiked ?? (typeof v.liked === "boolean" ? v.liked : false)),
     age: v.createdAt ? new Date(v.createdAt).toLocaleDateString() : "Recently uploaded",
     duration: v.duration || "0:00",
     thumb: thumbUrl,
@@ -1935,6 +1947,26 @@ export function convertVideoToShortItem(v: Video | UploadedVideo): ShortItem {
   const isPromotedRaw = (v as any).isPromoted ?? (v as any).is_promoted;
   const promotionExpiresAt = (v as any).promotionExpiresAt ?? (v as any).promotion_expires_at;
 
+  const numericViews =
+    typeof (v as any).viewsCount === "number"
+      ? Number((v as any).viewsCount) || 0
+      : typeof (v as any).views === "number"
+        ? Number((v as any).views) || 0
+        : parseCatalogViews((v as any).views);
+  const numericLikes = Number((v as any).likesCount ?? (v as any).likes) || 0;
+  const rawComments =
+    (v as any).commentsCount ??
+    (v as any).comments_count ??
+    (typeof (v as any).comments === "number" ? (v as any).comments : undefined);
+  const numericComments =
+    rawComments !== undefined && rawComments !== null ? Number(rawComments) || 0 : 0;
+
+  const viewerLiked = Boolean(
+    (v as any).viewerLiked ??
+    (v as any).viewer_liked ??
+    (typeof (v as any).liked === "boolean" ? (v as any).liked : false),
+  );
+
   return {
     id: String(v.id),
     title: v.title || "FaceTube Short",
@@ -1942,9 +1974,14 @@ export function convertVideoToShortItem(v: Video | UploadedVideo): ShortItem {
     creatorHandle: `@${channel.toLowerCase().replace(/[^a-z0-9]/g, "") || "creator"}`,
     initials: computeChannelInitials(channel, "FT"),
     views: views,
-    likes: (v as any).likes ? `${(v as any).likes.toLocaleString?.() || (v as any).likes}` : "1.2K",
-    comments: "48",
-    shares: "16",
+    viewsCount: numericViews,
+    likes: numericLikes.toLocaleString(),
+    likesCount: numericLikes,
+    liked: viewerLiked,
+    viewerLiked,
+    comments: numericComments.toLocaleString(),
+    commentsCount: numericComments,
+    shares: "",
     soundTrack: `${channel} · Original Audio`,
     tags: [(v as any).category || "Shorts"],
     thumb: thumbUrl,

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { ThumbsUp, Play, Shuffle, Trash2, Heart, Lock } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
-import { allVideos, type Video } from "@/data/videos";
+import type { Video } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
 import { getVideoBadgeLabels } from "@/lib/video-service";
 
@@ -22,7 +22,7 @@ export const Route = createFileRoute("/liked-videos")({
 
 function LikedVideosPage() {
   const { profile, user } = useAuth();
-  const [likedList, setLikedList] = useState<Video[]>(allVideos.slice(2, 9));
+  const [likedList, setLikedList] = useState<Video[]>([]);
 
   const handleUnlike = (id: string) => {
     setLikedList((prev) => prev.filter((v) => v.id !== id));

@@ -51,7 +51,6 @@ import { Navbar } from "@/components/videohub/Navbar";
 import { Sidebar } from "@/components/videohub/Sidebar";
 import { BottomNav } from "@/components/videohub/BottomNav";
 import { useAuth } from "@/lib/auth-context";
-import { allVideos } from "@/data/videos";
 import { api } from "@/lib/api";
 import {
   resolveStoredVideoVisibility,
@@ -1471,7 +1470,7 @@ ALTER TABLE uploaded_videos ADD COLUMN IF NOT EXISTS ad_earnings DECIMAL(12,2) D
                   <Film className="h-4 w-4" />
                 </span>
               </div>
-              <p className="mt-3 text-2xl font-black">{videos.length || allVideos.length}</p>
+              <p className="mt-3 text-2xl font-black">{videos.length}</p>
               <p className="mt-1 text-xs text-muted-foreground">
                 {videoCounts.blocked} blocked by admin
               </p>

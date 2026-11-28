@@ -201,23 +201,7 @@ describe("Phase 2B Step 3C: Frontend Watch Authorization, Cache Security & Visib
     assert.equal(await findVideoAsync("vid-outage-cached"), undefined);
   });
 
-  it("3. Static showcase fallback on 404 allows showcase videos only and never exposes seedVideos or localStorage", async () => {
-    const showcaseVideos = [
-      {
-        id: "v1",
-        title: "Showcase React Dashboard",
-        channel: "CodeCanvas",
-        initials: "CC",
-        views: "100 views",
-        age: "1 day ago",
-        duration: "10:00",
-        thumb: "/thumb-1.jpg",
-        tint: "oklch(0.45 0.15 27)",
-        category: "Coding",
-        description: "Showcase entry",
-      },
-    ];
-
+  it("3. HTTP 404 in resolveWatchVideo returns not_found and never falls back to staticShowcaseVideos, seedVideos, or localStorage", async () => {
     saveStoredVideos([
       makeVideo({ id: "vid-seed-005", title: "Seed In Local Cache" }),
       makeVideo({ id: "vid-local-only-999", title: "Local Only Cached Video" }),
@@ -227,16 +211,13 @@ describe("Phase 2B Step 3C: Frontend Watch Authorization, Cache Security & Visib
       throw Object.assign(new Error("Not Found"), { status: 404 });
     };
 
-    const showcaseRes = await resolveWatchVideo("v1", { showcaseVideos });
-    assert.equal(showcaseRes.status, "ok");
-    if (showcaseRes.status === "ok") {
-      assert.equal(showcaseRes.video.id, "v1");
-    }
-
-    assert.deepEqual(await resolveWatchVideo("vid-seed-005", { showcaseVideos }), {
+    assert.deepEqual(await resolveWatchVideo("v1"), {
       status: "not_found",
     });
-    assert.deepEqual(await resolveWatchVideo("vid-local-only-999", { showcaseVideos }), {
+    assert.deepEqual(await resolveWatchVideo("vid-seed-005"), {
+      status: "not_found",
+    });
+    assert.deepEqual(await resolveWatchVideo("vid-local-only-999"), {
       status: "not_found",
     });
   });

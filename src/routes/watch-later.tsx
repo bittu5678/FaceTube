@@ -3,7 +3,7 @@ import { useState } from "react";
 import { Clock, Play, Shuffle, Trash2, MoreVertical, Lock } from "lucide-react";
 import { VideoHubLayout } from "@/components/videohub/VideoHubLayout";
 import { ChannelAvatar } from "@/components/videohub/ChannelAvatar";
-import { recommended, type Video } from "@/data/videos";
+import type { Video } from "@/data/videos";
 import { useAuth } from "@/lib/auth-context";
 import { getVideoBadgeLabels } from "@/lib/video-service";
 
@@ -22,7 +22,7 @@ export const Route = createFileRoute("/watch-later")({
 
 function WatchLaterPage() {
   const { profile, user } = useAuth();
-  const [videos, setVideos] = useState<Video[]>(recommended);
+  const [videos, setVideos] = useState<Video[]>([]);
 
   const handleRemove = (id: string) => {
     setVideos((prev) => prev.filter((v) => v.id !== id));
