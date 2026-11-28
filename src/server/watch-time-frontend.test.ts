@@ -16,7 +16,8 @@ import type {
   WatchTimeHeartbeatRequest,
   WatchTimeHeartbeatResponse,
 } from "../lib/api.ts";
-import { handleApiRequest } from "./api-handler.ts";
+import { handleApiRequest, resetInMemoryStore } from "./api-handler.ts";
+import { setMysqlPoolForTesting } from "./mysql.ts";
 
 describe("FaceTube Watch Time Frontend, Dashboard Analytics & Red Play Icon Suite", () => {
   it("1. Guest exclusion: never calls session or heartbeat endpoints for unauthenticated viewers", async () => {
@@ -102,9 +103,7 @@ describe("FaceTube Watch Time Frontend, Dashboard Analytics & Red Play Icon Suit
           total_watched_seconds: payload.delta_seconds,
           is_qualified: true,
           status:
-            payload.event_type === "ended" || payload.event_type === "unload"
-              ? "ended"
-              : "active",
+            payload.event_type === "ended" || payload.event_type === "unload" ? "ended" : "active",
         };
       },
     });
@@ -221,6 +220,47 @@ describe("FaceTube Watch Time Frontend, Dashboard Analytics & Red Play Icon Suit
     assert.notEqual(attempts[2]?.idempotency_key, attempts[0]?.idempotency_key);
 
     await tracker.destroy();
+
+    // Terminal error (e.g., 429 SESSION_CAP_REACHED) clears pending retry & stops further heartbeats
+    let terminalCalls = 0;
+    const termTracker = createWatchTimeTracker({
+      videoId: "vid_terminal_1",
+      isAuthenticated: true,
+      nowMs: () => now,
+      isPageVisible: () => true,
+      setIntervalFn: () => 1 as unknown as ReturnType<typeof setInterval>,
+      clearIntervalFn: () => {},
+      startSession: async (videoId) => ({
+        success: true,
+        session_id: "sess_terminal_1",
+        video_id: videoId,
+        content_type: "long",
+        is_self_watch: false,
+        heartbeat_interval_seconds: 15,
+        max_delta_seconds: 30,
+        expires_at: new Date(now + 86400_000).toISOString(),
+      }),
+      sendHeartbeat: async () => {
+        terminalCalls += 1;
+        const err = new Error("Session cap reached") as Error & { status?: number; code?: string };
+        err.status = 429;
+        err.code = "SESSION_CAP_REACHED";
+        throw err;
+      },
+    });
+
+    await termTracker.setPlaying(true, 0);
+    now += 15_000;
+    await termTracker.tick();
+    assert.equal(terminalCalls, 1);
+    assert.equal(termTracker.getStateSnapshot().sessionTerminated, true);
+    assert.equal(termTracker.getStateSnapshot().hasPendingRetry, false);
+
+    now += 15_000;
+    await termTracker.tick();
+    await termTracker.setPlaying(false, 30);
+    assert.equal(terminalCalls, 1);
+    await termTracker.destroy();
   });
 
   it("4. Formats Dashboard analytics states accurately: empty data, no prior baseline, and real backend data", () => {
@@ -321,6 +361,9 @@ describe("FaceTube Watch Time Frontend, Dashboard Analytics & Red Play Icon Suit
     process.env["FACETUBE_DATA_DIR"] = tmpDir;
 
     try {
+      setMysqlPoolForTesting(null);
+      resetInMemoryStore();
+
       const creatorId = "FT_CREATOR_E2E";
       const viewerId = "FT_VIEWER_E2E";
       const creatorToken = "tok_" + crypto.randomBytes(8).toString("hex");
@@ -332,13 +375,19 @@ describe("FaceTube Watch Time Frontend, Dashboard Analytics & Red Play Icon Suit
         path.join(tmpDir, "facetube_store.json"),
         JSON.stringify({
           users: [
-            { id: "u_c", user_id: creatorId, name: "Creator E2E", email: "c@e2e.test", role: "user" },
+            {
+              id: "u_c",
+              user_id: creatorId,
+              name: "Creator E2E",
+              email: "c@e2e.test",
+              role: "user",
+            },
             { id: "u_v", user_id: viewerId, name: "Viewer E2E", email: "v@e2e.test", role: "user" },
           ],
-          sessions: [
-            { token: creatorToken, userId: creatorId, email: "c@e2e.test", createdAt: new Date().toISOString() },
-            { token: viewerToken, userId: viewerId, email: "v@e2e.test", createdAt: new Date().toISOString() },
-          ],
+          sessions: {
+            [creatorToken]: creatorId,
+            [viewerToken]: viewerId,
+          },
           videos: [
             {
               id: videoId,
@@ -383,6 +432,7 @@ describe("FaceTube Watch Time Frontend, Dashboard Analytics & Red Play Icon Suit
           },
         });
         const res = await handleApiRequest(req, env);
+        assert.ok(res, `Expected response for ${endpoint}`);
         return (await res.json()) as T;
       };
 
@@ -432,11 +482,13 @@ describe("FaceTube Watch Time Frontend, Dashboard Analytics & Red Play Icon Suit
       assert.equal(viewState.avgViewDurationLabel, "0m 30s");
       assert.equal(viewState.growthLabel, "No prior baseline");
     } finally {
+      setMysqlPoolForTesting(null);
       if (prevDataDir === undefined) {
         delete process.env["FACETUBE_DATA_DIR"];
       } else {
         process.env["FACETUBE_DATA_DIR"] = prevDataDir;
       }
+      resetInMemoryStore();
       await fs.rm(tmpDir, { recursive: true, force: true });
     }
   });
@@ -485,9 +537,7 @@ describe("FaceTube Watch Time Frontend, Dashboard Analytics & Red Play Icon Suit
       ),
     );
     assert.ok(
-      shortsSrc.includes(
-        '<Play className="h-8 w-8 translate-x-0.5 fill-current text-red-600" />',
-      ),
+      shortsSrc.includes('<Play className="h-8 w-8 translate-x-0.5 fill-current text-red-600" />'),
     );
   });
 });

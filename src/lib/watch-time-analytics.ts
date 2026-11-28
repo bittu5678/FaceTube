@@ -1,7 +1,4 @@
-import type {
-  WatchTimeAnalyticsHistoryPoint,
-  WatchTimeAnalyticsResponse,
-} from "./api";
+import type { WatchTimeAnalyticsHistoryPoint, WatchTimeAnalyticsResponse } from "./api";
 
 export type WatchTimePeriod = "7D" | "28D" | "30D" | "90D" | "12M";
 
@@ -30,7 +27,10 @@ export function formatWatchDurationCompact(secondsInput: number): string {
 }
 
 export function formatWatchTimeHours(totalWatchedSecondsInput: number): string {
-  const sec = Math.max(0, Math.floor(Number.isFinite(totalWatchedSecondsInput) ? totalWatchedSecondsInput : 0));
+  const sec = Math.max(
+    0,
+    Math.floor(Number.isFinite(totalWatchedSecondsInput) ? totalWatchedSecondsInput : 0),
+  );
   if (sec === 0) {
     return "0 hrs";
   }

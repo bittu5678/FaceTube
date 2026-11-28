@@ -356,10 +356,7 @@ export class WatchTimeTracker {
     return Math.min(this.maxDeltaSec, wholeSeconds, maxWallAllowed);
   }
 
-  public flush(
-    eventType: WatchTimeEventType,
-    options?: { keepalive?: boolean },
-  ): Promise<void> {
+  public flush(eventType: WatchTimeEventType, options?: { keepalive?: boolean }): Promise<void> {
     if (!this.isAuthenticated || !this.videoId) {
       return Promise.resolve();
     }
@@ -421,6 +418,7 @@ export class WatchTimeTracker {
         this.pendingRetryPayload = null;
         // Wait for the next interval unless terminating/pausing/hiding so wall-clock elapsed remains valid
         if (eventType === "heartbeat") {
+          this.accumulatedMs = 0;
           return;
         }
       }
@@ -489,6 +487,11 @@ export class WatchTimeTracker {
         if (response.status === "ended" && payload.event_type !== "ended") {
           this.sessionTerminated = true;
         }
+        return true;
+      }
+      if (response && response.code && TERMINAL_HEARTBEAT_CODES.has(response.code.toUpperCase())) {
+        this.sessionTerminated = true;
+        this.pendingRetryPayload = null;
         return true;
       }
       return false;
